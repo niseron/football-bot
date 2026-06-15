@@ -1,0 +1,6 @@
+.env
+picks.db
+picks_tracker.xlsx
+__pycache__/
+*.pyc
+*.pyo

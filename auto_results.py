@@ -17,13 +17,13 @@ from datetime import date, datetime, timedelta
 import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
-from openpyxl import load_workbook
 
 from excel_tracker import (
     EXCEL_PATH,
-    _style_picks_row,
     finalize_workbook,
+    get_pending_picks_rows,
     init_excel,
+    update_row_result,
 )
 
 load_dotenv()
@@ -234,46 +234,17 @@ def evaluate_pick(
 
 def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dict]]:
     """
-    Scan pending Excel rows, fetch API scores, update the workbook.
+    Scan pending Google Sheets rows, fetch API scores, update the sheet.
     Returns (stats_dict, list_of_newly_resolved_picks).
     """
     init_excel()
-    if not EXCEL_PATH.exists():
-        log.info("picks_tracker.xlsx not found — nothing to check.")
-        return {}, []
 
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb["Picks"]
-
-    cutoff   = date.today() - timedelta(days=lookback_days)
-    stats    = {"checked": 0, "updated": 0, "not_finished": 0,
-                "no_match": 0, "too_old": 0, "errors": 0}
-    changed  = False
+    stats   = {"checked": 0, "updated": 0, "not_finished": 0,
+               "no_match": 0, "too_old": 0, "errors": 0}
     resolved: list[dict] = []
 
-    # ── 1. Collect pending rows ───────────────────────────────────────────────
-    pending: list[dict] = []
-    for row in range(2, ws.max_row + 1):
-        if ws.cell(row=row, column=1).value is None:
-            break
-        if ws.cell(row=row, column=7).value:
-            continue
-
-        dt_val    = ws.cell(row=row, column=1).value
-        pick_date = dt_val.date() if isinstance(dt_val, datetime) else dt_val
-
-        if pick_date < cutoff:
-            stats["too_old"] += 1
-            continue
-
-        pending.append({
-            "row":      row,
-            "date":     pick_date,
-            "match":    ws.cell(row=row, column=2).value or "",
-            "bet_type": ws.cell(row=row, column=3).value or "",
-            "pick":     ws.cell(row=row, column=4).value or "",
-            "odds":     float(ws.cell(row=row, column=5).value or 1.0),
-        })
+    # ── 1. Collect pending rows from Google Sheets ────────────────────────────
+    pending = get_pending_picks_rows(lookback_days)
 
     if not pending:
         log.info("No pending picks in the lookback window.")
@@ -281,7 +252,7 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
 
     log.info("Found %d pending pick(s) to check.", len(pending))
 
-    # ── 2. Batch API calls by date ────────────────────────────────────────────
+    # ── 2. Batch football API calls by date ───────────────────────────────────
     api_cache: dict[date, list[dict]] = {}
     for p in pending:
         for dt in (p["date"], p["date"] + timedelta(days=1)):
@@ -294,17 +265,18 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
                 log.error("  API fetch failed for %s: %s", dt, exc)
                 api_cache[dt] = []
 
-    # ── 3. Evaluate and update ────────────────────────────────────────────────
+    # ── 3. Evaluate each pick and write results ───────────────────────────────
+    changed = False
     for p in pending:
         stats["checked"] += 1
-        row      = p["row"]
-        match    = p["match"]
-        bet_type = p["bet_type"]
-        pick     = p["pick"]
-        odds     = p["odds"]
+        sheet_row = p["sheet_row"]
+        match     = p["match"]
+        bet_type  = p["bet_type"]
+        pick      = p["pick"]
+        odds      = p["odds"]
 
         if " vs " not in match:
-            log.warning("Row %d: cannot parse match name '%s'", row, match)
+            log.warning("Cannot parse match name '%s'", match)
             stats["errors"] += 1
             continue
 
@@ -317,12 +289,12 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
                 break
 
         if api_match is None:
-            log.info("Row %d: '%s' — not found in API yet", row, match)
+            log.info("'%s' — not found in API yet", match)
             stats["no_match"] += 1
             continue
 
         if not api_match["status"].get("finished"):
-            log.info("Row %d: '%s' — match not finished yet", row, match)
+            log.info("'%s' — match not finished yet", match)
             stats["not_finished"] += 1
             continue
 
@@ -334,21 +306,17 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
         result = evaluate_pick(bet_type, pick, home_name, away_name, home_score, away_score)
 
         if result == "PENDING":
-            log.warning("Row %d: could not evaluate bet_type='%s' pick='%s'", row, bet_type, pick)
+            log.warning("Could not evaluate bet_type='%s' pick='%s'", bet_type, pick)
             stats["errors"] += 1
             continue
 
         pnl = round(odds - 1, 2) if result == "WIN" else (-1.0 if result == "LOSS" else 0.0)
-        ws.cell(row=row, column=7).value = result
-        ws.cell(row=row, column=8).value = pnl
-        _style_picks_row(ws, row, result)
+        update_row_result(sheet_row, result, pnl)
         changed = True
         stats["updated"] += 1
 
-        log.info(
-            "Row %d: %s [%s→%s]  score %d-%d  P&L %+.2f",
-            row, match, pick, result, home_score, away_score, pnl,
-        )
+        log.info("%s [%s→%s]  score %d-%d  P&L %+.2f",
+                 match, pick, result, home_score, away_score, pnl)
 
         resolved.append({
             "match":      match,
@@ -363,13 +331,12 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
             "away_score": away_score,
         })
 
-    # ── 4. Recalculate and save ───────────────────────────────────────────────
+    # ── 4. Recalculate running totals + refresh Summary ───────────────────────
     if changed:
-        finalize_workbook(wb)
-        wb.save(EXCEL_PATH)
-        log.info("Excel saved — %d row(s) updated.", stats["updated"])
+        finalize_workbook()
+        log.info("Google Sheets updated — %d row(s) written.", stats["updated"])
     else:
-        log.info("No changes — Excel unchanged.")
+        log.info("No changes.")
 
     return stats, resolved
 

@@ -1,100 +1,82 @@
 """
-Excel tracking layer for the football betting bot.
-Writes picks_tracker.xlsx alongside the SQLite picks.db.
+Google Sheets tracking layer for the football betting bot.
+Drop-in replacement for the openpyxl-based version — same public API.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
+import gspread
 
 log = logging.getLogger(__name__)
 
+# Kept so any script that imports EXCEL_PATH still compiles
 EXCEL_PATH = Path(__file__).parent / "picks_tracker.xlsx"
 
 PICKS_HEADERS = [
     "Date", "Match", "Bet Type", "Pick", "Odds",
     "Confidence", "Result", "Profit/Loss", "Running Total P&L",
 ]
-COL_WIDTHS = [14, 36, 24, 20, 8, 13, 10, 14, 20]
 
-# ── Styles ────────────────────────────────────────────────────────────────────
-_HDR_FILL    = PatternFill("solid", fgColor="1F4E79")
-_ALT_FILL    = PatternFill("solid", fgColor="D6E4F0")
-_WIN_FILL    = PatternFill("solid", fgColor="C6EFCE")
-_LOSS_FILL   = PatternFill("solid", fgColor="FFC7CE")
-_VOID_FILL   = PatternFill("solid", fgColor="FFEB9C")
-_SUM_FILL    = PatternFill("solid", fgColor="2E75B6")
-_SUM_SEC     = PatternFill("solid", fgColor="BDD7EE")
-_HDR_FONT    = Font(bold=True, color="FFFFFF", name="Calibri", size=11)
-_BODY_FONT   = Font(name="Calibri", size=11)
-_BOLD_FONT   = Font(bold=True, name="Calibri", size=11)
-_SUM_HDR_FONT = Font(bold=True, color="FFFFFF", name="Calibri", size=12)
+_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-_PNL_FMT  = '+0.00;-0.00;"0.00"'
-_DATE_FMT = "DD-MMM-YYYY"
+_client: gspread.Client | None = None
 
 
-# ── Workbook bootstrap ────────────────────────────────────────────────────────
+# ── Connection ────────────────────────────────────────────────────────────────
 
-def _apply_header(ws, n_cols: int) -> None:
-    for col in range(1, n_cols + 1):
-        c = ws.cell(row=1, column=col)
-        c.font = _HDR_FONT
-        c.fill = _HDR_FILL
-        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    ws.row_dimensions[1].height = 22
-
-
-def _apply_picks_cols(ws) -> None:
-    ws.freeze_panes = "A2"
-    for i, w in enumerate(COL_WIDTHS, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(PICKS_HEADERS))}1"
+def _get_client() -> gspread.Client:
+    global _client
+    if _client is None:
+        creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON", "{}"))
+        _client = gspread.service_account_from_dict(creds_dict, scopes=_SCOPES)
+    return _client
 
 
-def _style_picks_row(ws, row: int, result: str | None) -> None:
-    fill = (
-        _WIN_FILL  if result == "WIN"  else
-        _LOSS_FILL if result == "LOSS" else
-        _VOID_FILL if result == "VOID" else
-        _ALT_FILL  if row % 2 == 0    else None
-    )
-    for col in range(1, len(PICKS_HEADERS) + 1):
-        c = ws.cell(row=row, column=col)
-        c.font = _BODY_FONT
-        if fill:
-            c.fill = fill
-        if col == 1:
-            c.number_format = _DATE_FMT
-            c.alignment = Alignment(horizontal="center")
-        elif col in (5, 8, 9):
-            c.number_format = _PNL_FMT
-            c.alignment = Alignment(horizontal="center")
-        elif col == 7:
-            c.alignment = Alignment(horizontal="center")
+def _get_spreadsheet() -> gspread.Spreadsheet:
+    return _get_client().open_by_key(os.environ.get("GOOGLE_SHEETS_ID", ""))
 
+
+def _picks_ws() -> gspread.Worksheet:
+    return _get_spreadsheet().worksheet("Picks")
+
+
+# ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 def init_excel() -> None:
-    if EXCEL_PATH.exists():
+    """Ensure Picks and Summary sheets exist with correct headers."""
+    try:
+        ss = _get_spreadsheet()
+    except Exception as exc:
+        log.error("Cannot connect to Google Sheets: %s", exc)
         return
-    wb = Workbook()
-    wb.remove(wb.active)
 
-    ws_p = wb.create_sheet("Picks")
-    for i, h in enumerate(PICKS_HEADERS, 1):
-        ws_p.cell(row=1, column=i, value=h)
-    _apply_header(ws_p, len(PICKS_HEADERS))
-    _apply_picks_cols(ws_p)
+    titles = {ws.title for ws in ss.worksheets()}
 
-    wb.create_sheet("Summary")
-    wb.save(EXCEL_PATH)
-    log.info("Created %s", EXCEL_PATH)
+    if "Picks" not in titles:
+        ws = ss.add_worksheet("Picks", rows=1000, cols=len(PICKS_HEADERS))
+        ws.append_row(PICKS_HEADERS, value_input_option="RAW")
+        log.info("Created 'Picks' sheet with headers")
+
+    if "Summary" not in titles:
+        ss.add_worksheet("Summary", rows=30, cols=2)
+        log.info("Created 'Summary' sheet")
+
+    # Remove the default blank sheet if it's still there
+    for ws in ss.worksheets():
+        if ws.title == "Sheet1" and len(ss.worksheets()) > 2:
+            try:
+                ss.del_worksheet(ws)
+            except Exception:
+                pass
 
 
 # ── Write a new pick ──────────────────────────────────────────────────────────
@@ -108,184 +90,201 @@ def log_to_excel(
     confidence: str,
     pick_date: str | None = None,
 ) -> None:
-    init_excel()
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb["Picks"]
-
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
+    date_str = dt.strftime("%d-%b-%Y")
     target_date = dt.date()
 
-    for r in range(2, ws.max_row + 1):
-        existing_dt = ws.cell(row=r, column=1).value
-        if existing_dt is None:
-            break
-        existing_date = existing_dt.date() if isinstance(existing_dt, datetime) else None
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return
+
+    for row in rows[1:]:
+        if not row or not row[0]:
+            continue
+        try:
+            existing = datetime.strptime(row[0], "%d-%b-%Y").date()
+        except ValueError:
+            continue
         if (
-            existing_date == target_date
-            and ws.cell(row=r, column=2).value == match
-            and ws.cell(row=r, column=3).value == bet_type
-            and ws.cell(row=r, column=4).value == pick
+            existing == target_date
+            and len(row) > 3
+            and row[1] == match
+            and row[2] == bet_type
+            and row[3] == pick
         ):
-            log.info("Excel: skipping duplicate '%s — %s'", match, pick)
+            log.info("Sheets: skipping duplicate '%s — %s'", match, pick)
             return
 
-    row = ws.max_row + 1
-
-    ws.cell(row=row, column=1, value=dt)
-    ws.cell(row=row, column=2, value=match)
-    ws.cell(row=row, column=3, value=bet_type)
-    ws.cell(row=row, column=4, value=pick)
-    ws.cell(row=row, column=5, value=round(float(odds), 2))
-    ws.cell(row=row, column=6, value=confidence)
-    # columns 7-9 (Result, P/L, Running) stay blank until result is entered
-
-    _style_picks_row(ws, row, None)
-    wb.save(EXCEL_PATH)
-    log.info("Excel: logged '%s — %s'", match, pick)
+    new_row = [date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", ""]
+    try:
+        ws.append_row(new_row, value_input_option="USER_ENTERED")
+        log.info("Sheets: logged '%s — %s'", match, pick)
+    except Exception as exc:
+        log.error("Sheets write failed: %s", exc)
 
 
-# ── Running total + summary refresh ──────────────────────────────────────────
+# ── Pending rows (used by auto_results) ──────────────────────────────────────
 
-def _recalculate_running_total(ws) -> None:
-    running = 0.0
-    for row in range(2, ws.max_row + 1):
-        result = ws.cell(row=row, column=7).value
-        pnl    = ws.cell(row=row, column=8).value
-        rt_c   = ws.cell(row=row, column=9)
+def get_pending_picks_rows(lookback_days: int = 7) -> list[dict]:
+    """Return rows with no Result within the lookback window, each with its 1-based sheet row."""
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return []
 
-        if result in ("WIN", "LOSS", "VOID") and pnl is not None:
-            running += pnl
-            rt_c.value = round(running, 2)
-            rt_c.number_format = _PNL_FMT
-            rt_c.alignment = Alignment(horizontal="center")
-            ws.cell(row=row, column=8).number_format = _PNL_FMT
-        else:
-            rt_c.value = None
+    cutoff = date.today() - timedelta(days=lookback_days)
+    pending = []
 
-
-def _refresh_summary(wb: Workbook) -> None:
-    ws_picks = wb["Picks"]
-    ws_sum   = wb["Summary"]
-
-    # Collect all pick rows
-    rows: list[dict] = []
-    for r in ws_picks.iter_rows(min_row=2, values_only=True):
-        if r[0] is None:
-            break
-        rows.append({
-            "match": r[1], "bet_type": r[2], "pick": r[3],
-            "odds": r[4], "confidence": r[5],
-            "result": r[6], "pnl": r[7],
+    for i, row in enumerate(rows[1:], start=2):  # row 1 = header; Sheets rows are 1-based
+        if not row or not row[0]:
+            continue
+        if len(row) >= 7 and row[6]:  # Result column already set
+            continue
+        try:
+            pick_date = datetime.strptime(row[0], "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        if pick_date < cutoff:
+            continue
+        pending.append({
+            "sheet_row": i,
+            "date":      pick_date,
+            "match":     row[1] if len(row) > 1 else "",
+            "bet_type":  row[2] if len(row) > 2 else "",
+            "pick":      row[3] if len(row) > 3 else "",
+            "odds":      float(row[4]) if len(row) > 4 and row[4] else 1.0,
         })
+    return pending
 
-    settled = [r for r in rows if r["result"] in ("WIN", "LOSS", "VOID")]
-    wins    = [r for r in settled if r["result"] == "WIN"]
-    losses  = [r for r in settled if r["result"] == "LOSS"]
-    voids   = [r for r in settled if r["result"] == "VOID"]
-    pending = [r for r in rows if not r["result"]]
 
-    total_pnl = round(sum(r["pnl"] or 0 for r in settled if r["pnl"] is not None), 2)
+# ── Write result for one row ──────────────────────────────────────────────────
+
+def update_row_result(sheet_row: int, result: str, pnl: float) -> None:
+    """Write Result and Profit/Loss to a specific sheet row. Call finalize_workbook() when done."""
+    try:
+        ws = _picks_ws()
+        ws.batch_update([
+            {"range": f"G{sheet_row}", "values": [[result]]},
+            {"range": f"H{sheet_row}", "values": [[round(pnl, 2)]]},
+        ])
+    except Exception as exc:
+        log.error("Sheets update_row_result failed: %s", exc)
+
+
+# ── Recalculate running totals + Summary ──────────────────────────────────────
+
+def _recalculate_running_total(ws: gspread.Worksheet) -> None:
+    rows = ws.get_all_values()
+    running = 0.0
+    updates = []
+    for i, row in enumerate(rows[1:], start=2):
+        result  = row[6] if len(row) > 6 else ""
+        pnl_str = row[7] if len(row) > 7 else ""
+        if result in ("WIN", "LOSS", "VOID") and pnl_str:
+            try:
+                running += float(pnl_str)
+                updates.append({"range": f"I{i}", "values": [[round(running, 2)]]})
+                continue
+            except ValueError:
+                pass
+        updates.append({"range": f"I{i}", "values": [[""]]})
+    if updates:
+        ws.batch_update(updates)
+
+
+def _refresh_summary(ss: gspread.Spreadsheet) -> None:
+    rows = ss.worksheet("Picks").get_all_values()[1:]
+
+    def _pnl(row: list) -> float:
+        try:
+            return float(row[7]) if len(row) > 7 and row[7] else 0.0
+        except ValueError:
+            return 0.0
+
+    settled = [r for r in rows if len(r) > 6 and r[6] in ("WIN", "LOSS", "VOID")]
+    wins    = [r for r in settled if r[6] == "WIN"]
+    losses  = [r for r in settled if r[6] == "LOSS"]
+    voids   = [r for r in settled if r[6] == "VOID"]
+    pending = [r for r in rows if not (len(r) > 6 and r[6])]
+
+    total_pnl = round(sum(_pnl(r) for r in settled), 2)
     win_rate  = round(len(wins) / len(settled) * 100, 1) if settled else 0.0
 
-    # Best bet type
     bt_pnl: dict[str, float] = defaultdict(float)
     for r in settled:
-        if r["pnl"] is not None:
-            bt_pnl[r["bet_type"]] += r["pnl"]
+        bt_pnl[r[2]] += _pnl(r)
     best_bt     = max(bt_pnl, key=bt_pnl.get) if bt_pnl else "N/A"
     best_bt_pnl = round(bt_pnl.get(best_bt, 0), 2)
 
-    # Best confidence level
     conf_pnl: dict[str, float] = defaultdict(float)
     for r in settled:
-        if r["pnl"] is not None:
-            conf_pnl[r["confidence"]] += r["pnl"]
+        conf_pnl[r[5]] += _pnl(r)
     best_conf     = max(conf_pnl, key=conf_pnl.get) if conf_pnl else "N/A"
     best_conf_pnl = round(conf_pnl.get(best_conf, 0), 2)
 
-    # Clear and rewrite Summary sheet
-    ws_sum.delete_rows(1, ws_sum.max_row + 1)
-    ws_sum.column_dimensions["A"].width = 32
-    ws_sum.column_dimensions["B"].width = 18
-
-    def _row(label: str, value, bold_label: bool = False,
-             section_hdr: bool = False, sub: bool = False):
-        return (label, value, bold_label, section_hdr, sub)
-
-    sections = [
-        _row("PERFORMANCE SUMMARY", "",         section_hdr=True),
-        _row("",                    ""),
-        _row("Total picks",         len(rows),  bold_label=True),
-        _row("  Wins",              len(wins)),
-        _row("  Losses",            len(losses)),
-        _row("  Voids",             len(voids)),
-        _row("  Pending",           len(pending)),
-        _row("",                    ""),
-        _row("Win rate",            f"{win_rate}%",    bold_label=True),
-        _row("Total P&L (units)",   total_pnl,         bold_label=True),
-        _row("",                    ""),
-        _row("Best bet type",       best_bt,           bold_label=True),
-        _row("  P&L from this type",best_bt_pnl,       sub=True),
-        _row("",                    ""),
-        _row("Best confidence level", best_conf,       bold_label=True),
-        _row("  P&L from this level", best_conf_pnl,  sub=True),
+    data = [
+        ["PERFORMANCE SUMMARY", ""],
+        ["", ""],
+        ["Total picks",           len(rows)],
+        ["  Wins",                len(wins)],
+        ["  Losses",              len(losses)],
+        ["  Voids",               len(voids)],
+        ["  Pending",             len(pending)],
+        ["", ""],
+        ["Win rate",              f"{win_rate}%"],
+        ["Total P&L (units)",     total_pnl],
+        ["", ""],
+        ["Best bet type",         best_bt],
+        ["  P&L from this type",  best_bt_pnl],
+        ["", ""],
+        ["Best confidence level",   best_conf],
+        ["  P&L from this level",   best_conf_pnl],
     ]
 
-    for ri, (label, value, bold_label, section_hdr, sub) in enumerate(sections, 1):
-        ca = ws_sum.cell(row=ri, column=1, value=label)
-        cb = ws_sum.cell(row=ri, column=2, value=value)
-
-        if section_hdr:
-            ca.font = _SUM_HDR_FONT
-            for col in (1, 2):
-                ws_sum.cell(row=ri, column=col).fill = _SUM_FILL
-            ws_sum.row_dimensions[ri].height = 22
-        elif bold_label:
-            ca.font = _BOLD_FONT
-            cb.font = _BODY_FONT
-        elif sub:
-            ca.font = Font(name="Calibri", size=11, color="595959")
-            cb.font = Font(name="Calibri", size=11, color="595959")
-        else:
-            ca.font = _BODY_FONT
-            cb.font = _BODY_FONT
-
-        if isinstance(value, float):
-            cb.number_format = _PNL_FMT
+    ws_sum = ss.worksheet("Summary")
+    ws_sum.clear()
+    ws_sum.update("A1", data, value_input_option="USER_ENTERED")
 
 
-# ── Public helper used by auto_results ───────────────────────────────────────
+def finalize_workbook(wb=None) -> None:
+    """Recalculate running totals and refresh Summary. wb param accepted for backwards compat."""
+    try:
+        ss = _get_spreadsheet()
+        _recalculate_running_total(ss.worksheet("Picks"))
+        _refresh_summary(ss)
+    except Exception as exc:
+        log.error("finalize_workbook failed: %s", exc)
 
-def finalize_workbook(wb: Workbook) -> None:
-    """Recalculate running totals and refresh Summary sheet, then the caller saves."""
-    _recalculate_running_total(wb["Picks"])
-    _refresh_summary(wb)
 
-
-# ── Update a result ───────────────────────────────────────────────────────────
+# ── Manual result update ──────────────────────────────────────────────────────
 
 def update_result(match_query: str, pick_query: str, result: str) -> bool:
-    """
-    Find the most recent PENDING pick where match and pick/bet_type
-    match the given queries (case-insensitive, partial). Returns True on success.
-    """
     result = result.upper()
     if result not in ("WIN", "LOSS", "VOID"):
         raise ValueError(f"Result must be WIN, LOSS or VOID — got '{result}'")
 
-    init_excel()
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb["Picks"]
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return False
 
     mq = match_query.lower().strip()
     pq = pick_query.lower().strip()
 
     target_row = None
-    for row in range(ws.max_row, 1, -1):   # bottom-up → most recent first
-        m_val  = (ws.cell(row=row, column=2).value or "").lower()
-        bt_val = (ws.cell(row=row, column=3).value or "").lower()
-        p_val  = (ws.cell(row=row, column=4).value or "").lower()
-        res    =  ws.cell(row=row, column=7).value
+    for i in range(len(rows) - 1, 0, -1):  # bottom-up → most recent first
+        row    = rows[i]
+        m_val  = (row[1] if len(row) > 1 else "").lower()
+        bt_val = (row[2] if len(row) > 2 else "").lower()
+        p_val  = (row[3] if len(row) > 3 else "").lower()
+        res    =  row[6] if len(row) > 6 else ""
 
         match_ok = mq in m_val or m_val in mq
         pick_ok  = (pq in p_val or p_val in pq or
@@ -293,25 +292,23 @@ def update_result(match_query: str, pick_query: str, result: str) -> bool:
                     pq in f"{bt_val} {p_val}")
 
         if match_ok and pick_ok and not res:
-            target_row = row
+            target_row = i + 1  # convert to 1-based sheet row
             break
 
     if target_row is None:
         print(f"No pending pick found matching '{match_query}' / '{pick_query}'")
         return False
 
-    odds = float(ws.cell(row=target_row, column=5).value or 1.0)
-    pnl  = round(odds - 1, 2) if result == "WIN" else (-1.0 if result == "LOSS" else 0.0)
+    try:
+        odds = float(rows[target_row - 1][4]) if len(rows[target_row - 1]) > 4 and rows[target_row - 1][4] else 1.0
+    except ValueError:
+        odds = 1.0
+    pnl = round(odds - 1, 2) if result == "WIN" else (-1.0 if result == "LOSS" else 0.0)
 
-    ws.cell(row=target_row, column=7).value = result
-    ws.cell(row=target_row, column=8).value = pnl
-    _style_picks_row(ws, target_row, result)
-    _recalculate_running_total(ws)
-    _refresh_summary(wb)
+    update_row_result(target_row, result, pnl)
+    finalize_workbook()
 
-    wb.save(EXCEL_PATH)
-
-    match_name = ws.cell(row=target_row, column=2).value
+    match_name = rows[target_row - 1][1] if len(rows[target_row - 1]) > 1 else "?"
     sign = "+" if pnl >= 0 else ""
     print(f"Updated  : {match_name}")
     print(f"Result   : {result}")
@@ -319,47 +316,59 @@ def update_result(match_query: str, pick_query: str, result: str) -> bool:
     return True
 
 
-# ── Weekly data extraction ────────────────────────────────────────────────────
+# ── Weekly data ───────────────────────────────────────────────────────────────
 
 def get_weekly_data() -> dict:
-    """Return this week's (Mon–Sun UTC) stats from the Excel file."""
-    if not EXCEL_PATH.exists():
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()[1:]
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
         return {}
 
     today    = date.today()
     week_mon = today - timedelta(days=today.weekday())
     week_sun = week_mon + timedelta(days=6)
 
-    wb = load_workbook(EXCEL_PATH, read_only=True, data_only=True)
-    ws = wb["Picks"]
-
-    all_rows: list[dict] = []
+    all_rows:  list[dict] = []
     week_rows: list[dict] = []
 
-    for r in ws.iter_rows(min_row=2, values_only=True):
-        if r[0] is None:
-            break
-        dt = r[0].date() if isinstance(r[0], datetime) else (r[0] or date.today())
-        row = {
-            "date": dt, "match": r[1], "bet_type": r[2], "pick": r[3],
-            "odds": r[4], "confidence": r[5], "result": r[6],
-            "pnl": r[7], "running": r[8],
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        try:
+            dt = datetime.strptime(row[0], "%d-%b-%Y").date()
+        except ValueError:
+            continue
+
+        def _safe_float(val: str) -> float | None:
+            try:
+                return float(val) if val else None
+            except ValueError:
+                return None
+
+        r = {
+            "date":       dt,
+            "match":      row[1] if len(row) > 1 else "",
+            "bet_type":   row[2] if len(row) > 2 else "",
+            "pick":       row[3] if len(row) > 3 else "",
+            "odds":       _safe_float(row[4] if len(row) > 4 else "") or 0.0,
+            "confidence": row[5] if len(row) > 5 else "",
+            "result":     row[6] if len(row) > 6 else "",
+            "pnl":        _safe_float(row[7] if len(row) > 7 else ""),
+            "running":    _safe_float(row[8] if len(row) > 8 else ""),
         }
-        all_rows.append(row)
+        all_rows.append(r)
         if week_mon <= dt <= week_sun:
-            week_rows.append(row)
+            week_rows.append(r)
 
-    wb.close()
-
-    settled = [r for r in week_rows if r["result"] in ("WIN", "LOSS", "VOID")]
-    wins    = [r for r in settled if r["result"] == "WIN"]
-    losses  = [r for r in settled if r["result"] == "LOSS"]
-    pending = [r for r in week_rows if not r["result"]]
+    settled  = [r for r in week_rows if r["result"] in ("WIN", "LOSS", "VOID")]
+    wins     = [r for r in settled if r["result"] == "WIN"]
+    losses   = [r for r in settled if r["result"] == "LOSS"]
+    pending  = [r for r in week_rows if not r["result"]]
     pnl_week = round(sum(r["pnl"] or 0 for r in settled if r["pnl"] is not None), 2)
     win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0.0
-
     best_pick = max(wins, key=lambda r: r["pnl"] or 0) if wins else None
-
     running_total = next(
         (r["running"] for r in reversed(all_rows) if r.get("running") is not None), 0.0
     )
@@ -379,44 +388,47 @@ def get_weekly_data() -> dict:
     }
 
 
-# ── Deduplicate existing Excel data ──────────────────────────────────────────
+# ── Deduplicate ───────────────────────────────────────────────────────────────
 
 def cleanup_duplicates() -> int:
-    """Remove duplicate pick rows (same date, match, bet_type, pick). Returns rows removed."""
-    if not EXCEL_PATH.exists():
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
         return 0
 
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb["Picks"]
-
     seen: set[tuple] = set()
-    rows_to_delete: list[int] = []
+    to_delete: list[int] = []
 
-    for row in range(2, ws.max_row + 1):
-        date_val = ws.cell(row=row, column=1).value
-        if date_val is None:
-            break
-        key_date = date_val.date().isoformat() if isinstance(date_val, datetime) else str(date_val)
+    for i, row in enumerate(rows[1:], start=2):
+        if not row or not row[0]:
+            continue
         key = (
-            key_date,
-            str(ws.cell(row=row, column=2).value or ""),
-            str(ws.cell(row=row, column=3).value or ""),
-            str(ws.cell(row=row, column=4).value or ""),
+            row[0],
+            row[1] if len(row) > 1 else "",
+            row[2] if len(row) > 2 else "",
+            row[3] if len(row) > 3 else "",
         )
         if key in seen:
-            rows_to_delete.append(row)
+            to_delete.append(i)
         else:
             seen.add(key)
 
-    for row in reversed(rows_to_delete):
-        ws.delete_rows(row)
+    for row_idx in reversed(to_delete):
+        ws.delete_rows(row_idx)
 
-    if rows_to_delete:
-        _recalculate_running_total(ws)
-        _refresh_summary(wb)
-        wb.save(EXCEL_PATH)
-        log.info("Removed %d duplicate row(s) from %s", len(rows_to_delete), EXCEL_PATH)
+    if to_delete:
+        finalize_workbook()
+        log.info("Removed %d duplicate row(s)", len(to_delete))
     else:
-        log.info("No duplicates found in %s", EXCEL_PATH)
+        log.info("No duplicates found")
 
-    return len(rows_to_delete)
+    return len(to_delete)
+
+
+# ── Compatibility stub ────────────────────────────────────────────────────────
+
+def _style_picks_row(ws, row: int, result: str | None) -> None:
+    """No-op: row colouring is handled via Google Sheets conditional formatting, not Python."""
+    pass

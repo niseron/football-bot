@@ -31,7 +31,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 HOST          = "free-api-live-football-data.p.rapidapi.com"
-HEADERS       = {"x-rapidapi-host": HOST, "x-rapidapi-key": os.getenv("RAPIDAPI_KEY")}
 LOOKBACK_DAYS = 7
 
 
@@ -121,9 +120,10 @@ def _format_result_notification(r: dict) -> str:
 # ── API ───────────────────────────────────────────────────────────────────────
 
 def _fetch_matches(dt: date) -> list[dict]:
+    headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY")}
     r = requests.get(
         f"https://{HOST}/football-get-matches-by-date",
-        headers=HEADERS,
+        headers=headers,
         params={"date": dt.strftime("%Y%m%d")},
         timeout=15,
     )

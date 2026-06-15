@@ -18,10 +18,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 
 # Single-ID domestic leagues (fotmob-based IDs)
 LEAGUES = {
@@ -80,7 +79,6 @@ WC_2026_PARTICIPANTS: set[str] = {
 _YOUTH_RE = re.compile(r"\bU[\s-]?1[5-9]\b|\bU[\s-]?2[0-3]\b|youth|junior", re.IGNORECASE)
 
 RAPIDAPI_HOST = "free-api-live-football-data.p.rapidapi.com"
-HEADERS = {"x-rapidapi-host": RAPIDAPI_HOST, "x-rapidapi-key": RAPIDAPI_KEY}
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -98,12 +96,13 @@ def _is_upcoming(match: dict) -> bool:
 
 def fetch_upcoming_matches() -> list[dict]:
     """Fetch all matches in the next 48 hours (today + tomorrow UTC)."""
+    headers = {"x-rapidapi-host": RAPIDAPI_HOST, "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY")}
     matches: list[dict] = []
     for offset in range(2):
         dt = datetime.now(timezone.utc) + timedelta(days=offset)
         date_str = dt.strftime("%Y%m%d")
         url = f"https://{RAPIDAPI_HOST}/football-get-matches-by-date"
-        resp = requests.get(url, headers=HEADERS, params={"date": date_str}, timeout=15)
+        resp = requests.get(url, headers=headers, params={"date": date_str}, timeout=15)
         resp.raise_for_status()
         day_matches = resp.json().get("response", {}).get("matches", [])
         log.info("API: fetched %d matches for %s", len(day_matches), dt.strftime("%Y-%m-%d"))

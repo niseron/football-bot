@@ -20,8 +20,11 @@ EXCEL_PATH = Path(__file__).parent / "picks_tracker.xlsx"
 
 PICKS_HEADERS = [
     "Date", "Match", "Bet Type", "Pick", "Odds",
-    "Confidence", "Result", "Profit/Loss", "Running Total P&L",
+    "Confidence", "Result", "Profit/Loss", "Running Total P&L", "Bankroll (€)",
 ]
+
+STARTING_BANKROLL = 100.0   # €
+UNIT_STAKE        = 10.0    # € per pick (1 unit)
 
 _SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -65,6 +68,14 @@ def init_excel() -> None:
         ws = ss.add_worksheet("Picks", rows=1000, cols=len(PICKS_HEADERS))
         ws.append_row(PICKS_HEADERS, value_input_option="RAW")
         log.info("Created 'Picks' sheet with headers")
+    else:
+        # Add Bankroll column header if the sheet pre-dates this feature
+        ws = ss.worksheet("Picks")
+        header = ws.row_values(1)
+        if len(header) < len(PICKS_HEADERS):
+            ws.resize(cols=len(PICKS_HEADERS))
+            ws.update_cell(1, len(PICKS_HEADERS), PICKS_HEADERS[-1])
+            log.info("Added 'Bankroll (€)' column header to existing Picks sheet")
 
     if "Summary" not in titles:
         ss.add_worksheet("Summary", rows=30, cols=2)
@@ -118,7 +129,7 @@ def log_to_excel(
             log.info("Sheets: skipping duplicate '%s — %s'", match, pick)
             return
 
-    new_row = [date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", ""]
+    new_row = [date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", "", ""]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
         log.info("Sheets: logged '%s — %s'", match, pick)
@@ -180,19 +191,24 @@ def update_row_result(sheet_row: int, result: str, pnl: float) -> None:
 
 def _recalculate_running_total(ws: gspread.Worksheet) -> None:
     rows = ws.get_all_values()
-    running = 0.0
+    running_units = 0.0
+    bankroll      = STARTING_BANKROLL
     updates = []
     for i, row in enumerate(rows[1:], start=2):
         result  = row[6] if len(row) > 6 else ""
         pnl_str = row[7] if len(row) > 7 else ""
         if result in ("WIN", "LOSS", "VOID") and pnl_str:
             try:
-                running += float(pnl_str)
-                updates.append({"range": f"I{i}", "values": [[round(running, 2)]]})
+                pnl_units      = float(pnl_str)
+                running_units += pnl_units
+                bankroll      += pnl_units * UNIT_STAKE
+                updates.append({"range": f"I{i}", "values": [[round(running_units, 2)]]})
+                updates.append({"range": f"J{i}", "values": [[round(bankroll, 2)]]})
                 continue
             except ValueError:
                 pass
         updates.append({"range": f"I{i}", "values": [[""]]})
+        updates.append({"range": f"J{i}", "values": [[""]]})
     if updates:
         ws.batch_update(updates)
 
@@ -212,8 +228,20 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
     voids   = [r for r in settled if r[6] == "VOID"]
     pending = [r for r in rows if not (len(r) > 6 and r[6])]
 
-    total_pnl = round(sum(_pnl(r) for r in settled), 2)
-    win_rate  = round(len(wins) / len(settled) * 100, 1) if settled else 0.0
+    total_pnl_units = round(sum(_pnl(r) for r in settled), 2)
+    total_pnl_euros = round(total_pnl_units * UNIT_STAKE, 2)
+    win_rate        = round(len(wins) / len(settled) * 100, 1) if settled else 0.0
+
+    # Current bankroll = last non-empty J column value
+    current_bankroll = STARTING_BANKROLL
+    for r in reversed(rows):
+        if len(r) > 9 and r[9]:
+            try:
+                current_bankroll = float(r[9])
+                break
+            except ValueError:
+                pass
+    roi = round((current_bankroll - STARTING_BANKROLL) / STARTING_BANKROLL * 100, 1)
 
     bt_pnl: dict[str, float] = defaultdict(float)
     for r in settled:
@@ -227,6 +255,9 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
     best_conf     = max(conf_pnl, key=conf_pnl.get) if conf_pnl else "N/A"
     best_conf_pnl = round(conf_pnl.get(best_conf, 0), 2)
 
+    pnl_str = f"+EUR {total_pnl_euros:.2f}" if total_pnl_euros >= 0 else f"-EUR {abs(total_pnl_euros):.2f}"
+    roi_str = f"+{roi:.1f}%" if roi >= 0 else f"{roi:.1f}%"
+
     data = [
         ["PERFORMANCE SUMMARY", ""],
         ["", ""],
@@ -236,8 +267,14 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         ["  Voids",               len(voids)],
         ["  Pending",             len(pending)],
         ["", ""],
-        ["Win rate",              f"{win_rate}%"],
-        ["Total P&L (units)",     total_pnl],
+        ["Win rate",              f"{win_rate:.1f}%"],
+        ["Total P&L (units)",     total_pnl_units],
+        ["", ""],
+        ["BANKROLL", ""],
+        ["  Starting bankroll",   f"EUR {STARTING_BANKROLL:.2f}"],
+        ["  Current bankroll",    f"EUR {current_bankroll:.2f}"],
+        ["  Total profit/loss",   pnl_str],
+        ["  ROI",                 roi_str],
         ["", ""],
         ["Best bet type",         best_bt],
         ["  P&L from this type",  best_bt_pnl],
@@ -248,7 +285,7 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
 
     ws_sum = ss.worksheet("Summary")
     ws_sum.clear()
-    ws_sum.update("A1", data, value_input_option="USER_ENTERED")
+    ws_sum.update("A1", data, value_input_option="RAW")
 
 
 def finalize_workbook(wb=None) -> None:

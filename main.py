@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import date, datetime, timedelta, timezone
 
 import anthropic
@@ -99,6 +100,8 @@ def fetch_upcoming_matches() -> list[dict]:
     headers = {"x-rapidapi-host": RAPIDAPI_HOST, "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY")}
     matches: list[dict] = []
     for offset in range(2):
+        if offset > 0:
+            time.sleep(2)
         dt = datetime.now(timezone.utc) + timedelta(days=offset)
         date_str = dt.strftime("%Y%m%d")
         url = f"https://{RAPIDAPI_HOST}/football-get-matches-by-date"
@@ -310,8 +313,6 @@ async def main():
     scheduler.add_job(daily_picks_job, "cron", hour=9, minute=0, timezone="Europe/Brussels")
     scheduler.start()
     log.info("Scheduler started — picks will post daily at 09:00 Europe/Brussels")
-
-    await daily_picks_job()
 
     try:
         while True:

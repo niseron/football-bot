@@ -54,9 +54,6 @@ async def main() -> None:
 
     log.info("Scheduler running — daily picks 09:00, weekly summary Mon 09:05, live results every 30 min (Europe/Brussels)")
 
-    await daily_picks_job()
-    await live_results_check()
-
     try:
         while True:
             await asyncio.sleep(60)

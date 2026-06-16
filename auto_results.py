@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import date, datetime, timedelta
 
 import requests
@@ -32,6 +33,10 @@ log = logging.getLogger(__name__)
 
 HOST          = "free-api-live-football-data.p.rapidapi.com"
 LOOKBACK_DAYS = 7
+
+_matches_cache: dict[date, tuple[datetime, list[dict]]] = {}
+_CACHE_TTL = timedelta(minutes=30)
+_last_api_call: float = 0.0
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -120,6 +125,10 @@ def _format_result_notification(r: dict) -> str:
 # ── API ───────────────────────────────────────────────────────────────────────
 
 def _fetch_matches(dt: date) -> list[dict]:
+    global _last_api_call
+    elapsed = time.time() - _last_api_call
+    if elapsed < 2.0:
+        time.sleep(2.0 - elapsed)
     headers = {"x-rapidapi-host": HOST, "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY")}
     r = requests.get(
         f"https://{HOST}/football-get-matches-by-date",
@@ -127,8 +136,21 @@ def _fetch_matches(dt: date) -> list[dict]:
         params={"date": dt.strftime("%Y%m%d")},
         timeout=15,
     )
+    _last_api_call = time.time()
     r.raise_for_status()
     return r.json().get("response", {}).get("matches", [])
+
+
+def _fetch_matches_cached(dt: date) -> list[dict]:
+    now = datetime.now()
+    if dt in _matches_cache:
+        fetched_at, matches = _matches_cache[dt]
+        if now - fetched_at < _CACHE_TTL:
+            log.info("  Cache hit for %s (%d matches)", dt, len(matches))
+            return matches
+    matches = _fetch_matches(dt)
+    _matches_cache[dt] = (now, matches)
+    return matches
 
 
 def _find_api_match(matches: list[dict], home_q: str, away_q: str) -> dict | None:
@@ -259,7 +281,7 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
             if dt in api_cache:
                 continue
             try:
-                api_cache[dt] = _fetch_matches(dt)
+                api_cache[dt] = _fetch_matches_cached(dt)
                 log.info("  API: fetched %d matches for %s", len(api_cache[dt]), dt)
             except Exception as exc:
                 log.error("  API fetch failed for %s: %s", dt, exc)

@@ -152,7 +152,6 @@ def _conf_color(conf: str) -> tuple:
 
 def generate_picks_card(
     picks: list[dict],
-    overall_win_rate: float = 0.0,
     card_date: date | None = None,
     session: str = "morning",
 ) -> Path:
@@ -161,10 +160,16 @@ def generate_picks_card(
     session="morning" → picks_YYYY-MM-DD.png
     session="evening" → picks_YYYY-MM-DD_evening.png
     """
+    from excel_tracker import get_summary_win_rate
     CARDS_DIR.mkdir(parents=True, exist_ok=True)
     today  = card_date or date.today()
     datstr = today.strftime("%d %b %Y").upper()
     is_eve = session == "evening"
+
+    try:
+        summary_wr = get_summary_win_rate()
+    except Exception:
+        summary_wr = 0.0
 
     img, d = _canvas()
     _bracket(d)
@@ -201,12 +206,8 @@ def generate_picks_card(
         d.text((x0, y), bet, font=f_sub, fill=_DIM)
         y += _th(f_sub) + 6
 
-        # Odds + Kelly stake
-        kelly = p.get("kelly")
-        if kelly and kelly.get("stake", 0) > 0:
-            stat = f"Odds {p.get('odds', '')}    Kelly €{kelly['stake']:.2f}"
-        else:
-            stat = f"Odds {p.get('odds', '')}"
+        # Odds
+        stat = f"Odds {p.get('odds', '')}"
         d.text((x0, y), stat, font=f_stat, fill=_NEON)
         y += _th(f_stat) + 22
 
@@ -214,8 +215,8 @@ def generate_picks_card(
             _sep(d, y, x0=x0)
             y += 16
 
-    suffix  = "_evening" if is_eve else ""
-    wr_lbl  = f"{overall_win_rate:.0f}% WIN RATE  ·  {'EVENING' if is_eve else 'DAILY'} PICKS"
+    suffix = "_evening" if is_eve else ""
+    wr_lbl = f"{summary_wr:.0f}% WIN RATE  ·  {'EVENING' if is_eve else 'DAILY'} PICKS"
     _draw_footer(d, wr_lbl)
 
     out = CARDS_DIR / f"picks_{today.strftime('%Y-%m-%d')}{suffix}.png"

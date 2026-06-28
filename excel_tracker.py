@@ -27,6 +27,9 @@ STARTING_BANKROLL = 100.0    # € tracked bankroll (used for running P&L in the
 UNIT_STAKE        = 10.0     # € per pick (1 unit)
 REAL_BANKROLL     = 1500.0   # € actual bankroll on the betting site (used for Kelly sizing)
 
+# Dates excluded from win-rate calculations (backfill / bad-data days)
+_WIN_RATE_EXCLUDE: frozenset[date] = frozenset([date(2026, 6, 15)])
+
 _SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
@@ -698,7 +701,9 @@ def get_weekly_data() -> dict:
     losses   = [r for r in settled if r["result"] == "LOSS"]
     pending  = [r for r in week_rows if not r["result"]]
     pnl_week = round(sum(r["pnl"] or 0 for r in settled if r["pnl"] is not None), 2)
-    win_rate = round(len(wins) / len(settled) * 100, 1) if settled else 0.0
+    wr_settled = [r for r in settled if r["date"] not in _WIN_RATE_EXCLUDE]
+    wr_wins    = [r for r in wr_settled if r["result"] == "WIN"]
+    win_rate   = round(len(wr_wins) / len(wr_settled) * 100, 1) if wr_settled else 0.0
     best_pick = max(wins, key=lambda r: r["pnl"] or 0) if wins else None
     running_total = next(
         (r["running"] for r in reversed(all_rows) if r.get("running") is not None), 0.0
@@ -803,6 +808,18 @@ def get_overall_win_rate() -> float:
     total_wins = sum(b["wins"]  for b in breakdown)
     total_set  = sum(b["total"] for b in breakdown)
     return round(total_wins / total_set * 100, 1) if total_set else 0.0
+
+
+def get_summary_win_rate() -> float:
+    """Read the all-time win rate directly from cell B9 of the Summary sheet."""
+    try:
+        ws  = _get_spreadsheet().worksheet("Summary")
+        val = ws.acell("B9").value  # stored as e.g. "75.0%"
+        if val and val.endswith("%"):
+            return float(val.rstrip("%"))
+    except Exception as exc:
+        log.warning("Could not read win rate from Summary sheet: %s", exc)
+    return 0.0
 
 
 # ── Deduplicate ───────────────────────────────────────────────────────────────

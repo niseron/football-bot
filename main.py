@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from telegram import Bot
 
 from tracker import log_pick, picks_exist_for_session
-from excel_tracker import calculate_kelly_stake, get_overall_win_rate
+from excel_tracker import calculate_kelly_stake
 from card_generator import generate_picks_card
 
 load_dotenv()
@@ -262,8 +262,9 @@ def format_telegram_message(picks: list[dict], header: str = "Football Picks") -
         kelly = p.get("kelly")
         if kelly is not None:
             note_suffix = f" — {_escape_md(kelly['note'])}" if kelly.get("note") else ""
+            stake_str = f"{kelly['stake']:.2f}"
             kelly_line = (
-                f"  💰 Suggested stake: €{_escape_md(f'{kelly[\"stake\"]:.2f}')} \\(Kelly{note_suffix}\\)\n"
+                f"  💰 Suggested stake: €{_escape_md(stake_str)} \\(Kelly{note_suffix}\\)\n"
             )
         else:
             kelly_line = ""
@@ -354,8 +355,7 @@ async def daily_picks_job():
         log.error("Telegram send failed: %s", exc)
 
     try:
-        wr   = get_overall_win_rate()
-        card = generate_picks_card(picks, overall_win_rate=wr, session="morning")
+        card = generate_picks_card(picks, session="morning")
         await _send_photo(card)
         log.info("Picks card sent: %s", card.name)
     except Exception as exc:
@@ -425,8 +425,7 @@ async def evening_picks_job():
         log.error("Telegram send failed (evening): %s", exc)
 
     try:
-        wr   = get_overall_win_rate()
-        card = generate_picks_card(picks, overall_win_rate=wr, session="evening")
+        card = generate_picks_card(picks, session="evening")
         await _send_photo(card)
         log.info("Evening picks card sent: %s", card.name)
     except Exception as exc:

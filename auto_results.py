@@ -23,6 +23,7 @@ from excel_tracker import (
     EXCEL_PATH,
     finalize_workbook,
     get_pending_picks_rows,
+    get_picks_for_date,
     init_excel,
     update_row_result,
 )
@@ -57,6 +58,25 @@ def _telegram_send(text: str) -> None:
         log.info("Telegram notification sent")
     except Exception as exc:
         log.error("Telegram send failed: %s", exc)
+
+
+def _telegram_send_photo(path) -> None:
+    token   = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHANNEL_ID")
+    if not token or not chat_id:
+        return
+    try:
+        with open(path, "rb") as f:
+            r = requests.post(
+                f"https://api.telegram.org/bot{token}/sendPhoto",
+                data={"chat_id": chat_id},
+                files={"photo": f},
+                timeout=30,
+            )
+        r.raise_for_status()
+        log.info("Telegram photo sent: %s", path)
+    except Exception as exc:
+        log.error("Telegram photo send failed: %s", exc)
 
 
 def _score_description(
@@ -420,6 +440,101 @@ if __name__ == "__main__":
             scheduler.start()
         except (KeyboardInterrupt, SystemExit):
             print("Scheduler stopped.")
+
+    elif "--results" in sys.argv:
+        print(f"Checking results for pending picks (last {LOOKBACK_DAYS} days)...\n")
+
+        pending_before = get_pending_picks_rows(LOOKBACK_DAYS)
+        stats, resolved = run_auto_results(LOOKBACK_DAYS)
+
+        resolved_map: dict[tuple, dict] = {
+            (r["match"], r["bet_type"], r["pick"]): r for r in resolved
+        }
+
+        C_MATCH  = 36
+        C_PICK   = 30
+        C_ODDS   =  6
+        C_RESULT =  9
+        C_SCORE  =  7
+        C_PNL    =  7
+
+        header = (
+            f"{'Match':<{C_MATCH}}  {'Pick':<{C_PICK}}  {'Odds':>{C_ODDS}}"
+            f"  {'Result':<{C_RESULT}}  {'Score':<{C_SCORE}}  {'P&L':>{C_PNL}}"
+        )
+        sep = "-" * len(header)
+        print(header)
+        print(sep)
+
+        for p in pending_before:
+            key = (p["match"], p["bet_type"], p["pick"])
+            r   = resolved_map.get(key)
+
+            pick_label = f"{p['bet_type']} / {p['pick']}"
+            if r:
+                result = r["result"]
+                score  = f"{r['home_score']}-{r['away_score']}"
+                pnl    = f"{r['pnl']:+.2f}"
+            else:
+                result = "PENDING"
+                score  = "-"
+                pnl    = "-"
+
+            print(
+                f"{p['match']:<{C_MATCH}}  {pick_label:<{C_PICK}}  {p['odds']:>{C_ODDS}.2f}"
+                f"  {result:<{C_RESULT}}  {score:<{C_SCORE}}  {pnl:>{C_PNL}}"
+            )
+
+        print(sep)
+        _print_stats(stats)
+
+        # ── Per-pick Telegram notifications for yesterday ─────────────────────
+        yesterday = date.today() - timedelta(days=1)
+        yesterday_picks = get_picks_for_date(yesterday)
+        settled = [p for p in yesterday_picks if p["result"] in ("WIN", "LOSS")]
+
+        if not settled:
+            print(f"\nNo settled picks for {yesterday} — skipping Telegram notifications.")
+        else:
+            print(f"\nSending {len(settled)} individual result notification(s) to Telegram...")
+            total_pnl = 0.0
+            for p in settled:
+                key = (p["match"], p["bet_type"], p["pick"])
+                r   = resolved_map.get(key)
+                if r:
+                    notif = r
+                else:
+                    # Pick was settled before this run — no score data available
+                    parts = p["match"].split(" vs ", 1)
+                    notif = {
+                        "match":      p["match"],
+                        "bet_type":   p["bet_type"],
+                        "pick":       p["pick"],
+                        "odds":       p["odds"],
+                        "result":     p["result"],
+                        "pnl":        p["pnl"] if p["pnl"] is not None else 0.0,
+                        "home_name":  parts[0].strip() if len(parts) == 2 else p["match"],
+                        "away_name":  parts[1].strip() if len(parts) == 2 else "",
+                        "home_score": 0,
+                        "away_score": 0,
+                    }
+                total_pnl += notif["pnl"] if notif.get("pnl") is not None else 0.0
+                _telegram_send(_format_result_notification(notif))
+
+            total_str = f"+{total_pnl:.2f}" if total_pnl >= 0 else f"{total_pnl:.2f}"
+            _telegram_send(
+                f"Results {yesterday.strftime('%d %b %Y')} — "
+                f"{total_str} units P&L ({len(settled)} settled picks)"
+            )
+            print("Done.")
+
+            try:
+                from card_generator import generate_results_card
+                card_path = generate_results_card(settled, card_date=yesterday)
+                _telegram_send_photo(card_path)
+                log.info("Results card sent: %s", card_path.name)
+            except Exception as exc:
+                log.warning("Results card failed (non-fatal): %s", exc)
 
     else:
         print("Running auto-result check now...")

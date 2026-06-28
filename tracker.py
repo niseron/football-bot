@@ -19,9 +19,15 @@ def init_db():
                 pick      TEXT    NOT NULL,
                 odds      REAL    NOT NULL,
                 result    TEXT    DEFAULT 'PENDING',
-                profit    REAL    DEFAULT NULL
+                profit    REAL    DEFAULT NULL,
+                session   TEXT    NOT NULL DEFAULT 'morning'
             )
         """)
+        # Migrate existing DBs that predate the session column
+        try:
+            conn.execute("ALTER TABLE picks ADD COLUMN session TEXT NOT NULL DEFAULT 'morning'")
+        except Exception:
+            pass
         conn.commit()
 
 
@@ -33,6 +39,7 @@ def log_pick(
     odds: float,
     pick_date: str | None = None,
     confidence: str = "N/A",
+    session: str = "morning",
 ):
     import logging as _logging
     _log = _logging.getLogger(__name__)
@@ -40,15 +47,15 @@ def log_pick(
     pick_date = pick_date or date.today().isoformat()
     with sqlite3.connect(DB_PATH) as conn:
         existing = conn.execute(
-            "SELECT id FROM picks WHERE date = ? AND match = ? AND bet_type = ? AND pick = ?",
-            (pick_date, match, bet_type, pick),
+            "SELECT id FROM picks WHERE date = ? AND match = ? AND bet_type = ? AND pick = ? AND session = ?",
+            (pick_date, match, bet_type, pick, session),
         ).fetchone()
         if existing:
             _log.info("Skipping duplicate pick (already in DB): %s — %s", match, pick)
             return
         conn.execute(
-            "INSERT INTO picks (date, match, league, bet_type, pick, odds) VALUES (?, ?, ?, ?, ?, ?)",
-            (pick_date, match, league, bet_type, pick, odds),
+            "INSERT INTO picks (date, match, league, bet_type, pick, odds, session) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (pick_date, match, league, bet_type, pick, odds, session),
         )
         conn.commit()
     try:
@@ -64,6 +71,18 @@ def picks_exist_for_today() -> bool:
     with sqlite3.connect(DB_PATH) as conn:
         count = conn.execute(
             "SELECT COUNT(*) FROM picks WHERE date = ?", (today,)
+        ).fetchone()[0]
+    return count > 0
+
+
+def picks_exist_for_session(session: str) -> bool:
+    """Return True if picks for today's date and the given session already exist."""
+    init_db()
+    today = date.today().isoformat()
+    with sqlite3.connect(DB_PATH) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM picks WHERE date = ? AND session = ?",
+            (today, session),
         ).fetchone()[0]
     return count > 0
 

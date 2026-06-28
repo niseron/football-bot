@@ -12,7 +12,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from telegram import Bot
 
-from tracker import log_pick, picks_exist_for_today
+from tracker import log_pick, picks_exist_for_session
+from excel_tracker import calculate_kelly_stake, get_overall_win_rate
+from card_generator import generate_picks_card
 
 load_dotenv()
 
@@ -85,6 +87,19 @@ claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
+
+def _kickoff_hour_utc(match: dict) -> int | None:
+    """Return the kickoff hour (UTC, 0-23) or None if unparseable."""
+    s = match.get("status", {})
+    ko_str = s.get("utcTime", match.get("time", ""))
+    if not ko_str:
+        return None
+    try:
+        ko = datetime.fromisoformat(ko_str.replace("Z", "+00:00"))
+        return ko.hour
+    except (ValueError, TypeError):
+        return None
+
 
 def _is_upcoming(match: dict) -> bool:
     s = match.get("status", {})
@@ -211,6 +226,7 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
     message = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2048,
+        temperature=0,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Upcoming fixtures (next 48 hours):\n\n{payload}"}],
     )
@@ -220,7 +236,15 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
         if raw.startswith("json"):
             raw = raw[4:]
     data = json.loads(raw.strip())
-    return data.get("picks", [])
+    picks = data.get("picks", [])
+    seen: set[tuple] = set()
+    deduped: list[dict] = []
+    for pick in picks:
+        key = (pick.get("match"), pick.get("bet_type"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(pick)
+    return deduped
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -231,15 +255,24 @@ def _escape_md(text: str) -> str:
     return text
 
 
-def format_telegram_message(picks: list[dict]) -> str:
+def format_telegram_message(picks: list[dict], header: str = "Football Picks") -> str:
     today = datetime.now(timezone.utc).strftime("%d %b %Y")
-    lines = [f"*Football Picks — {_escape_md(today)}*\n"]
+    lines = [f"*{_escape_md(header)} — {_escape_md(today)}*\n"]
     for i, p in enumerate(picks, 1):
+        kelly = p.get("kelly")
+        if kelly is not None:
+            note_suffix = f" — {_escape_md(kelly['note'])}" if kelly.get("note") else ""
+            kelly_line = (
+                f"  💰 Suggested stake: €{_escape_md(f'{kelly[\"stake\"]:.2f}')} \\(Kelly{note_suffix}\\)\n"
+            )
+        else:
+            kelly_line = ""
         lines.append(
             f"*{i}\\. {_escape_md(p['match'])}* \\({_escape_md(p['league'])}\\)\n"
             f"  Bet: {_escape_md(p['bet_type'])} — *{_escape_md(p['pick'])}*\n"
             f"  Odds: `{_escape_md(str(p['odds']))}` \\| Confidence: {_escape_md(p['confidence'])}\n"
             f"  _{_escape_md(p['reasoning'])}_\n"
+            + kelly_line
         )
     lines.append("_Good luck\\! Bet responsibly\\._")
     return "\n".join(lines)
@@ -254,13 +287,19 @@ async def send_to_telegram(text: str):
     )
 
 
+async def _send_photo(path) -> None:
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    with open(path, "rb") as f:
+        await bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=f)
+
+
 # ── Main job ──────────────────────────────────────────────────────────────────
 
 async def daily_picks_job():
-    log.info("Starting daily picks job")
+    log.info("Starting morning picks job")
 
-    if picks_exist_for_today():
-        log.info("Picks already logged for today — skipping")
+    if picks_exist_for_session("morning"):
+        log.info("Morning picks already logged for today — skipping")
         return
 
     try:
@@ -285,6 +324,14 @@ async def daily_picks_job():
         log.error("Claude analysis failed: %s", exc)
         return
 
+    try:
+        for pick in picks:
+            pick["kelly"] = calculate_kelly_stake(
+                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+            )
+    except Exception as exc:
+        log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
+
     for pick in picks:
         try:
             log_pick(
@@ -294,16 +341,96 @@ async def daily_picks_job():
                 pick=pick["pick"],
                 odds=float(pick["odds"]),
                 confidence=pick.get("confidence", "N/A"),
+                session="morning",
             )
         except Exception as exc:
             log.warning("Failed to log pick: %s", exc)
 
-    message = format_telegram_message(picks)
+    message = format_telegram_message(picks, header="Football Picks")
     try:
         await send_to_telegram(message)
-        log.info("Sent %d picks to Telegram", len(picks))
+        log.info("Sent %d morning picks to Telegram", len(picks))
     except Exception as exc:
         log.error("Telegram send failed: %s", exc)
+
+    try:
+        wr   = get_overall_win_rate()
+        card = generate_picks_card(picks, overall_win_rate=wr, session="morning")
+        await _send_photo(card)
+        log.info("Picks card sent: %s", card.name)
+    except Exception as exc:
+        log.warning("Picks card failed (non-fatal): %s", exc)
+
+
+async def evening_picks_job():
+    log.info("Starting evening picks job")
+
+    if picks_exist_for_session("evening"):
+        log.info("Evening picks already logged for today — skipping")
+        return
+
+    try:
+        all_matches = fetch_upcoming_matches()
+        log.info("Fetched %d total matches for next 48 hours", len(all_matches))
+    except Exception as exc:
+        log.error("Failed to fetch matches for evening run: %s", exc)
+        return
+
+    # Only fixtures kicking off at 18:00 UTC or later
+    evening_matches = [m for m in all_matches if (_kickoff_hour_utc(m) or 0) >= 18]
+    log.info("Evening filter: %d matches with kickoff >= 18:00 UTC", len(evening_matches))
+
+    fixtures_by_league = partition_fixtures(evening_matches)
+
+    if not fixtures_by_league:
+        log.info("No evening fixtures across tracked competitions — skipping analysis")
+        return
+
+    for league, fixtures in fixtures_by_league.items():
+        log.info("  %s: %d evening fixtures", league, len(fixtures))
+
+    try:
+        picks = analyse_with_claude(fixtures_by_league)
+    except Exception as exc:
+        log.error("Claude analysis failed (evening): %s", exc)
+        return
+
+    try:
+        for pick in picks:
+            pick["kelly"] = calculate_kelly_stake(
+                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+            )
+    except Exception as exc:
+        log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
+
+    for pick in picks:
+        try:
+            log_pick(
+                match=pick["match"],
+                league=pick["league"],
+                bet_type=pick["bet_type"],
+                pick=pick["pick"],
+                odds=float(pick["odds"]),
+                confidence=pick.get("confidence", "N/A"),
+                session="evening",
+            )
+        except Exception as exc:
+            log.warning("Failed to log evening pick: %s", exc)
+
+    message = format_telegram_message(picks, header="Evening Picks")
+    try:
+        await send_to_telegram(message)
+        log.info("Sent %d evening picks to Telegram", len(picks))
+    except Exception as exc:
+        log.error("Telegram send failed (evening): %s", exc)
+
+    try:
+        wr   = get_overall_win_rate()
+        card = generate_picks_card(picks, overall_win_rate=wr, session="evening")
+        await _send_photo(card)
+        log.info("Evening picks card sent: %s", card.name)
+    except Exception as exc:
+        log.warning("Evening picks card failed (non-fatal): %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

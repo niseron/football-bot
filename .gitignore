@@ -4,3 +4,4 @@ picks_tracker.xlsx
 __pycache__/
 *.pyc
 *.pyo
+cards/

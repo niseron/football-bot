@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from telegram import Bot
 
-from excel_tracker import get_weekly_data
+from excel_tracker import get_bet_type_breakdown, get_weekly_data
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -88,6 +88,21 @@ def build_weekly_message(data: dict) -> str:
         lines.append(f"⏳ *{pending} pick\\(s\\) still pending result*")
 
     lines.append(f"\U0001f4c9 Running total P/L: *{_esc(rt_sign + f'{rt:.2f}')} units*")
+
+    breakdown = get_bet_type_breakdown()
+    if breakdown:
+        lines.append("\n*\U0001f4cb Bet Type Breakdown \\(all\\-time settled\\)*")
+        lines.append("`{:<22} {:>4}  {:>5}  {:>5}  {:>6}  {:>7}`".format(
+            "Bet Type", "W", "L", "WR%", "Picks", "P/L"
+        ))
+        for b in breakdown:
+            pnl_str = ("+" if b["pnl"] >= 0 else "") + f"{b['pnl']:.2f}"
+            wr_str  = f"{b['win_rate']:.1f}%"
+            name    = b["bet_type"][:22]
+            lines.append("`{:<22} {:>4}  {:>5}  {:>5}  {:>6}  {:>7}`".format(
+                name, b["wins"], b["losses"], wr_str, b["total"], pnl_str
+            ))
+
     lines.append("\n_Bet responsibly\\. Past performance does not guarantee future results\\._")
 
     return "\n".join(lines)
@@ -104,6 +119,16 @@ async def post_weekly_summary():
         text=message,
         parse_mode="MarkdownV2",
     )
+
+    try:
+        from card_generator import generate_weekly_card
+        card_path = generate_weekly_card(data)
+        with open(card_path, "rb") as f:
+            await bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=f)
+        log.info("Weekly card sent: %s", card_path.name)
+    except Exception as exc:
+        log.warning("Weekly card failed (non-fatal): %s", exc)
+
     log.info("Weekly summary posted to Telegram")
 
 

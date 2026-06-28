@@ -23,8 +23,9 @@ PICKS_HEADERS = [
     "Confidence", "Result", "Profit/Loss", "Running Total P&L", "Bankroll (€)",
 ]
 
-STARTING_BANKROLL = 100.0   # €
-UNIT_STAKE        = 10.0    # € per pick (1 unit)
+STARTING_BANKROLL = 100.0    # € tracked bankroll (used for running P&L in the sheet)
+UNIT_STAKE        = 10.0     # € per pick (1 unit)
+REAL_BANKROLL     = 1500.0   # € actual bankroll on the betting site (used for Kelly sizing)
 
 _SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -50,6 +51,202 @@ def _get_spreadsheet() -> gspread.Spreadsheet:
 
 def _picks_ws() -> gspread.Worksheet:
     return _get_spreadsheet().worksheet("Picks")
+
+
+# ── Formatting helpers ────────────────────────────────────────────────────────
+
+def _rgb(hex_str: str) -> dict:
+    h = hex_str.lstrip("#")
+    return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
+
+
+_WHITE       = _rgb("#ffffff")
+_LIGHT_GREEN = _rgb("#e8f5e9")
+_LIGHT_RED   = _rgb("#ffebee")
+_DARK_GREEN  = _rgb("#1a5c38")
+_WIN_GREEN   = _rgb("#00c853")
+_LOSS_RED    = _rgb("#d50000")
+_WHITE_TEXT  = {"red": 1.0, "green": 1.0, "blue": 1.0}
+_BLACK_TEXT  = {"red": 0.0, "green": 0.0, "blue": 0.0}
+
+
+def _apply_formatting(ss: gspread.Spreadsheet) -> None:
+    try:
+        ws       = ss.worksheet("Picks")
+        sid      = ws.id
+        all_rows = ws.get_all_values()
+        nrows    = len(all_rows)
+        ncols    = len(PICKS_HEADERS)
+        result_col = PICKS_HEADERS.index("Result")
+
+        if nrows < 1:
+            return
+
+        reqs: list[dict] = []
+
+        # Freeze header row
+        reqs.append({
+            "updateSheetProperties": {
+                "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }
+        })
+
+        # Header: bold, dark green background, white text
+        reqs.append({
+            "repeatCell": {
+                "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                           "startColumnIndex": 0, "endColumnIndex": ncols},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": _DARK_GREEN,
+                    "textFormat": {"bold": True, "foregroundColor": _WHITE_TEXT},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+            }
+        })
+
+        # Data rows: alternating white / light green + WIN/LOSS result cell override
+        wins_found = losses_found = skipped_short = 0
+        for i in range(1, nrows):
+            row_bg = _WHITE if i % 2 == 1 else _LIGHT_GREEN
+            reqs.append({
+                "repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1,
+                               "startColumnIndex": 0, "endColumnIndex": ncols},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": row_bg,
+                        "textFormat": {"bold": False, "foregroundColor": _BLACK_TEXT},
+                    }},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+            if len(all_rows[i]) <= result_col:
+                skipped_short += 1
+                result_val = ""
+            else:
+                result_val = all_rows[i][result_col]
+            if result_val in ("WIN", "LOSS"):
+                if result_val == "WIN":
+                    wins_found += 1
+                else:
+                    losses_found += 1
+                cell_bg = _WIN_GREEN if result_val == "WIN" else _LOSS_RED
+                reqs.append({
+                    "repeatCell": {
+                        "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1,
+                                   "startColumnIndex": result_col, "endColumnIndex": result_col + 1},
+                        "cell": {"userEnteredFormat": {
+                            "backgroundColor": cell_bg,
+                            "textFormat": {"bold": True, "foregroundColor": _WHITE_TEXT},
+                        }},
+                        "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                    }
+                })
+            elif result_val.strip() not in ("", "VOID"):
+                print(f"[_apply_formatting] row {i+1}: unexpected result value {result_val!r} (len={len(all_rows[i])})")
+
+        print(f"[_apply_formatting] repainting {nrows - 1} data rows — WIN={wins_found}, LOSS={losses_found}, skipped_short={skipped_short}")
+
+        # Thick border around the full data range
+        thick = {"style": "SOLID_THICK", "colorStyle": {"rgbColor": _BLACK_TEXT}}
+        reqs.append({
+            "updateBorders": {
+                "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": nrows,
+                           "startColumnIndex": 0, "endColumnIndex": ncols},
+                "top": thick, "bottom": thick, "left": thick, "right": thick,
+            }
+        })
+
+        # Auto-resize all columns to fit content
+        reqs.append({
+            "autoResizeDimensions": {
+                "dimensions": {"sheetId": sid, "dimension": "COLUMNS",
+                                "startIndex": 0, "endIndex": ncols},
+            }
+        })
+
+        ss.batch_update({"requests": reqs})
+        log.info("Formatting applied to Picks sheet (%d rows)", nrows)
+
+    except Exception as exc:
+        log.warning("Sheet formatting failed (non-fatal): %s", exc)
+
+
+def _format_result_row(
+    ss: gspread.Spreadsheet,
+    ws_id: int,
+    sheet_row: int,
+    result: str,
+    pnl: float,
+    bankroll: float | None = None,
+) -> None:
+    """batchUpdate formatting for G (Result), H (Profit/Loss), and optionally J (Bankroll)."""
+    print(f"[_format_result_row] called — sheet_row={sheet_row}, row_idx={sheet_row - 1}, result={result!r}, pnl={pnl}")
+    row_idx = sheet_row - 1  # Sheets API uses 0-based row indices
+    reqs: list[dict] = []
+
+    # G: Result cell — green/white-bold for WIN, red/white-bold for LOSS
+    if result in ("WIN", "LOSS"):
+        reqs.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws_id,
+                    "startRowIndex": row_idx, "endRowIndex": row_idx + 1,
+                    "startColumnIndex": 6, "endColumnIndex": 7,
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": _WIN_GREEN if result == "WIN" else _LOSS_RED,
+                    "textFormat": {"bold": True, "foregroundColor": _WHITE_TEXT},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+            }
+        })
+
+    # H: Profit/Loss cell — green background if positive, red if negative
+    if pnl > 0:
+        h_bg = _WIN_GREEN
+    elif pnl < 0:
+        h_bg = _LOSS_RED
+    else:
+        h_bg = None
+    if h_bg is not None:
+        reqs.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws_id,
+                    "startRowIndex": row_idx, "endRowIndex": row_idx + 1,
+                    "startColumnIndex": 7, "endColumnIndex": 8,
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": h_bg,
+                    "textFormat": {"foregroundColor": _WHITE_TEXT},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+            }
+        })
+
+    # J: Bankroll cell — light green if above 100, light red if below
+    if bankroll is not None:
+        j_bg = _LIGHT_GREEN if bankroll >= 100 else _LIGHT_RED
+        reqs.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws_id,
+                    "startRowIndex": row_idx, "endRowIndex": row_idx + 1,
+                    "startColumnIndex": 9, "endColumnIndex": 10,
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": j_bg,
+                }},
+                "fields": "userEnteredFormat(backgroundColor)",
+            }
+        })
+
+    if reqs:
+        try:
+            ss.batch_update({"requests": reqs})
+        except Exception as exc:
+            log.error("Row %d formatting batchUpdate failed — %r", sheet_row, exc, exc_info=True)
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -133,6 +330,7 @@ def log_to_excel(
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
         log.info("Sheets: logged '%s — %s'", match, pick)
+        _apply_formatting(_get_spreadsheet())
     except Exception as exc:
         log.error("Sheets write failed: %s", exc)
 
@@ -178,11 +376,13 @@ def get_pending_picks_rows(lookback_days: int = 7) -> list[dict]:
 def update_row_result(sheet_row: int, result: str, pnl: float) -> None:
     """Write Result and Profit/Loss to a specific sheet row. Call finalize_workbook() when done."""
     try:
-        ws = _picks_ws()
+        ss = _get_spreadsheet()
+        ws = ss.worksheet("Picks")
         ws.batch_update([
             {"range": f"G{sheet_row}", "values": [[result]]},
             {"range": f"H{sheet_row}", "values": [[round(pnl, 2)]]},
         ])
+        _format_result_row(ss, ws.id, sheet_row, result, pnl)
     except Exception as exc:
         log.error("Sheets update_row_result failed: %s", exc)
 
@@ -193,10 +393,13 @@ def _recalculate_running_total(ws: gspread.Worksheet) -> None:
     rows = ws.get_all_values()
     running_units = 0.0
     bankroll      = STARTING_BANKROLL
-    updates = []
+    updates  = []
+    fmt_reqs = []
+    ws_id    = ws.id
     for i, row in enumerate(rows[1:], start=2):
         result  = row[6] if len(row) > 6 else ""
         pnl_str = row[7] if len(row) > 7 else ""
+        row_idx = i - 1  # 0-based for Sheets API
         if result in ("WIN", "LOSS", "VOID") and pnl_str:
             try:
                 pnl_units      = float(pnl_str)
@@ -204,6 +407,19 @@ def _recalculate_running_total(ws: gspread.Worksheet) -> None:
                 bankroll      += pnl_units * UNIT_STAKE
                 updates.append({"range": f"I{i}", "values": [[round(running_units, 2)]]})
                 updates.append({"range": f"J{i}", "values": [[round(bankroll, 2)]]})
+                fmt_reqs.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": ws_id,
+                            "startRowIndex": row_idx, "endRowIndex": row_idx + 1,
+                            "startColumnIndex": 9, "endColumnIndex": 10,
+                        },
+                        "cell": {"userEnteredFormat": {
+                            "backgroundColor": _LIGHT_GREEN if bankroll >= 100 else _LIGHT_RED,
+                        }},
+                        "fields": "userEnteredFormat(backgroundColor)",
+                    }
+                })
                 continue
             except ValueError:
                 pass
@@ -211,6 +427,11 @@ def _recalculate_running_total(ws: gspread.Worksheet) -> None:
         updates.append({"range": f"J{i}", "values": [[""]]})
     if updates:
         ws.batch_update(updates)
+    if fmt_reqs:
+        try:
+            ws.spreadsheet.batch_update({"requests": fmt_reqs})
+        except Exception as exc:
+            log.warning("Bankroll formatting failed (non-fatal): %s", exc)
 
 
 def _refresh_summary(ss: gspread.Spreadsheet) -> None:
@@ -258,6 +479,25 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
     pnl_str = f"+EUR {total_pnl_euros:.2f}" if total_pnl_euros >= 0 else f"-EUR {abs(total_pnl_euros):.2f}"
     roi_str = f"+{roi:.1f}%" if roi >= 0 else f"{roi:.1f}%"
 
+    # ── Bet type breakdown (reuse settled rows already in memory) ────────────
+    bt_groups: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+    for r in settled:
+        bt = r[2].strip() if len(r) > 2 else ""
+        if not bt or r[6] == "VOID":
+            continue
+        bt_groups[bt]["pnl"] += _pnl(r)
+        if r[6] == "WIN":
+            bt_groups[bt]["wins"] += 1
+        elif r[6] == "LOSS":
+            bt_groups[bt]["losses"] += 1
+
+    bt_rows = []
+    for bt, g in bt_groups.items():
+        total    = g["wins"] + g["losses"]
+        win_rate_bt = round(g["wins"] / total * 100, 1) if total else 0.0
+        bt_rows.append([bt, g["wins"], g["losses"], f"{win_rate_bt:.1f}%", round(g["pnl"], 2), total])
+    bt_rows.sort(key=lambda x: float(x[3].rstrip("%")), reverse=True)
+
     data = [
         ["PERFORMANCE SUMMARY", ""],
         ["", ""],
@@ -281,7 +521,10 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         ["", ""],
         ["Best confidence level",   best_conf],
         ["  P&L from this level",   best_conf_pnl],
-    ]
+        ["", ""],
+        ["BET TYPE BREAKDOWN", "", "", "", "", ""],
+        ["Bet Type", "Wins", "Losses", "Win Rate %", "Total P&L", "Total Picks"],
+    ] + bt_rows
 
     ws_sum = ss.worksheet("Summary")
     ws_sum.clear()
@@ -289,13 +532,24 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
 
 
 def finalize_workbook(wb=None) -> None:
-    """Recalculate running totals and refresh Summary. wb param accepted for backwards compat."""
+    """Recalculate running totals, refresh Summary, and re-apply formatting."""
     try:
         ss = _get_spreadsheet()
+    except Exception as exc:
+        log.error("finalize_workbook: cannot connect to Sheets: %s", exc)
+        return
+
+    try:
         _recalculate_running_total(ss.worksheet("Picks"))
+    except Exception as exc:
+        log.error("finalize_workbook: running total recalculation failed: %s", exc)
+
+    try:
         _refresh_summary(ss)
     except Exception as exc:
-        log.error("finalize_workbook failed: %s", exc)
+        log.error("finalize_workbook: summary refresh failed: %s", exc)
+
+    _apply_formatting(ss)  # has its own try/except — always runs
 
 
 # ── Manual result update ──────────────────────────────────────────────────────
@@ -353,6 +607,46 @@ def update_result(match_query: str, pick_query: str, result: str) -> bool:
     return True
 
 
+# ── Picks for a specific date ─────────────────────────────────────────────────
+
+def get_picks_for_date(dt: date) -> list[dict]:
+    """Return all logged picks for a specific date with their current result/P&L."""
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return []
+
+    result = []
+    for row in rows[1:]:
+        if not row or not row[0]:
+            continue
+        try:
+            row_date = datetime.strptime(row[0], "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        if row_date != dt:
+            continue
+        try:
+            odds = float(row[4]) if len(row) > 4 and row[4] else 1.0
+        except ValueError:
+            odds = 1.0
+        try:
+            pnl = float(row[7]) if len(row) > 7 and row[7] else None
+        except ValueError:
+            pnl = None
+        result.append({
+            "match":    row[1] if len(row) > 1 else "",
+            "bet_type": row[2] if len(row) > 2 else "",
+            "pick":     row[3] if len(row) > 3 else "",
+            "odds":     odds,
+            "result":   row[6] if len(row) > 6 else "",
+            "pnl":      pnl,
+        })
+    return result
+
+
 # ── Weekly data ───────────────────────────────────────────────────────────────
 
 def get_weekly_data() -> dict:
@@ -364,7 +658,7 @@ def get_weekly_data() -> dict:
         return {}
 
     today    = date.today()
-    week_mon = today - timedelta(days=today.weekday())
+    week_mon = today - timedelta(days=today.weekday() + 7)
     week_sun = week_mon + timedelta(days=6)
 
     all_rows:  list[dict] = []
@@ -425,6 +719,92 @@ def get_weekly_data() -> dict:
     }
 
 
+def get_bet_type_breakdown() -> list[dict]:
+    """Return settled picks grouped by bet type, sorted by win rate descending."""
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()[1:]
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return []
+
+    groups: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        result   = row[6].strip().upper() if len(row) > 6 else ""
+        bet_type = row[2].strip()         if len(row) > 2 else ""
+        if result not in ("WIN", "LOSS") or not bet_type:
+            continue
+        try:
+            pnl = float(row[7]) if len(row) > 7 and row[7] else 0.0
+        except ValueError:
+            pnl = 0.0
+        g = groups[bet_type]
+        if result == "WIN":
+            g["wins"] += 1
+        else:
+            g["losses"] += 1
+        g["pnl"] += pnl
+
+    breakdown = []
+    for bet_type, g in groups.items():
+        total    = g["wins"] + g["losses"]
+        win_rate = round(g["wins"] / total * 100, 1) if total else 0.0
+        breakdown.append({
+            "bet_type": bet_type,
+            "total":    total,
+            "wins":     g["wins"],
+            "losses":   g["losses"],
+            "win_rate": win_rate,
+            "pnl":      round(g["pnl"], 2),
+        })
+
+    breakdown.sort(key=lambda x: x["win_rate"], reverse=True)
+    return breakdown
+
+
+# ── Kelly stake recommendation ────────────────────────────────────────────────
+
+def calculate_kelly_stake(bet_type: str, odds: float, confidence: str) -> dict:
+    """
+    Return {"stake": euros, "note": str} for a half-Kelly recommendation.
+
+    Uses historical win rate for this bet type from settled Sheets data.
+    Stake is based on REAL_BANKROLL, capped at 5%.
+    Returns a flat UNIT_STAKE with note="insufficient data" when fewer than
+    10 settled picks exist for this bet type.
+    """
+    breakdown = get_bet_type_breakdown()
+    record = next(
+        (b for b in breakdown if b["bet_type"].strip().lower() == bet_type.strip().lower()),
+        None,
+    )
+
+    if record is None or record["total"] < 10:
+        count = record["total"] if record else 0
+        return {"stake": UNIT_STAKE, "note": f"insufficient data ({count} settled picks)"}
+
+    win_rate = record["win_rate"] / 100.0
+    kelly = (win_rate * (odds - 1) - (1 - win_rate)) / (odds - 1)
+
+    if kelly <= 0:
+        return {"stake": 0.0, "note": "negative edge"}
+
+    fraction = min(kelly * 0.5, 0.05)  # half-Kelly, capped at 5% of bankroll
+    stake = round(fraction * REAL_BANKROLL, 2)
+    return {"stake": stake, "note": ""}
+
+
+def get_overall_win_rate() -> float:
+    """Overall historical WIN rate (%) across all settled picks."""
+    breakdown  = get_bet_type_breakdown()
+    total_wins = sum(b["wins"]  for b in breakdown)
+    total_set  = sum(b["total"] for b in breakdown)
+    return round(total_wins / total_set * 100, 1) if total_set else 0.0
+
+
 # ── Deduplicate ───────────────────────────────────────────────────────────────
 
 def cleanup_duplicates() -> int:
@@ -469,3 +849,41 @@ def cleanup_duplicates() -> int:
 def _style_picks_row(ws, row: int, result: str | None) -> None:
     """No-op: row colouring is handled via Google Sheets conditional formatting, not Python."""
     pass
+
+
+# ── Smoke test ────────────────────────────────────────────────────────────────
+
+def test_format_row() -> None:
+    """Paint cell G2 green via batchUpdate to verify the Sheets API write path works."""
+    import pprint
+    ss = _get_spreadsheet()
+    ws = ss.worksheet("Picks")
+    req = {
+        "requests": [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": ws.id,
+                    "startRowIndex": 1, "endRowIndex": 2,   # row 2 (0-based: index 1)
+                    "startColumnIndex": 6, "endColumnIndex": 7,  # column G
+                },
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.0, "green": 0.784, "blue": 0.325},
+                }},
+                "fields": "userEnteredFormat(backgroundColor)",
+            }
+        }]
+    }
+    print("Sending batchUpdate request:")
+    pprint.pprint(req)
+    try:
+        resp = ss.batch_update(req)
+        print("\nbatchUpdate succeeded. Response:")
+        pprint.pprint(resp)
+    except Exception as exc:
+        print(f"\nbatchUpdate FAILED — {type(exc).__name__}: {exc}")
+        raise
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.DEBUG, format="%(levelname)s %(name)s: %(message)s")
+    test_format_row()

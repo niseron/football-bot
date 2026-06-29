@@ -63,14 +63,19 @@ def _rgb(hex_str: str) -> dict:
     return {"red": int(h[0:2], 16) / 255, "green": int(h[2:4], 16) / 255, "blue": int(h[4:6], 16) / 255}
 
 
-_WHITE       = _rgb("#ffffff")
-_LIGHT_GREEN = _rgb("#e8f5e9")
-_LIGHT_RED   = _rgb("#ffebee")
-_DARK_GREEN  = _rgb("#1a5c38")
-_WIN_GREEN   = _rgb("#00c853")
-_LOSS_RED    = _rgb("#d50000")
+_WHITE            = _rgb("#ffffff")
+_LIGHT_GREEN      = _rgb("#e8f5e9")
+_LIGHT_RED        = _rgb("#ffebee")
+_DARK_GREEN       = _rgb("#1a5c38")
+_WIN_GREEN        = _rgb("#00c853")
+_LOSS_RED         = _rgb("#d50000")
+_HALF_WIN_AMBER   = _rgb("#ffab00")   # half win — amber/gold
+_HALF_LOSS_ORANGE = _rgb("#ff6d00")   # half loss — deep orange
 _WHITE_TEXT  = {"red": 1.0, "green": 1.0, "blue": 1.0}
 _BLACK_TEXT  = {"red": 0.0, "green": 0.0, "blue": 0.0}
+
+# All result values that count as settled (not pending)
+_SETTLED_RESULTS: frozenset[str] = frozenset(["WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"])
 
 
 def _apply_formatting(ss: gspread.Spreadsheet) -> None:
@@ -128,18 +133,23 @@ def _apply_formatting(ss: gspread.Spreadsheet) -> None:
                 result_val = ""
             else:
                 result_val = all_rows[i][result_col]
-            if result_val in ("WIN", "LOSS"):
+            _RESULT_COLORS = {
+                "WIN":       _WIN_GREEN,
+                "HALF WIN":  _HALF_WIN_AMBER,
+                "HALF LOSS": _HALF_LOSS_ORANGE,
+                "LOSS":      _LOSS_RED,
+            }
+            if result_val in _RESULT_COLORS:
                 if result_val == "WIN":
                     wins_found += 1
-                else:
+                elif result_val == "LOSS":
                     losses_found += 1
-                cell_bg = _WIN_GREEN if result_val == "WIN" else _LOSS_RED
                 reqs.append({
                     "repeatCell": {
                         "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1,
                                    "startColumnIndex": result_col, "endColumnIndex": result_col + 1},
                         "cell": {"userEnteredFormat": {
-                            "backgroundColor": cell_bg,
+                            "backgroundColor": _RESULT_COLORS[result_val],
                             "textFormat": {"bold": True, "foregroundColor": _WHITE_TEXT},
                         }},
                         "fields": "userEnteredFormat(backgroundColor,textFormat)",
@@ -188,8 +198,14 @@ def _format_result_row(
     row_idx = sheet_row - 1  # Sheets API uses 0-based row indices
     reqs: list[dict] = []
 
-    # G: Result cell — green/white-bold for WIN, red/white-bold for LOSS
-    if result in ("WIN", "LOSS"):
+    # G: Result cell — coloured by outcome
+    _RESULT_BG = {
+        "WIN":       _WIN_GREEN,
+        "HALF WIN":  _HALF_WIN_AMBER,
+        "HALF LOSS": _HALF_LOSS_ORANGE,
+        "LOSS":      _LOSS_RED,
+    }
+    if result in _RESULT_BG:
         reqs.append({
             "repeatCell": {
                 "range": {
@@ -198,7 +214,7 @@ def _format_result_row(
                     "startColumnIndex": 6, "endColumnIndex": 7,
                 },
                 "cell": {"userEnteredFormat": {
-                    "backgroundColor": _WIN_GREEN if result == "WIN" else _LOSS_RED,
+                    "backgroundColor": _RESULT_BG[result],
                     "textFormat": {"bold": True, "foregroundColor": _WHITE_TEXT},
                 }},
                 "fields": "userEnteredFormat(backgroundColor,textFormat)",
@@ -403,7 +419,7 @@ def _recalculate_running_total(ws: gspread.Worksheet) -> None:
         result  = row[6] if len(row) > 6 else ""
         pnl_str = row[7] if len(row) > 7 else ""
         row_idx = i - 1  # 0-based for Sheets API
-        if result in ("WIN", "LOSS", "VOID") and pnl_str:
+        if result in _SETTLED_RESULTS and pnl_str:
             try:
                 pnl_units      = float(pnl_str)
                 running_units += pnl_units
@@ -446,15 +462,18 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         except ValueError:
             return 0.0
 
-    settled = [r for r in rows if len(r) > 6 and r[6] in ("WIN", "LOSS", "VOID")]
-    wins    = [r for r in settled if r[6] == "WIN"]
-    losses  = [r for r in settled if r[6] == "LOSS"]
-    voids   = [r for r in settled if r[6] == "VOID"]
-    pending = [r for r in rows if not (len(r) > 6 and r[6])]
+    settled     = [r for r in rows if len(r) > 6 and r[6] in _SETTLED_RESULTS]
+    wins        = [r for r in settled if r[6] == "WIN"]
+    half_wins   = [r for r in settled if r[6] == "HALF WIN"]
+    half_losses = [r for r in settled if r[6] == "HALF LOSS"]
+    losses      = [r for r in settled if r[6] == "LOSS"]
+    voids       = [r for r in settled if r[6] == "VOID"]
+    pending     = [r for r in rows if not (len(r) > 6 and r[6])]
 
-    total_pnl_units = round(sum(_pnl(r) for r in settled), 2)
-    total_pnl_euros = round(total_pnl_units * UNIT_STAKE, 2)
-    win_rate        = round(len(wins) / len(settled) * 100, 1) if settled else 0.0
+    total_pnl_units  = round(sum(_pnl(r) for r in settled), 2)
+    total_pnl_euros  = round(total_pnl_units * UNIT_STAKE, 2)
+    full_wr_settled  = [r for r in settled if r[6] in ("WIN", "LOSS")]
+    win_rate         = round(len(wins) / len(full_wr_settled) * 100, 1) if full_wr_settled else 0.0
 
     # Current bankroll = last non-empty J column value
     current_bankroll = STARTING_BANKROLL
@@ -506,6 +525,8 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         ["", ""],
         ["Total picks",           len(rows)],
         ["  Wins",                len(wins)],
+        ["  Half Wins",           len(half_wins)],
+        ["  Half Losses",         len(half_losses)],
         ["  Losses",              len(losses)],
         ["  Voids",               len(voids)],
         ["  Pending",             len(pending)],
@@ -557,10 +578,10 @@ def finalize_workbook(wb=None) -> None:
 
 # ── Manual result update ──────────────────────────────────────────────────────
 
-def update_result(match_query: str, pick_query: str, result: str) -> bool:
+def update_result(match_query: str, pick_query: str, result: str, pnl: float | None = None) -> bool:
     result = result.upper()
-    if result not in ("WIN", "LOSS", "VOID"):
-        raise ValueError(f"Result must be WIN, LOSS or VOID — got '{result}'")
+    if result not in ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"):
+        raise ValueError(f"Result must be WIN, HALF WIN, HALF LOSS, LOSS or VOID — got '{result}'")
 
     try:
         ws = _picks_ws()
@@ -597,7 +618,17 @@ def update_result(match_query: str, pick_query: str, result: str) -> bool:
         odds = float(rows[target_row - 1][4]) if len(rows[target_row - 1]) > 4 and rows[target_row - 1][4] else 1.0
     except ValueError:
         odds = 1.0
-    pnl = round(odds - 1, 2) if result == "WIN" else (-1.0 if result == "LOSS" else 0.0)
+    if pnl is None:
+        if result == "WIN":
+            pnl = round(odds - 1, 2)
+        elif result == "HALF WIN":
+            pnl = round(0.5 * (odds - 1), 2)
+        elif result == "HALF LOSS":
+            pnl = -0.50
+        elif result == "LOSS":
+            pnl = -1.0
+        else:
+            pnl = 0.0
 
     update_row_result(target_row, result, pnl)
     finalize_workbook()
@@ -696,7 +727,7 @@ def get_weekly_data() -> dict:
         if week_mon <= dt <= week_sun:
             week_rows.append(r)
 
-    settled  = [r for r in week_rows if r["result"] in ("WIN", "LOSS", "VOID")]
+    settled  = [r for r in week_rows if r["result"] in _SETTLED_RESULTS]
     wins     = [r for r in settled if r["result"] == "WIN"]
     losses   = [r for r in settled if r["result"] == "LOSS"]
     pending  = [r for r in week_rows if not r["result"]]
@@ -740,7 +771,7 @@ def get_bet_type_breakdown() -> list[dict]:
             continue
         result   = row[6].strip().upper() if len(row) > 6 else ""
         bet_type = row[2].strip()         if len(row) > 2 else ""
-        if result not in ("WIN", "LOSS") or not bet_type:
+        if result not in ("WIN", "HALF WIN", "HALF LOSS", "LOSS") or not bet_type:
             continue
         try:
             pnl = float(row[7]) if len(row) > 7 and row[7] else 0.0
@@ -749,8 +780,9 @@ def get_bet_type_breakdown() -> list[dict]:
         g = groups[bet_type]
         if result == "WIN":
             g["wins"] += 1
-        else:
+        elif result == "LOSS":
             g["losses"] += 1
+        # HALF WIN / HALF LOSS count toward P&L but not win/loss totals
         g["pnl"] += pnl
 
     breakdown = []
@@ -811,12 +843,15 @@ def get_overall_win_rate() -> float:
 
 
 def get_summary_win_rate() -> float:
-    """Read the all-time win rate directly from cell B9 of the Summary sheet."""
+    """Read the all-time win rate from the Summary sheet by scanning for the 'Win rate' label."""
     try:
-        ws  = _get_spreadsheet().worksheet("Summary")
-        val = ws.acell("B9").value  # stored as e.g. "75.0%"
-        if val and val.endswith("%"):
-            return float(val.rstrip("%"))
+        ws   = _get_spreadsheet().worksheet("Summary")
+        rows = ws.get_all_values()
+        for row in rows:
+            if row and row[0].strip().lower() == "win rate":
+                val = row[1].strip() if len(row) > 1 else ""
+                if val.endswith("%"):
+                    return float(val.rstrip("%"))
     except Exception as exc:
         log.warning("Could not read win rate from Summary sheet: %s", exc)
     return 0.0
@@ -859,6 +894,70 @@ def cleanup_duplicates() -> int:
         log.info("No duplicates found")
 
     return len(to_delete)
+
+
+# ── One-time manual fixes ─────────────────────────────────────────────────────
+
+def fix_brazil_japan_picks() -> None:
+    """
+    One-time manual fix for the Brazil vs Japan picks:
+      Match Winner / Brazil Win @ 1.80  →  WIN,       P&L +0.80
+      Asian Handicap / Brazil -1.5      →  HALF LOSS, P&L -0.50
+    Scans bottom-up for the most recent unfilled rows matching each pick.
+    """
+    try:
+        ws   = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return
+
+    targets = [
+        {
+            "match_key": "brazil", "opp_key": "japan",
+            "bt_key":    "match winner",
+            "pick_key":  "brazil win",
+            "result":    "WIN",
+            "pnl":       0.80,
+        },
+        {
+            "match_key": "brazil", "opp_key": "japan",
+            "bt_key":    "asian handicap",
+            "pick_key":  "brazil -1.5",
+            "result":    "HALF LOSS",
+            "pnl":       -0.50,
+        },
+    ]
+
+    changed = 0
+    for fix in targets:
+        for i in range(len(rows) - 1, 0, -1):  # bottom-up → most recent first
+            row = rows[i]
+            if not row or not row[0]:
+                continue
+            match_val  = (row[1] if len(row) > 1 else "").lower()
+            bt_val     = (row[2] if len(row) > 2 else "").lower()
+            pick_val   = (row[3] if len(row) > 3 else "").lower()
+            result_val =  row[6] if len(row) > 6 else ""
+
+            if (fix["match_key"] in match_val and fix["opp_key"] in match_val
+                    and fix["bt_key"]   in bt_val
+                    and fix["pick_key"] in pick_val
+                    and not result_val):
+                sheet_row = i + 1  # rows list is 0-based; sheet rows are 1-based
+                update_row_result(sheet_row, fix["result"], fix["pnl"])
+                print(
+                    f"Fixed row {sheet_row}: {row[1]} | {row[2]} | {row[3]}"
+                    f" → {fix['result']} ({fix['pnl']:+.2f})"
+                )
+                changed += 1
+                break
+
+    if changed:
+        finalize_workbook()
+        print(f"Done. Fixed {changed} row(s) — running totals and Summary refreshed.")
+    else:
+        print("No matching unfilled Brazil vs Japan rows found.")
 
 
 # ── Compatibility stub ────────────────────────────────────────────────────────

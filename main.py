@@ -88,19 +88,6 @@ claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ── API helpers ───────────────────────────────────────────────────────────────
 
-def _kickoff_hour_utc(match: dict) -> int | None:
-    """Return the kickoff hour (UTC, 0-23) or None if unparseable."""
-    s = match.get("status", {})
-    ko_str = s.get("utcTime", match.get("time", ""))
-    if not ko_str:
-        return None
-    try:
-        ko = datetime.fromisoformat(ko_str.replace("Z", "+00:00"))
-        return ko.hour
-    except (ValueError, TypeError):
-        return None
-
-
 def _is_upcoming(match: dict) -> bool:
     s = match.get("status", {})
     return (
@@ -131,10 +118,12 @@ def fetch_upcoming_matches() -> list[dict]:
 def build_fixture_summary(match: dict) -> dict:
     status = match.get("status", {})
     return {
-        "match_id": match["id"],
-        "home": match["home"]["longName"],
-        "away": match["away"]["longName"],
+        "match_id":    match["id"],
+        "home":        match["home"]["longName"],
+        "away":        match["away"]["longName"],
         "kickoff_utc": status.get("utcTime", match.get("time", "")),
+        "home_id":     match["home"].get("id"),
+        "away_id":     match["away"].get("id"),
     }
 
 
@@ -189,11 +178,133 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
     return result
 
 
+# ── Form & H2H enrichment ────────────────────────────────────────────────────
+
+def _api_headers() -> dict:
+    return {"x-rapidapi-host": RAPIDAPI_HOST, "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY", "")}
+
+
+def _fetch_team_recent(team_id: int, n: int = 5) -> list[dict]:
+    """Return last n finished matches for a team. Empty list on any error."""
+    try:
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/football-get-team-matches",
+            headers=_api_headers(),
+            params={"teamId": team_id, "matchType": "previous", "limit": n},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", {}).get("matches", [])[:n]
+    except Exception as exc:
+        log.debug("fetch_team_recent(%s) skipped: %s", team_id, exc)
+        return []
+
+
+def _fetch_h2h(home_id: int, away_id: int, n: int = 5) -> list[dict]:
+    """Return last n H2H meetings between two teams. Empty list on any error."""
+    try:
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/football-get-h2h",
+            headers=_api_headers(),
+            params={"firstTeamId": home_id, "secondTeamId": away_id, "limit": n},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("response", {}).get("matches", [])[:n]
+    except Exception as exc:
+        log.debug("fetch_h2h(%s, %s) skipped: %s", home_id, away_id, exc)
+        return []
+
+
+def _result_for_team(match: dict, team_id: int) -> str:
+    try:
+        h_id = match["home"].get("id")
+        h_s  = int(match["home"].get("score") or 0)
+        a_s  = int(match["away"].get("score") or 0)
+        is_home = (h_id == team_id)
+        gs, gc = (h_s, a_s) if is_home else (a_s, h_s)
+        if gs > gc: return "W"
+        if gs < gc: return "L"
+        return "D"
+    except Exception:
+        return "?"
+
+
+def _form_string(matches: list[dict], team_id: int) -> str:
+    """Space-separated W/D/L string, oldest → newest."""
+    return " ".join(_result_for_team(m, team_id) for m in matches)
+
+
+def _summarize_match(match: dict, team_id: int | None = None) -> dict:
+    try:
+        h   = match["home"]["longName"]
+        a   = match["away"]["longName"]
+        h_s = match["home"].get("score", "?")
+        a_s = match["away"].get("score", "?")
+        s: dict = {"match": f"{h} vs {a}", "score": f"{h_s}-{a_s}"}
+        if team_id is not None:
+            s["venue"] = "H" if match["home"].get("id") == team_id else "A"
+        return s
+    except Exception:
+        return {}
+
+
+def enrich_with_context(fixtures_by_league: dict[str, list[dict]]) -> None:
+    """
+    Mutates each fixture in-place, adding recent form and H2H context.
+    All network calls are individually try/except'd — failure leaves the
+    fixture unchanged and the rest of the job continues normally.
+    """
+    team_cache: dict[int, list[dict]] = {}
+
+    for league, fixtures in fixtures_by_league.items():
+        for fixture in fixtures:
+            home_id = fixture.get("home_id")
+            away_id = fixture.get("away_id")
+            if not home_id or not away_id:
+                continue
+
+            # Fetch (or reuse cached) recent matches for each team
+            if home_id not in team_cache:
+                time.sleep(1)
+                team_cache[home_id] = _fetch_team_recent(home_id)
+            home_matches = team_cache[home_id]
+
+            if away_id not in team_cache:
+                time.sleep(1)
+                team_cache[away_id] = _fetch_team_recent(away_id)
+            away_matches = team_cache[away_id]
+
+            # Head-to-head
+            time.sleep(1)
+            h2h_matches = _fetch_h2h(home_id, away_id)
+
+            fixture["home_form"]   = _form_string(home_matches, home_id)
+            fixture["away_form"]   = _form_string(away_matches, away_id)
+            fixture["home_recent"] = [_summarize_match(m, home_id) for m in home_matches]
+            fixture["away_recent"] = [_summarize_match(m, away_id) for m in away_matches]
+            fixture["h2h"]         = [_summarize_match(m) for m in h2h_matches]
+
+            log.info(
+                "Context enriched: %s vs %s | home=%s away=%s h2h=%d",
+                fixture["home"], fixture["away"],
+                fixture["home_form"] or "N/A",
+                fixture["away_form"] or "N/A",
+                len(h2h_matches),
+            )
+
+
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a professional football betting analyst with deep expertise in the Premier League,
 Belgian Jupiler Pro League, and international tournament football including the FIFA World Cup.
 You receive upcoming fixtures for the next 48 hours and must identify the top 5 value bets across all competitions.
+
+Each fixture may include the following enriched context — use it to sharpen your analysis:
+- home_form / away_form: last 5 results for each team as W/D/L (oldest → newest). venue field: H=home, A=away.
+- home_recent / away_recent: score details for those last 5 matches.
+- h2h: last 5 head-to-head meetings between the two teams with scores.
+When this data is present, weight recent form and H2H trends heavily in your reasoning.
 
 Since live odds are not provided, use your knowledge of typical market pricing to estimate realistic
 decimal odds (e.g. a heavy favourite ~1.35, slight favourite ~1.75, toss-up ~2.00 each side).
@@ -222,7 +333,13 @@ Return ONLY the JSON block, no other text."""
 
 
 def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
-    payload = json.dumps(fixtures_by_league, indent=2, default=str)
+    # Strip internal team/match IDs — not useful to Claude
+    _STRIP = {"home_id", "away_id"}
+    clean = {
+        league: [{k: v for k, v in f.items() if k not in _STRIP} for f in fixtures]
+        for league, fixtures in fixtures_by_league.items()
+    }
+    payload = json.dumps(clean, indent=2, default=str)
     message = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2048,
@@ -320,6 +437,11 @@ async def daily_picks_job():
         log.info("  %s: %d upcoming fixtures", league, len(fixtures))
 
     try:
+        enrich_with_context(fixtures_by_league)
+    except Exception as exc:
+        log.warning("Context enrichment failed — proceeding without form/H2H data: %s", exc)
+
+    try:
         picks = analyse_with_claude(fixtures_by_league)
     except Exception as exc:
         log.error("Claude analysis failed: %s", exc)
@@ -360,76 +482,6 @@ async def daily_picks_job():
         log.info("Picks card sent: %s", card.name)
     except Exception as exc:
         log.warning("Picks card failed (non-fatal): %s", exc)
-
-
-async def evening_picks_job():
-    log.info("Starting evening picks job")
-
-    if picks_exist_for_session("evening"):
-        log.info("Evening picks already logged for today — skipping")
-        return
-
-    try:
-        all_matches = fetch_upcoming_matches()
-        log.info("Fetched %d total matches for next 48 hours", len(all_matches))
-    except Exception as exc:
-        log.error("Failed to fetch matches for evening run: %s", exc)
-        return
-
-    # Only fixtures kicking off at 18:00 UTC or later
-    evening_matches = [m for m in all_matches if (_kickoff_hour_utc(m) or 0) >= 18]
-    log.info("Evening filter: %d matches with kickoff >= 18:00 UTC", len(evening_matches))
-
-    fixtures_by_league = partition_fixtures(evening_matches)
-
-    if not fixtures_by_league:
-        log.info("No evening fixtures across tracked competitions — skipping analysis")
-        return
-
-    for league, fixtures in fixtures_by_league.items():
-        log.info("  %s: %d evening fixtures", league, len(fixtures))
-
-    try:
-        picks = analyse_with_claude(fixtures_by_league)
-    except Exception as exc:
-        log.error("Claude analysis failed (evening): %s", exc)
-        return
-
-    try:
-        for pick in picks:
-            pick["kelly"] = calculate_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
-            )
-    except Exception as exc:
-        log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
-
-    for pick in picks:
-        try:
-            log_pick(
-                match=pick["match"],
-                league=pick["league"],
-                bet_type=pick["bet_type"],
-                pick=pick["pick"],
-                odds=float(pick["odds"]),
-                confidence=pick.get("confidence", "N/A"),
-                session="evening",
-            )
-        except Exception as exc:
-            log.warning("Failed to log evening pick: %s", exc)
-
-    message = format_telegram_message(picks, header="Evening Picks")
-    try:
-        await send_to_telegram(message)
-        log.info("Sent %d evening picks to Telegram", len(picks))
-    except Exception as exc:
-        log.error("Telegram send failed (evening): %s", exc)
-
-    try:
-        card = generate_picks_card(picks, session="evening")
-        await _send_photo(card)
-        log.info("Evening picks card sent: %s", card.name)
-    except Exception as exc:
-        log.warning("Evening picks card failed (non-fatal): %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

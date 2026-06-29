@@ -9,6 +9,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import sys
@@ -126,7 +127,8 @@ def _score_description(
 
 
 def _format_result_notification(r: dict) -> str:
-    emoji   = "✅" if r["result"] == "WIN" else ("❌" if r["result"] == "LOSS" else "⬜")
+    _EMOJI  = {"WIN": "✅", "HALF WIN": "🟡", "HALF LOSS": "🟠", "LOSS": "❌"}
+    emoji   = _EMOJI.get(r["result"], "⬜")
     pnl_str = f"+{r['pnl']:.2f}" if r["pnl"] >= 0 else f"{r['pnl']:.2f}"
     desc    = _score_description(
         r["bet_type"], r["pick"],
@@ -193,6 +195,27 @@ def _parse_handicap(pick: str) -> tuple[str, float] | None:
     return pick[:m.start()].strip().lower(), float(m.group(1))
 
 
+def _is_quarter_line(hc: float) -> bool:
+    """Quarter handicaps (±0.25, ±0.75, ±1.25 …) produce half results."""
+    return (hc * 2) % 1 > 0.01
+
+
+def _eval_ah_line(adj: float, opp: float) -> str:
+    if adj > opp: return "WIN"
+    if adj < opp: return "LOSS"
+    return "VOID"
+
+
+def _combine_ah_halves(r1: str, r2: str) -> str:
+    pair = frozenset([r1, r2])
+    if pair == frozenset(["WIN"]):           return "WIN"
+    if pair == frozenset(["WIN",  "VOID"]):  return "HALF WIN"
+    if pair == frozenset(["VOID"]):          return "VOID"
+    if pair == frozenset(["VOID", "LOSS"]):  return "HALF LOSS"
+    if pair == frozenset(["LOSS"]):          return "LOSS"
+    return "VOID"  # WIN + LOSS edge case — treat as push
+
+
 def evaluate_pick(
     bet_type: str,
     pick: str,
@@ -246,15 +269,24 @@ def evaluate_pick(
         if parsed:
             team_q, hc = parsed
             if team_q in hn or hn in team_q:
-                adj = home_score + hc
-                if   adj > away_score: return "WIN"
-                elif adj < away_score: return "LOSS"
-                else:                  return "VOID"
+                score, opp = home_score, away_score
             elif team_q in an or an in team_q:
-                adj = away_score + hc
-                if   adj > home_score: return "WIN"
-                elif adj < home_score: return "LOSS"
-                else:                  return "VOID"
+                score, opp = away_score, home_score
+            else:
+                score, opp = None, None
+            if score is not None:
+                if _is_quarter_line(hc):
+                    h_low  = math.floor(hc * 2) / 2
+                    h_high = math.ceil(hc * 2) / 2
+                    return _combine_ah_halves(
+                        _eval_ah_line(score + h_low,  opp),
+                        _eval_ah_line(score + h_high, opp),
+                    )
+                else:
+                    adj = score + hc
+                    if   adj > opp: return "WIN"
+                    elif adj < opp: return "LOSS"
+                    else:           return "VOID"
 
     # ── Double Chance ────────────────────────────────────────────────────────
     elif "double chance" in bt:
@@ -352,7 +384,16 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
             stats["errors"] += 1
             continue
 
-        pnl = round(odds - 1, 2) if result == "WIN" else (-1.0 if result == "LOSS" else 0.0)
+        if result == "WIN":
+            pnl = round(odds - 1, 2)
+        elif result == "HALF WIN":
+            pnl = round(0.5 * (odds - 1), 2)
+        elif result == "HALF LOSS":
+            pnl = -0.50
+        elif result == "LOSS":
+            pnl = -1.0
+        else:
+            pnl = 0.0
         update_row_result(sheet_row, result, pnl)
         changed = True
         stats["updated"] += 1
@@ -491,7 +532,7 @@ if __name__ == "__main__":
         # ── Per-pick Telegram notifications for yesterday ─────────────────────
         yesterday = date.today() - timedelta(days=1)
         yesterday_picks = get_picks_for_date(yesterday)
-        settled = [p for p in yesterday_picks if p["result"] in ("WIN", "LOSS")]
+        settled = [p for p in yesterday_picks if p["result"] in ("WIN", "HALF WIN", "HALF LOSS", "LOSS")]
 
         if not settled:
             print(f"\nNo settled picks for {yesterday} — skipping Telegram notifications.")
@@ -535,6 +576,10 @@ if __name__ == "__main__":
                 log.info("Results card sent: %s", card_path.name)
             except Exception as exc:
                 log.warning("Results card failed (non-fatal): %s", exc)
+
+    elif "--fix-brazil-japan" in sys.argv:
+        from excel_tracker import fix_brazil_japan_picks
+        fix_brazil_japan_picks()
 
     else:
         print("Running auto-result check now...")

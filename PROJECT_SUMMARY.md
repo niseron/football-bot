@@ -4,11 +4,12 @@
 
 An automated football betting analysis bot that:
 - Fetches upcoming fixtures from a live football API (RapidAPI)
-- Sends the fixture list to Claude AI (claude-sonnet-4-6) for betting analysis
-- Posts the top 5 value picks daily to a Telegram channel at 09:00 Brussels time
+- Enriches each fixture with last-5 team form and head-to-head history from the same API
+- Sends the enriched fixture list to Claude AI (claude-sonnet-4-6) for betting analysis
+- Posts the top 5 value picks daily to a Telegram channel at 09:00 Brussels time as a text message and a branded PNG card
 - Automatically checks match results every 30 minutes and updates Google Sheets
-- Posts a weekly performance summary every Monday at 09:05 Brussels time
-- Tracks all picks and P&L in a Google Sheet with a Picks tab and a Summary tab
+- Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
+- Tracks all picks and P&L in a Google Sheet with conditional formatting, a Picks tab and a Summary tab
 
 Covered competitions: Premier League, Belgian Jupiler Pro League, FIFA World Cup 2026.
 
@@ -20,23 +21,26 @@ Covered competitions: Premier League, Belgian Jupiler Pro League, FIFA World Cup
 football-bot/
 │
 ├── run_all.py            Entry point for Railway — combines all 3 schedulers into one process
-├── main.py               Daily picks: fetches fixtures, runs Claude analysis, posts to Telegram
-├── auto_results.py       Automatic result checker — polls API every 30 min, updates Sheets
-├── weekly_summary.py     Posts Monday performance summary to Telegram
+├── main.py               Daily picks: fetches fixtures, enriches with form/H2H, runs Claude analysis, posts to Telegram
+├── auto_results.py       Automatic result checker — polls API every 30 min, updates Sheets, posts result cards
+├── weekly_summary.py     Posts Monday performance summary to Telegram with PNG card
 ├── excel_tracker.py      Google Sheets data layer — all read/write to the spreadsheet
 ├── tracker.py            SQLite layer — local backup of every pick in picks.db
+├── card_generator.py     Generates branded 1080×1080 PNG cards (picks, results, weekly summary)
 │
-├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID
+├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID/HALF WIN/HALF LOSS
 ├── backtest.py           Backtesting script against 2023-24 historical data (CSV output)
 ├── _run_now.py           Manual one-shot trigger — fetch + analyse + post immediately
 │
+├── cards/                Output folder for generated PNG cards (gitignored)
 ├── START_BOT.bat         Windows launcher — opens 4 cmd windows for local development
 ├── Procfile              Railway process definition: worker: python run_all.py
 ├── runtime.txt           Python version for Railway: python-3.12
+├── nixpacks.toml         Railway build config — installs fonts-dejavu for card text rendering
 ├── requirements.txt      Python dependencies
 │
 ├── .env                  Local secrets (not committed — in .gitignore)
-├── .gitignore            Excludes .env, picks.db, picks_tracker.xlsx, __pycache__
+├── .gitignore            Excludes .env, picks.db, picks_tracker.xlsx, __pycache__, cards/
 └── PROJECT_SUMMARY.md    This file
 ```
 
@@ -65,6 +69,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Process type:** `worker` (defined in Procfile — no HTTP port needed)
 - **Entry point:** `python run_all.py`
 - **Python version:** 3.12 (runtime.txt)
+- **Font support:** `nixpacks.toml` installs `fonts-dejavu` so Pillow can render card text on Railway
 - **Process:** Single process running three APScheduler jobs:
   - Daily picks — cron, 09:00 Europe/Brussels
   - Weekly summary — cron, Monday 09:05 Europe/Brussels
@@ -82,9 +87,10 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Channel ID:** `-1003617316561`
 - **Message format:** MarkdownV2
 - **What gets posted:**
-  - Daily picks at 09:00 (5 picks with match, bet type, odds, confidence, reasoning)
-  - Result notifications when a pick settles (WIN/LOSS with score and P&L)
-  - Weekly summary every Monday at 09:05 (win rate, P&L, best pick of the week)
+  - Daily picks at 09:00 — MarkdownV2 text message + 1080×1080 PNG picks card
+  - Result notifications when a pick settles (WIN / LOSS / HALF WIN / HALF LOSS with score and P&L)
+  - Results card (PNG) posted after all picks for a day are settled
+  - Weekly summary every Monday at 09:05 — text + PNG weekly summary card
 
 ---
 
@@ -95,42 +101,86 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Service account:** `football-bot@football-bot-499516.iam.gserviceaccount.com`
 - **GCP project:** `football-bot-499516`
 - **APIs enabled:** Google Sheets API, Google Drive API
-- **Status:** Fully working locally — connection tested and verified
 
 **Sheet tabs:**
 
 | Tab | Columns |
 |---|---|
-| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L |
-| Summary | Auto-calculated stats: win rate, total P&L, best bet type, best confidence level |
+| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€) |
+| Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, bet type breakdown table |
 
-**Pending:** Add `GOOGLE_SHEETS_ID` and `GOOGLE_CREDENTIALS_JSON` to Railway Variables tab so the deployed bot writes to Sheets.
+**Conditional formatting (applied via batchUpdate on every write):**
+
+| Result | Cell colour |
+|---|---|
+| WIN | Green (`#00c853`) |
+| HALF WIN | Amber (`#ffab00`) |
+| HALF LOSS | Deep orange (`#ff6d00`) |
+| LOSS | Red (`#d50000`) |
+| Bankroll ≥ €100 | Light green row |
+| Bankroll < €100 | Light red row |
 
 ---
 
 ## 7. Current Bot Features
 
+### Core picks pipeline
 - Top 5 value picks per day across all tracked competitions
 - Picks use actual team names (never generic "Home Win" / "Away Win")
-- Supports bet types: Match Winner, Both Teams to Score, Over/Under Goals, Asian Handicap, Double Chance
+- Supported bet types: Match Winner, Both Teams to Score, Over/Under Goals, Asian Handicap, Double Chance
 - Estimated decimal odds from Claude's market knowledge
 - Confidence rating per pick (High / Medium / Low)
-- 2–3 sentence reasoning per pick (form, head-to-head, value)
+- 2–3 sentence reasoning per pick citing form, head-to-head, and value
 - Duplicate pick prevention (won't re-post same pick same day)
+- Single daily job at 09:00 Brussels — evening picks job removed
+
+### Form & H2H enrichment (added)
+- Before calling Claude, `enrich_with_context()` fetches from RapidAPI:
+  - Last 5 matches for the home team (W/D/L form string + score details + home/away venue)
+  - Last 5 matches for the away team
+  - Last 5 head-to-head meetings between the two teams
+- Data is injected into the JSON payload sent to Claude so it can factor in recent form
+- Team results are cached within a run so the same team across multiple fixtures only hits the API once
+- All enrichment calls are individually try/except'd — any failure is logged and skipped without affecting pick generation
+
+### Asian Handicap half results (added)
+- Quarter-line handicaps (±0.25, ±0.75, ±1.25, ±1.75 …) are detected automatically
+- Each quarter line is split into its two component half-lines and evaluated separately
+- Combined result: WIN+VOID → HALF WIN, VOID+LOSS → HALF LOSS
+- P&L: HALF WIN = `+0.50 × (odds − 1)` units; HALF LOSS = `−0.50` units
+- HALF WIN / HALF LOSS flow through the entire stack: Sheets, formatting, Summary, notifications
+
+### Kelly Criterion staking (added)
+- Each pick gets a suggested stake calculated as half-Kelly, capped at 5% of real bankroll
+- Based on historical win rate for that specific bet type from settled Sheets data
+- Falls back to flat 1-unit (€10) stake when fewer than 10 settled picks exist for the bet type
+- Key constants in `excel_tracker.py`: `UNIT_STAKE = 10.0`, `REAL_BANKROLL = 1500.0`
+- Stake suggestion is included in the Telegram pick message
+
+### PNG pick and result cards (added — `card_generator.py`)
+- Dark neon aesthetic: black background, neon green accents, styled text
+- **Picks card** (1080×1080): generated after daily picks are posted; sent as a photo to Telegram
+- **Results card** (1080×1080): generated after results are finalized; sent as a photo to Telegram
+- **Weekly summary card** (1080×1080): generated and sent with the Monday weekly summary
+- Cards saved to `cards/` folder; win rate in the footer is pulled live from the Summary sheet
+- Font: DejaVu (installed on Railway via `nixpacks.toml`)
+
+### Tracking and reporting
 - Auto result detection with score-based evaluation for all supported bet types
-- Live result notifications sent to Telegram as soon as a match finishes
-- Running P&L tracked per pick and cumulatively
-- Weekly summary with win rate, weekly P&L, best pick of the week
-- World Cup 2026 support with group-stage and knockout match detection
-- Youth team filtering (U19, U21, U23 matches are excluded)
+- Live result notifications sent to Telegram as each match finishes
+- Running P&L tracked per pick and cumulatively; bankroll column updates after every result
+- Bet type breakdown in Summary sheet: wins, losses, win rate %, total P&L per bet type
+- Bet type breakdown also included in weekly Monday summary
+- Weekly summary date range shows the completed previous week (fixed from current week)
+- Win rate in `get_summary_win_rate()` scans by label (not hardcoded cell address) — robust to row additions
+- World Cup 2026 support: group-stage and knockout match detection via team name fallback
+- Youth team filtering (U19, U21, U23 matches excluded)
 
 ---
 
 ## 8. Still To Do
 
-- [ ] Add `GOOGLE_SHEETS_ID` and `GOOGLE_CREDENTIALS_JSON` to Railway Variables tab
-- [ ] Verify Railway worker process is enabled in Railway dashboard settings
-- [ ] Confirm first live pick is logged to Google Sheets after Railway redeploy
+All previously listed items are complete. The bot is fully operational on Railway.
 
 ---
 
@@ -150,9 +200,20 @@ Double-click `START_BOT.bat` in the `football-bot` folder. It opens 4 separate c
 python _run_now.py
 ```
 
+**To check and settle results now:**
+```
+python auto_results.py --results
+```
+
 **To manually update a pick result:**
 ```
 python update_result.py "Brazil vs Morocco" "BTTS" WIN
+```
+Supports: `WIN`, `LOSS`, `VOID`, `HALF WIN`, `HALF LOSS`
+
+**To apply a manual fix with custom P&L:**
+```
+python auto_results.py --fix-brazil-japan
 ```
 
 Requires a `.env` file in the `football-bot` folder with all 6 environment variables set.
@@ -165,7 +226,8 @@ Requires a `.env` file in the `football-bot` folder with all 6 environment varia
 
 **Branch:** `main`
 
-**Commits so far:**
+**Key commits:**
 1. `Initial commit` — full bot with Railway deployment files
 2. `fix: read RAPIDAPI_KEY from os.environ at call time` — fixed 401 API error
 3. `feat: migrate data storage from Excel to Google Sheets` — replaced openpyxl with gspread
+4. `Add Asian Handicap half results, form/H2H enrichment, and Brazil vs Japan fix` — quarter-line AH detection, form/H2H context injected into Claude prompt, HALF WIN/HALF LOSS throughout the stack

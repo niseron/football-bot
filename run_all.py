@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from auto_results import _format_result_notification, _telegram_send, run_auto_results
-from main import daily_picks_job, evening_picks_job
+from main import daily_picks_job
 from tracker import init_db
 from weekly_summary import post_weekly_summary
 
@@ -44,10 +44,6 @@ async def main() -> None:
         hour=9, minute=0, timezone="Europe/Brussels",
     )
     scheduler.add_job(
-        evening_picks_job, "cron",
-        hour=18, minute=0, timezone="Europe/Brussels",
-    )
-    scheduler.add_job(
         post_weekly_summary, "cron",
         day_of_week="mon", hour=9, minute=5, timezone="Europe/Brussels",
     )
@@ -57,7 +53,7 @@ async def main() -> None:
     scheduler.start()
 
     log.info(
-        "Scheduler running — morning picks 09:00, evening picks 18:00, "
+        "Scheduler running — morning picks 09:00, "
         "weekly summary Mon 09:05, live results every 30 min (Europe/Brussels)"
     )
 

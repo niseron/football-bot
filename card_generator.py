@@ -96,10 +96,10 @@ def _sep(d: ImageDraw.ImageDraw, y: int, x0: int = PAD) -> None:
     d.line([(x0, y), (SIZE - PAD, y)], fill=_SEP, width=1)
 
 
-def _bracket(d: ImageDraw.ImageDraw) -> None:
+def _bracket(d: ImageDraw.ImageDraw, canvas_h: int = CANVAS_H) -> None:
     m, arm, t = 38, 55, 3
     ex = SIZE - m
-    ey = CANVAS_H - m
+    ey = canvas_h - m
     for x, y, sx, sy in [(m, m, 1, 1), (ex, m, -1, 1), (m, ey, 1, -1), (ex, ey, -1, -1)]:
         d.line([(x, y), (x + sx * arm, y)], fill=_NEON, width=t)
         d.line([(x, y), (x, y + sy * arm)], fill=_NEON, width=t)
@@ -113,12 +113,12 @@ def _clip(s: str, f: ImageFont.FreeTypeFont, max_w: int) -> str:
     return (s + "…") if s else "…"
 
 
-def _canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
-    img = Image.new("RGB", (SIZE, CANVAS_H), _BG)
+def _canvas(canvas_h: int = CANVAS_H) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    img = Image.new("RGB", (SIZE, canvas_h), _BG)
     d   = ImageDraw.Draw(img)
     for x in range(0, SIZE + 1, 54):
-        d.line([(x, 0), (x, CANVAS_H)], fill=_GRID, width=1)
-    for y in range(0, CANVAS_H + 1, 54):
+        d.line([(x, 0), (x, canvas_h)], fill=_GRID, width=1)
+    for y in range(0, canvas_h + 1, 54):
         d.line([(0, y), (SIZE, y)], fill=_GRID, width=1)
     return img, d
 
@@ -167,54 +167,85 @@ def generate_picks_card(
     datstr = today.strftime("%d %b %Y").upper()
     is_eve = session == "evening"
 
-    img, d = _canvas()
-    _bracket(d)
+    f_num   = _font(56, bold=True)
+    f_match = _font(80, bold=True)
+    f_sub   = _font(60)
+    f_stat  = _font(64)
+    f_conf  = _font(44, bold=True)
+
+    shown  = picks[:5]
+    text_w = IW - 90                    # content width right of the pick number
+    tag_w  = 240                        # right-hand room for the confidence tag
+
+    def _match_lines(name: str) -> list[str]:
+        """Match name on one line when it fits beside the tag, else wrapped at ' vs '."""
+        if _tw(name, f_match) <= text_w - tag_w:
+            return [name]
+        if " vs " in name:
+            home, away = name.split(" vs ", 1)
+            return [_clip(f"{home} vs", f_match, text_w - tag_w), _clip(away, f_match, text_w)]
+        return [_clip(name, f_match, text_w - tag_w)]
+
+    def _bet_lines(p: dict) -> list[str]:
+        """Bet type · pick on one line when it fits, else the pick wraps below."""
+        bet = f"{p.get('bet_type', '')} · {p.get('pick', '')}"
+        if _tw(bet, f_sub) <= text_w:
+            return [bet]
+        return [_clip(f"{p.get('bet_type', '')} ·", f_sub, text_w),
+                _clip(str(p.get("pick", "")), f_sub, text_w)]
+
+    # Size the canvas to the content so there is no dead space at the bottom
+    header_h = PAD + 14 + _th(_font(52)) + 22 + _th(_font(36)) + 32 + 32
+    def _block_h(p: dict) -> int:
+        nm = len(_match_lines(p.get("match", "")))
+        nb = len(_bet_lines(p))
+        return (nm * _th(f_match) + (nm - 1) * 6 + 10
+                + nb * _th(f_sub) + (nb - 1) * 6 + 8 + _th(f_stat) + 30)
+    canvas_h = header_h + sum(_block_h(p) for p in shown) + max(len(shown) - 1, 0) * 22 + PAD
+
+    img, d = _canvas(canvas_h)
+    _bracket(d, canvas_h)
 
     subtitle = f"EVENING PICKS  ·  {datstr}" if is_eve else datstr
     y        = _draw_header(d, subtitle)
 
-    f_num   = _font(38, bold=True)
-    f_match = _font(46, bold=True)
-    f_sub   = _font(38)
-    f_stat  = _font(38)
-    f_conf  = _font(32, bold=True)
-
-    max_name_w = IW - 60 - 160  # room for pick number + confidence tag
-
-    for i, p in enumerate(picks[:5], 1):
+    for i, p in enumerate(shown, 1):
         conf     = p.get("confidence", "")
         conf_tag = f"[{conf.upper()}]"
         conf_col = _conf_color(conf)
 
         # Pick number
         d.text((PAD, y + 6), str(i), font=f_num, fill=_NEON)
-        x0 = PAD + 58
+        x0 = PAD + 90
 
-        # Match name (left) + confidence tag (right)
-        name = _clip(p.get("match", ""), f_match, max_name_w)
-        d.text((x0, y), name, font=f_match, fill=_WHITE)
-        d.text((SIZE - PAD - _tw(conf_tag, f_conf), y + 10),
+        # Match name (wrapped at ' vs ' if needed) + confidence tag top-right
+        d.text((SIZE - PAD - _tw(conf_tag, f_conf), y + 16),
                conf_tag, font=f_conf, fill=conf_col)
-        y += _th(f_match) + 10
+        for line in _match_lines(p.get("match", "")):
+            d.text((x0, y), line, font=f_match, fill=_WHITE)
+            y += _th(f_match) + 6
+        y += 4
 
-        # Bet type · pick selection
-        bet = _clip(f"{p.get('bet_type', '')}  ·  {p.get('pick', '')}", f_sub, IW - 58)
-        d.text((x0, y), bet, font=f_sub, fill=_DIM)
-        y += _th(f_sub) + 8
+        # Bet type · pick selection (wraps when too long)
+        bet_lines = _bet_lines(p)
+        for j, line in enumerate(bet_lines):
+            d.text((x0, y), line, font=f_sub, fill=_DIM)
+            y += _th(f_sub) + (6 if j < len(bet_lines) - 1 else 0)
+        y += 8
 
         # Odds — Claude estimate, plus real market odds/value tag when available
         market_odds = p.get("market_odds")
         if market_odds is not None:
-            stat = f"Claude {p.get('odds', '')}  ·  Market {market_odds}"
+            stat = f"Claude {p.get('odds', '')} · Mkt {market_odds}"
             if p.get("value"):
-                stat += "  [VALUE]"
+                stat += " [VALUE]"
         else:
             stat = f"Odds {p.get('odds', '')}"
-        stat = _clip(stat, f_stat, IW - 58)
+        stat = _clip(stat, f_stat, text_w)
         d.text((x0, y), stat, font=f_stat, fill=_NEON)
         y += _th(f_stat) + 30
 
-        if i < len(picks[:5]):
+        if i < len(shown):
             _sep(d, y, x0=x0)
             y += 22
 

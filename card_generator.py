@@ -212,7 +212,14 @@ def generate_picks_card(
             stat = f"Odds {p.get('odds', '')}"
         stat = _clip(stat, f_stat, IW - 58)
         d.text((x0, y), stat, font=f_stat, fill=_NEON)
-        y += _th(f_stat) + 30
+        y += _th(f_stat)
+
+        kelly = p.get("kelly")
+        if kelly is not None and float(kelly.get("stake") or 0) == 0:
+            y += 8
+            d.text((x0, y), "NO STAKE — NEGATIVE EDGE", font=f_conf, fill=_LOSS)
+            y += _th(f_conf)
+        y += 30
 
         if i < len(picks[:5]):
             _sep(d, y, x0=x0)

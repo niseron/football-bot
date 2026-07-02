@@ -584,7 +584,9 @@ def format_telegram_message(picks: list[dict], header: str = "Football Picks") -
     lines = [f"*{_escape_md(header)} — {_escape_md(today)}*\n"]
     for i, p in enumerate(picks, 1):
         kelly = p.get("kelly")
-        if kelly is not None:
+        if kelly is not None and float(kelly.get("stake") or 0) == 0:
+            kelly_line = "  ⛔ No stake — negative edge\n"
+        elif kelly is not None:
             note_suffix = f" — {_escape_md(kelly['note'])}" if kelly.get("note") else ""
             stake_str = f"{kelly['stake']:.2f}"
             kelly_line = (

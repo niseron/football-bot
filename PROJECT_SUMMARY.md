@@ -194,6 +194,17 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 
 ---
 
+## Known Limitations & Future Issues (not yet addressed)
+
+- **Odds timing bias** — Market probabilities in column L are captured at 9AM pick time, not closing odds. Closing line value is the true gold standard for measuring edge; odds move all day as sharp money arrives. The `edge_report` is therefore flattering by an unknown amount. Future fix: capture odds a second time near kickoff and log closing odds in a separate column.
+- **Calibration sample size** — `calibration_report` and `edge_report` are statistically meaningless below ~300 settled picks with probability data. Data collection started 30 Jun 2026. Do not draw conclusions from early monthly reports.
+- **Win rate is the wrong success metric** — a high win rate at low average odds can still be break-even or negative ROI. The metric that matters is ROI vs market implied probability, which the `edge_report` now tracks.
+- **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap.
+- **No injury/lineup data** — the bot has form and H2H context but no player availability, injury status, or individual player form. Napoleon Games odds are also not in The Odds API, so market comparison uses consensus European bookmaker odds instead.
+- **Kelly stakes based on thin data** — bet-type win rates driving Kelly calculations are based on small samples (10-30 picks per type) and may regress significantly.
+
+---
+
 ## 8. Still To Do
 
 All previously listed items are complete. The bot is fully operational on Railway.

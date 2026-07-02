@@ -10,42 +10,31 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 from main import (
-    _kickoff_hour_utc,
     fetch_upcoming_matches,
     partition_fixtures,
+    enrich_with_context,
+    enrich_picks_with_real_odds,
     analyse_with_claude,
     format_telegram_message,
     send_to_telegram,
+    _send_photo,
 )
+from excel_tracker import calculate_kelly_stake
 from tracker import log_pick, picks_exist_for_session
 
 
 async def run():
     force = "--force" in sys.argv
-    evening = "--evening" in sys.argv
+    session = "morning"
 
-    if evening:
-        log.info("Manual evening run triggered")
-        session = "evening"
-        header = "Evening Picks"
-    else:
-        log.info("Manual morning run triggered")
-        session = "morning"
-        header = "Football Picks"
+    log.info("Manual run triggered")
 
     if not force and picks_exist_for_session(session):
-        log.info(
-            "%s picks already logged for today — skipping (use --force to override)",
-            session.capitalize(),
-        )
+        log.info("Picks already logged for today — skipping (use --force to override)")
         return
 
     all_matches = fetch_upcoming_matches()
     log.info("Fetched %d total matches (next 48 hours)", len(all_matches))
-
-    if evening:
-        all_matches = [m for m in all_matches if (_kickoff_hour_utc(m) or 0) >= 18]
-        log.info("Evening filter: %d matches with kickoff >= 18:00 UTC", len(all_matches))
 
     fixtures_by_league = partition_fixtures(all_matches)
     if not fixtures_by_league:
@@ -55,11 +44,30 @@ async def run():
     for league, fx in fixtures_by_league.items():
         log.info("  %s: %d fixtures", league, len(fx))
 
+    try:
+        enrich_with_context(fixtures_by_league)
+    except Exception as exc:
+        log.warning("Context enrichment failed — proceeding without form/H2H data: %s", exc)
+
     picks = analyse_with_claude(fixtures_by_league)
     log.info("Claude returned %d pick(s)", len(picks))
 
+    try:
+        enrich_picks_with_real_odds(picks)
+    except Exception as exc:
+        log.warning("Real odds enrichment failed — proceeding with Claude odds only: %s", exc)
+
+    try:
+        for pick in picks:
+            pick["kelly"] = calculate_kelly_stake(
+                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+            )
+    except Exception as exc:
+        log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
+
     for pick in picks:
         try:
+            claude_prob = pick.get("probability")
             log_pick(
                 match=pick["match"],
                 league=pick["league"],
@@ -68,12 +76,22 @@ async def run():
                 odds=float(pick["odds"]),
                 confidence=pick.get("confidence", "N/A"),
                 session=session,
+                claude_prob=float(claude_prob) if claude_prob is not None else None,
+                market_prob=pick.get("market_prob"),
             )
         except Exception as exc:
             log.warning("Failed to log pick: %s", exc)
 
-    await send_to_telegram(format_telegram_message(picks, header=header))
+    await send_to_telegram(format_telegram_message(picks, header="Football Picks"))
     log.info("Sent %d pick(s) to Telegram", len(picks))
+
+    try:
+        from card_generator import generate_picks_card
+        card = generate_picks_card(picks, session=session)
+        await _send_photo(card)
+        log.info("Picks card sent: %s", card.name)
+    except Exception as exc:
+        log.warning("Picks card failed (non-fatal): %s", exc)
 
 
 asyncio.run(run())

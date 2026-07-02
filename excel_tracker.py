@@ -18,9 +18,12 @@ log = logging.getLogger(__name__)
 # Kept so any script that imports EXCEL_PATH still compiles
 EXCEL_PATH = Path(__file__).parent / "picks_tracker.xlsx"
 
+# New columns must be appended at the END — result/P&L/running-total logic
+# addresses columns G/H/I/J by letter throughout this module.
 PICKS_HEADERS = [
     "Date", "Match", "Bet Type", "Pick", "Odds",
     "Confidence", "Result", "Profit/Loss", "Running Total P&L", "Bankroll (€)",
+    "Claude Prob %", "Market Prob %",
 ]
 
 STARTING_BANKROLL = 100.0    # € tracked bankroll (used for running P&L in the sheet)
@@ -285,13 +288,15 @@ def init_excel() -> None:
         ws.append_row(PICKS_HEADERS, value_input_option="RAW")
         log.info("Created 'Picks' sheet with headers")
     else:
-        # Add Bankroll column header if the sheet pre-dates this feature
+        # Add any column headers the sheet pre-dates (Bankroll, Claude/Market Prob %)
         ws = ss.worksheet("Picks")
         header = ws.row_values(1)
         if len(header) < len(PICKS_HEADERS):
             ws.resize(cols=len(PICKS_HEADERS))
-            ws.update_cell(1, len(PICKS_HEADERS), PICKS_HEADERS[-1])
-            log.info("Added 'Bankroll (€)' column header to existing Picks sheet")
+            for idx in range(len(header), len(PICKS_HEADERS)):
+                ws.update_cell(1, idx + 1, PICKS_HEADERS[idx])
+            log.info("Added missing column header(s) to existing Picks sheet: %s",
+                     PICKS_HEADERS[len(header):])
 
     if "Summary" not in titles:
         ss.add_worksheet("Summary", rows=30, cols=2)
@@ -316,6 +321,8 @@ def log_to_excel(
     odds: float,
     confidence: str,
     pick_date: str | None = None,
+    claude_prob: float | None = None,
+    market_prob: float | None = None,
 ) -> None:
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
     date_str = dt.strftime("%d-%b-%Y")
@@ -327,6 +334,17 @@ def log_to_excel(
     except Exception as exc:
         log.error("Sheets read failed: %s", exc)
         return
+
+    # Self-migrate: widen the sheet and fill in headers if it pre-dates the prob columns
+    try:
+        header = rows[0] if rows else []
+        if len(header) < len(PICKS_HEADERS):
+            if ws.col_count < len(PICKS_HEADERS):
+                ws.resize(cols=len(PICKS_HEADERS))
+            for idx in range(len(header), len(PICKS_HEADERS)):
+                ws.update_cell(1, idx + 1, PICKS_HEADERS[idx])
+    except Exception as exc:
+        log.warning("Picks header migration failed (non-fatal): %s", exc)
 
     for row in rows[1:]:
         if not row or not row[0]:
@@ -345,7 +363,11 @@ def log_to_excel(
             log.info("Sheets: skipping duplicate '%s — %s'", match, pick)
             return
 
-    new_row = [date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", "", ""]
+    new_row = [
+        date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", "", "",
+        round(float(claude_prob), 1) if claude_prob is not None else "",
+        round(float(market_prob), 1) if market_prob is not None else "",
+    ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
         log.info("Sheets: logged '%s — %s'", match, pick)

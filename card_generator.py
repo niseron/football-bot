@@ -25,9 +25,10 @@ _VOID   = (200, 175, 60)
 _GRID   = (13,  43,  26)
 _SEP    = (28,  58,  42)
 
-SIZE = 1080
-PAD  = 64               # outer margin
-IW   = SIZE - 2 * PAD  # 952 usable px
+SIZE    = 1080
+CANVAS_H = 1440          # taller canvas keeps large text readable on mobile
+PAD     = 64             # outer margin
+IW      = SIZE - 2 * PAD  # 952 usable px
 
 CARDS_DIR = Path(__file__).parent / "cards"
 
@@ -97,8 +98,9 @@ def _sep(d: ImageDraw.ImageDraw, y: int, x0: int = PAD) -> None:
 
 def _bracket(d: ImageDraw.ImageDraw) -> None:
     m, arm, t = 38, 55, 3
-    e = SIZE - m
-    for x, y, sx, sy in [(m, m, 1, 1), (e, m, -1, 1), (m, e, 1, -1), (e, e, -1, -1)]:
+    ex = SIZE - m
+    ey = CANVAS_H - m
+    for x, y, sx, sy in [(m, m, 1, 1), (ex, m, -1, 1), (m, ey, 1, -1), (ex, ey, -1, -1)]:
         d.line([(x, y), (x + sx * arm, y)], fill=_NEON, width=t)
         d.line([(x, y), (x, y + sy * arm)], fill=_NEON, width=t)
 
@@ -112,11 +114,11 @@ def _clip(s: str, f: ImageFont.FreeTypeFont, max_w: int) -> str:
 
 
 def _canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
-    img = Image.new("RGB", (SIZE, SIZE), _BG)
+    img = Image.new("RGB", (SIZE, CANVAS_H), _BG)
     d   = ImageDraw.Draw(img)
     for x in range(0, SIZE + 1, 54):
-        d.line([(x, 0), (x, SIZE)], fill=_GRID, width=1)
-    for y in range(0, SIZE + 1, 54):
+        d.line([(x, 0), (x, CANVAS_H)], fill=_GRID, width=1)
+    for y in range(0, CANVAS_H + 1, 54):
         d.line([(0, y), (SIZE, y)], fill=_GRID, width=1)
     return img, d
 
@@ -124,18 +126,18 @@ def _canvas() -> tuple[Image.Image, ImageDraw.ImageDraw]:
 def _draw_header(d: ImageDraw.ImageDraw, subtitle: str) -> int:
     """Brand + subtitle + opening divider. Returns y cursor after divider."""
     y = PAD + 14
-    _spaced_cx(d, y, "THEPICKSAI", _font(30, bold=True), _NEON, gap=6)
-    y += _th(_font(30)) + 18
-    _cx(d, y, subtitle, _font(21), _DIM)
-    y += _th(_font(21)) + 26
+    _spaced_cx(d, y, "THEPICKSAI", _font(52, bold=True), _NEON, gap=8)
+    y += _th(_font(52)) + 22
+    _cx(d, y, subtitle, _font(36), _DIM)
+    y += _th(_font(36)) + 32
     _hr(d, y)
-    return y + 26
+    return y + 32
 
 
 def _draw_footer(d: ImageDraw.ImageDraw, label: str) -> None:
-    f  = _font(18)
-    fy = SIZE - PAD - _th(f) - 14
-    _hr(d, fy - 18)
+    f  = _font(30)
+    fy = CANVAS_H - PAD - _th(f) - 14
+    _hr(d, fy - 22)
     _cx(d, fy, label, f, _N_DIM)
 
 
@@ -160,16 +162,10 @@ def generate_picks_card(
     session="morning" → picks_YYYY-MM-DD.png
     session="evening" → picks_YYYY-MM-DD_evening.png
     """
-    from excel_tracker import get_summary_win_rate
     CARDS_DIR.mkdir(parents=True, exist_ok=True)
     today  = card_date or date.today()
     datstr = today.strftime("%d %b %Y").upper()
     is_eve = session == "evening"
-
-    try:
-        summary_wr = get_summary_win_rate()
-    except Exception:
-        summary_wr = 0.0
 
     img, d = _canvas()
     _bracket(d)
@@ -177,47 +173,52 @@ def generate_picks_card(
     subtitle = f"EVENING PICKS  ·  {datstr}" if is_eve else datstr
     y        = _draw_header(d, subtitle)
 
-    f_num   = _font(19, bold=True)
-    f_match = _font(24, bold=True)
-    f_sub   = _font(19)
-    f_stat  = _font(19)
-    f_conf  = _font(16, bold=True)
+    f_num   = _font(38, bold=True)
+    f_match = _font(46, bold=True)
+    f_sub   = _font(38)
+    f_stat  = _font(38)
+    f_conf  = _font(32, bold=True)
 
-    max_name_w = IW - 30 - 80  # room for pick number + confidence tag
+    max_name_w = IW - 60 - 160  # room for pick number + confidence tag
 
-    for i, p in enumerate(picks, 1):
+    for i, p in enumerate(picks[:5], 1):
         conf     = p.get("confidence", "")
         conf_tag = f"[{conf.upper()}]"
         conf_col = _conf_color(conf)
 
         # Pick number
-        d.text((PAD, y + 4), str(i), font=f_num, fill=_NEON)
-        x0 = PAD + 30
+        d.text((PAD, y + 6), str(i), font=f_num, fill=_NEON)
+        x0 = PAD + 58
 
         # Match name (left) + confidence tag (right)
         name = _clip(p.get("match", ""), f_match, max_name_w)
         d.text((x0, y), name, font=f_match, fill=_WHITE)
-        d.text((SIZE - PAD - _tw(conf_tag, f_conf), y + 6),
+        d.text((SIZE - PAD - _tw(conf_tag, f_conf), y + 10),
                conf_tag, font=f_conf, fill=conf_col)
-        y += _th(f_match) + 7
+        y += _th(f_match) + 10
 
         # Bet type · pick selection
-        bet = _clip(f"{p.get('bet_type', '')}  ·  {p.get('pick', '')}", f_sub, IW - 30)
+        bet = _clip(f"{p.get('bet_type', '')}  ·  {p.get('pick', '')}", f_sub, IW - 58)
         d.text((x0, y), bet, font=f_sub, fill=_DIM)
-        y += _th(f_sub) + 6
+        y += _th(f_sub) + 8
 
-        # Odds
-        stat = f"Odds {p.get('odds', '')}"
+        # Odds — Claude estimate, plus real market odds/value tag when available
+        market_odds = p.get("market_odds")
+        if market_odds is not None:
+            stat = f"Claude {p.get('odds', '')}  ·  Market {market_odds}"
+            if p.get("value"):
+                stat += "  [VALUE]"
+        else:
+            stat = f"Odds {p.get('odds', '')}"
+        stat = _clip(stat, f_stat, IW - 58)
         d.text((x0, y), stat, font=f_stat, fill=_NEON)
-        y += _th(f_stat) + 22
+        y += _th(f_stat) + 30
 
-        if i < len(picks):
+        if i < len(picks[:5]):
             _sep(d, y, x0=x0)
-            y += 16
+            y += 22
 
     suffix = "_evening" if is_eve else ""
-    wr_lbl = f"{summary_wr:.0f}% WIN RATE  ·  {'EVENING' if is_eve else 'DAILY'} PICKS"
-    _draw_footer(d, wr_lbl)
 
     out = CARDS_DIR / f"picks_{today.strftime('%Y-%m-%d')}{suffix}.png"
     img.save(out, "PNG")
@@ -243,13 +244,13 @@ def generate_results_card(
 
     y = _draw_header(d, f"RESULTS  ·  {datstr}")
 
-    f_badge = _font(15, bold=True)
-    f_match = _font(23, bold=True)
-    f_sub   = _font(18)
-    f_pnl   = _font(21, bold=True)
+    f_badge = _font(28, bold=True)
+    f_match = _font(44, bold=True)
+    f_sub   = _font(36)
+    f_pnl   = _font(42, bold=True)
 
     total_pnl = 0.0
-    settled   = [r for r in results if r.get("result") in ("WIN", "LOSS", "VOID")][:8]
+    settled   = [r for r in results if r.get("result") in ("WIN", "LOSS", "VOID")][:6]
 
     for i, r in enumerate(settled):
         res = r.get("result", "")
@@ -259,39 +260,39 @@ def generate_results_card(
         # Coloured result badge
         rc    = _WIN if res == "WIN" else _LOSS if res == "LOSS" else _VOID
         btxt  = res
-        bw    = _tw(btxt, f_badge) + 14
-        bh    = _th(f_badge) + 8
+        bw    = _tw(btxt, f_badge) + 20
+        bh    = _th(f_badge) + 14
         try:
-            d.rounded_rectangle([PAD, y + 2, PAD + bw, y + bh + 2], radius=3, fill=rc)
+            d.rounded_rectangle([PAD, y + 2, PAD + bw, y + bh + 2], radius=5, fill=rc)
         except AttributeError:
             d.rectangle([PAD, y + 2, PAD + bw, y + bh + 2], fill=rc)
-        d.text((PAD + 7, y + 5), btxt, font=f_badge, fill=_BG)
+        d.text((PAD + 10, y + 8), btxt, font=f_badge, fill=_BG)
 
-        x0 = PAD + bw + 14
+        x0 = PAD + bw + 20
 
         # Match name
-        mname = _clip(r.get("match", ""), f_match, SIZE - PAD - x0 - 100)
+        mname = _clip(r.get("match", ""), f_match, SIZE - PAD - x0 - 160)
         d.text((x0, y), mname, font=f_match, fill=_WHITE)
 
         # P&L right-aligned on same row
         pv_str = _pnl_str(pv)
         pv_col = _WIN if pv > 0 else _LOSS if pv < 0 else _DIM
         d.text((SIZE - PAD - _tw(pv_str, f_pnl), y + 2), pv_str, font=f_pnl, fill=pv_col)
-        y += _th(f_match) + 8
+        y += _th(f_match) + 10
 
         # Bet type below
-        bet = _clip(f"{r.get('bet_type', '')}  ·  {r.get('pick', '')}", f_sub, IW - bw - 14)
+        bet = _clip(f"{r.get('bet_type', '')}  ·  {r.get('pick', '')}", f_sub, IW - bw - 20)
         d.text((x0, y), bet, font=f_sub, fill=_DIM)
-        y += _th(f_sub) + 20
+        y += _th(f_sub) + 28
 
         if i < len(settled) - 1:
             _sep(d, y)
-            y += 14
+            y += 20
 
     # Total P&L
-    f_tot = _font(28, bold=True)
-    _hr(d, y + 12)
-    y += 40
+    f_tot = _font(52, bold=True)
+    _hr(d, y + 16)
+    y += 56
     tot_str = f"DAILY P&L:  {_pnl_str(total_pnl)}"
     tot_col = _WIN if total_pnl > 0 else _LOSS if total_pnl < 0 else _DIM
     _cx(d, y, tot_str, f_tot, tot_col)
@@ -318,10 +319,10 @@ def generate_weekly_card(data: dict) -> Path:
 
     y = _draw_header(d, week_label)
 
-    f_lbl = _font(17)
-    f_big = _font(60, bold=True)
-    f_med = _font(40, bold=True)
-    f_sub = _font(20)
+    f_lbl = _font(30)
+    f_big = _font(80, bold=True)
+    f_med = _font(56, bold=True)
+    f_sub = _font(34)
 
     # ── Row 1: PICKS / WINS / LOSSES ─────────────────────────────────────────
     col3   = IW // 3
@@ -369,8 +370,8 @@ def generate_weekly_card(data: dict) -> Path:
         d.text((PAD, y), "BEST PICK OF THE WEEK", font=f_lbl, fill=_DIM)
         y += _th(f_lbl) + 12
 
-        f_bp   = _font(26, bold=True)
-        bname  = _clip(best.get("match", ""), f_bp, IW - 120)
+        f_bp   = _font(46, bold=True)
+        bname  = _clip(best.get("match", ""), f_bp, IW - 200)
         bp_pv  = best.get("pnl") or 0.0
         bp_str = f"+{bp_pv:.2f}u"
         d.text((PAD, y), bname, font=f_bp, fill=_WHITE)
@@ -386,7 +387,7 @@ def generate_weekly_card(data: dict) -> Path:
 
     # ── Running P&L ───────────────────────────────────────────────────────────
     rt     = data.get("running_total", 0.0)
-    f_run  = _font(32, bold=True)
+    f_run  = _font(52, bold=True)
     rt_str = f"RUNNING P&L:  {_pnl_str(rt)}"
     rt_col = _WIN if rt >= 0 else _LOSS
     _cx(d, y, rt_str, f_run, rt_col)

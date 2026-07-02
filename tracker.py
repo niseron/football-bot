@@ -40,6 +40,8 @@ def log_pick(
     pick_date: str | None = None,
     confidence: str = "N/A",
     session: str = "morning",
+    claude_prob: float | None = None,
+    market_prob: float | None = None,
 ):
     import logging as _logging
     _log = _logging.getLogger(__name__)
@@ -59,7 +61,8 @@ def log_pick(
         )
         conn.commit()
     try:
-        log_to_excel(match, league, bet_type, pick, odds, confidence, pick_date)
+        log_to_excel(match, league, bet_type, pick, odds, confidence, pick_date,
+                     claude_prob=claude_prob, market_prob=market_prob)
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("Excel log failed: %s", exc)

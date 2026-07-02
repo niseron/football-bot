@@ -28,6 +28,7 @@ football-bot/
 ├── tracker.py            SQLite layer — local backup of every pick in picks.db
 ├── card_generator.py     Generates branded 1080×1080 PNG cards (picks, results, weekly summary)
 │
+├── calibration.py        Probability calibration engine — calibration_report() + edge_report()
 ├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID/HALF WIN/HALF LOSS
 ├── backtest.py           Backtesting script against 2023-24 historical data (CSV output)
 ├── _run_now.py           Manual one-shot trigger — fetch + analyse + post immediately
@@ -53,6 +54,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | Variable | Purpose |
 |---|---|
 | `RAPIDAPI_KEY` | RapidAPI key for the live football data API |
+| `ODDS_API_KEY` | The Odds API key for real market odds (h2h/totals/spreads) used to flag value picks |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude AI analysis |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
 | `TELEGRAM_CHANNEL_ID` | Telegram channel ID where picks are posted |
@@ -106,7 +108,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 
 | Tab | Columns |
 |---|---|
-| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€) |
+| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob % |
 | Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, bet type breakdown table |
 
 **Conditional formatting (applied via batchUpdate on every write):**
@@ -149,6 +151,20 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - Combined result: WIN+VOID → HALF WIN, VOID+LOSS → HALF LOSS
 - P&L: HALF WIN = `+0.50 × (odds − 1)` units; HALF LOSS = `−0.50` units
 - HALF WIN / HALF LOSS flow through the entire stack: Sheets, formatting, Summary, notifications
+
+### Real odds & value flagging (added)
+- `fetch_real_odds()` pulls live h2h/totals/spreads (Asian handicap) odds from The Odds API per fixture
+- Each Claude pick is matched to its real market outcome; a pick is flagged as "value" only when Claude's implied probability exceeds the market's by ≥5 percentage points
+- Both Claude's estimated odds and the real market odds are shown side by side in the Telegram message and the picks card
+- If `ODDS_API_KEY` is missing, the fixture/market can't be matched, or the API call fails, the pick silently falls back to Claude-only odds (no crash, no message)
+
+### Probability calibration engine (added — `calibration.py`)
+- Claude must now output a `probability` field per pick (0-100, its estimated true win probability), logged to the 'Claude Prob %' column; the market implied probability (100 / market odds) is logged to 'Market Prob %' when real odds were found
+- `calibration_report()` — buckets settled WIN/LOSS picks by stated probability (<50%, 50-60% … 90-100%) and compares Claude's average stated probability to the actual win rate per bucket, plus a Brier score (well-calibrated = actual ≈ stated)
+- `edge_report()` — average Claude-vs-market edge for winners vs losers, and ROI of picks where Claude's probability exceeded the market's vs where it didn't
+- Monthly calibration summary posted to Telegram on the first Monday of each month (piggybacks the weekly summary job), with sample size and a warning below 300 settled picks
+- No backfill: picks logged before the columns existed have no probability data and are skipped
+- Run manually: `python calibration.py`
 
 ### Kelly Criterion staking (added)
 - Each pick gets a suggested stake calculated as half-Kelly, capped at 5% of real bankroll

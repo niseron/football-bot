@@ -1,9 +1,11 @@
 import asyncio
+import difflib
 import json
 import logging
 import os
 import re
 import time
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 
 import anthropic
@@ -82,6 +84,15 @@ WC_2026_PARTICIPANTS: set[str] = {
 _YOUTH_RE = re.compile(r"\bU[\s-]?1[5-9]\b|\bU[\s-]?2[0-3]\b|youth|junior", re.IGNORECASE)
 
 RAPIDAPI_HOST = "free-api-live-football-data.p.rapidapi.com"
+
+ODDS_API_HOST = "https://api.the-odds-api.com/v4"
+
+# Maps our internal competition names to The Odds API's sport keys.
+ODDS_API_SPORT_KEYS: dict[str, str] = {
+    "Premier League": "soccer_epl",
+    "Jupiler Pro League": "soccer_belgium_first_div",
+    "FIFA World Cup 2026": "soccer_fifa_world_cup",
+}
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -294,6 +305,196 @@ def enrich_with_context(fixtures_by_league: dict[str, list[dict]]) -> None:
             )
 
 
+# ── Real odds (The Odds API) ─────────────────────────────────────────────────
+
+_TEAM_NOISE_RE = re.compile(r"\b(fc|cf|afc|sc|cd|ac|club)\b", re.IGNORECASE)
+
+
+def _normalize_team(name: str) -> str:
+    name = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    name = _TEAM_NOISE_RE.sub("", name.lower())
+    name = re.sub(r"[^a-z0-9 ]", "", name)
+    return re.sub(r"\s+", " ", name).strip()
+
+
+def _team_match(a: str, b: str) -> bool:
+    """Fuzzy-match team names across the two APIs' differing naming conventions."""
+    na, nb = _normalize_team(a), _normalize_team(b)
+    if not na or not nb:
+        return False
+    if na == nb or na in nb or nb in na:
+        return True
+    return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.72
+
+
+def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | None:
+    """
+    Fetch real market odds (h2h, totals, spreads/Asian handicap) for a fixture
+    from The Odds API. Returns None if the competition isn't mapped, the API
+    call fails, or the fixture can't be found — callers must treat None as
+    "no real odds available" and fall back to Claude's estimated odds only.
+    """
+    sport_key = ODDS_API_SPORT_KEYS.get(competition)
+    api_key = os.environ.get("ODDS_API_KEY")
+    if not sport_key or not api_key:
+        return None
+
+    try:
+        resp = requests.get(
+            f"{ODDS_API_HOST}/sports/{sport_key}/odds",
+            params={
+                "apiKey": api_key,
+                "regions": "eu,uk",
+                "markets": "h2h,totals,spreads",
+                "oddsFormat": "decimal",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+    except Exception as exc:
+        log.debug("fetch_real_odds(%s vs %s) failed: %s", home_team, away_team, exc)
+        return None
+
+    event = next(
+        (
+            e for e in events
+            if _team_match(e.get("home_team", ""), home_team)
+            and _team_match(e.get("away_team", ""), away_team)
+        ),
+        None,
+    )
+    if event is None:
+        return None
+
+    h2h: dict[str, list[float]] = {}
+    totals: dict[float, dict[str, list[float]]] = {}
+    spreads: dict[float, dict[str, list[float]]] = {}
+
+    for bookmaker in event.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            key = market.get("key")
+            for outcome in market.get("outcomes", []):
+                name, price, point = outcome.get("name"), outcome.get("price"), outcome.get("point")
+                if name is None or price is None:
+                    continue
+                if key == "h2h":
+                    h2h.setdefault(name, []).append(price)
+                elif key == "totals" and point is not None:
+                    totals.setdefault(point, {}).setdefault(name, []).append(price)
+                elif key == "spreads" and point is not None:
+                    spreads.setdefault(point, {}).setdefault(name, []).append(price)
+
+    def _avg(prices: list[float]) -> float:
+        return round(sum(prices) / len(prices), 2)
+
+    return {
+        "home_team": event.get("home_team"),
+        "away_team": event.get("away_team"),
+        "h2h": {name: _avg(prices) for name, prices in h2h.items()},
+        "totals": [
+            {"point": pt, **{name: _avg(prices) for name, prices in outcomes.items()}}
+            for pt, outcomes in totals.items()
+        ],
+        "spreads": [
+            {"point": pt, **{name: _avg(prices) for name, prices in outcomes.items()}}
+            for pt, outcomes in spreads.items()
+        ],
+    }
+
+
+_OU_RE = re.compile(r"(over|under)\s*([\d.]+)", re.IGNORECASE)
+_AH_RE = re.compile(r"^(.*?)\s*([+-]?\d+(?:\.\d+)?)$")
+
+
+def _match_market_odds(pick: dict, real_odds: dict) -> float | None:
+    """Match a Claude pick to the corresponding outcome in real_odds. None if not found."""
+    bet_type = (pick.get("bet_type") or "").lower()
+    selection = (pick.get("pick") or "").strip()
+
+    try:
+        if "winner" in bet_type or "1x2" in bet_type or "moneyline" in bet_type:
+            h2h = real_odds.get("h2h", {})
+            if selection.lower() == "draw":
+                return h2h.get("Draw")
+            team_part = re.sub(r"\s+win$", "", selection, flags=re.IGNORECASE).strip()
+            for name, odds in h2h.items():
+                if _team_match(name, team_part):
+                    return odds
+            return None
+
+        if "over" in bet_type or "under" in bet_type or "goals" in bet_type:
+            m = _OU_RE.search(selection) or _OU_RE.search(bet_type)
+            if not m:
+                return None
+            side, line = m.group(1).capitalize(), float(m.group(2))
+            for row in real_odds.get("totals", []):
+                if abs(row.get("point", -1) - line) < 0.01:
+                    return row.get(side)
+            return None
+
+        if "handicap" in bet_type:
+            m = _AH_RE.match(selection)
+            if not m:
+                return None
+            team_part, line = m.group(1).strip(), float(m.group(2))
+            for row in real_odds.get("spreads", []):
+                if abs(row.get("point", -999) - line) < 0.01:
+                    for name, odds in row.items():
+                        if name != "point" and _team_match(name, team_part):
+                            return odds
+            return None
+    except Exception as exc:
+        log.debug("_match_market_odds failed for pick %s: %s", pick.get("match"), exc)
+        return None
+
+    return None
+
+
+def _implied_prob(odds: float) -> float:
+    return 1.0 / odds if odds else 0.0
+
+
+def enrich_picks_with_real_odds(picks: list[dict]) -> None:
+    """
+    Mutates each pick in-place with 'market_odds' and 'value' (bool) fields by
+    comparing Claude's implied probability against real market odds from The
+    Odds API. A pick is flagged as value only when Claude's implied
+    probability exceeds the market's by at least 5 percentage points.
+    Any failure (missing ODDS_API_KEY, API down, fixture/market not found)
+    leaves that pick unchanged — existing behaviour continues silently.
+    """
+    odds_cache: dict[tuple[str, str, str], dict | None] = {}
+
+    for pick in picks:
+        try:
+            match = pick.get("match", "")
+            if " vs " not in match:
+                continue
+            home, away = match.split(" vs ", 1)
+            league = pick.get("league", "")
+
+            cache_key = (home, away, league)
+            if cache_key not in odds_cache:
+                odds_cache[cache_key] = fetch_real_odds(home, away, league)
+            real_odds = odds_cache[cache_key]
+            if not real_odds:
+                continue
+
+            market_odds = _match_market_odds(pick, real_odds)
+            if market_odds is None:
+                continue
+
+            pick["market_odds"] = market_odds
+            claude_prob = _implied_prob(float(pick["odds"]))
+            market_prob = _implied_prob(market_odds)
+            pick["market_prob"] = round(market_prob * 100, 1)
+            pick["value"] = (claude_prob - market_prob) >= 0.05
+        except Exception as exc:
+            log.debug("enrich_picks_with_real_odds skipped a pick: %s", exc)
+            continue
+
+
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a professional football betting analyst with deep expertise in the Premier League,
@@ -309,6 +510,11 @@ When this data is present, weight recent form and H2H trends heavily in your rea
 Since live odds are not provided, use your knowledge of typical market pricing to estimate realistic
 decimal odds (e.g. a heavy favourite ~1.35, slight favourite ~1.75, toss-up ~2.00 each side).
 
+The "probability" field is your honest estimate of how likely the pick is to win (0-100). It should
+reflect your true belief, not simply 100/odds — a value bet is precisely one where your probability
+is higher than the odds imply. Your stated probabilities are tracked and scored for calibration over
+time, so be realistic: a pick you'd expect to win 6 times out of 10 is 60, not 75.
+
 For each recommendation output valid JSON with this exact structure:
 {
   "picks": [
@@ -318,6 +524,7 @@ For each recommendation output valid JSON with this exact structure:
       "bet_type": "<e.g. Match Winner / Both Teams to Score / Over 2.5 Goals / Double Chance / Asian Handicap>",
       "pick": "<selection using actual team names — never 'Home Win' or 'Away Win'. E.g. 'Sweden Win', 'Ivory Coast or Draw', 'Yes', 'Over 2.5 Goals', 'Argentina -1.5'>",
       "odds": <estimated decimal odds as a number>,
+      "probability": <your estimated true probability of this pick winning, as a number from 0 to 100>,
       "confidence": "<High / Medium / Low>",
       "reasoning": "<2-3 sentence rationale covering form, head-to-head, and value>"
     }
@@ -385,11 +592,25 @@ def format_telegram_message(picks: list[dict], header: str = "Football Picks") -
             )
         else:
             kelly_line = ""
+
+        market_odds = p.get("market_odds")
+        if market_odds is not None:
+            value_tag = " 🔥 *VALUE*" if p.get("value") else ""
+            odds_line = (
+                f"  Odds: Claude `{_escape_md(str(p['odds']))}` "
+                f"\\| Market `{_escape_md(str(market_odds))}`{value_tag} "
+                f"\\| Confidence: {_escape_md(p['confidence'])}\n"
+            )
+        else:
+            odds_line = (
+                f"  Odds: `{_escape_md(str(p['odds']))}` \\| Confidence: {_escape_md(p['confidence'])}\n"
+            )
+
         lines.append(
             f"*{i}\\. {_escape_md(p['match'])}* \\({_escape_md(p['league'])}\\)\n"
             f"  Bet: {_escape_md(p['bet_type'])} — *{_escape_md(p['pick'])}*\n"
-            f"  Odds: `{_escape_md(str(p['odds']))}` \\| Confidence: {_escape_md(p['confidence'])}\n"
-            f"  _{_escape_md(p['reasoning'])}_\n"
+            + odds_line
+            + f"  _{_escape_md(p['reasoning'])}_\n"
             + kelly_line
         )
     lines.append("_Good luck\\! Bet responsibly\\._")
@@ -448,6 +669,11 @@ async def daily_picks_job():
         return
 
     try:
+        enrich_picks_with_real_odds(picks)
+    except Exception as exc:
+        log.warning("Real odds enrichment failed — proceeding with Claude odds only: %s", exc)
+
+    try:
         for pick in picks:
             pick["kelly"] = calculate_kelly_stake(
                 pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
@@ -457,6 +683,7 @@ async def daily_picks_job():
 
     for pick in picks:
         try:
+            claude_prob = pick.get("probability")
             log_pick(
                 match=pick["match"],
                 league=pick["league"],
@@ -465,6 +692,8 @@ async def daily_picks_job():
                 odds=float(pick["odds"]),
                 confidence=pick.get("confidence", "N/A"),
                 session="morning",
+                claude_prob=float(claude_prob) if claude_prob is not None else None,
+                market_prob=pick.get("market_prob"),
             )
         except Exception as exc:
             log.warning("Failed to log pick: %s", exc)

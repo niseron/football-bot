@@ -1,6 +1,7 @@
 """
 Standalone weekly summary scheduler.
 Posts a performance summary to Telegram every Monday at 09:05 Europe/Brussels.
+On the first Monday of each month, also posts a probability calibration report.
 
 Run alongside main.py:
     python weekly_summary.py
@@ -8,6 +9,7 @@ Run alongside main.py:
 import asyncio
 import logging
 import os
+from datetime import date
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
@@ -108,6 +110,65 @@ def build_weekly_message(data: dict) -> str:
     return "\n".join(lines)
 
 
+def build_calibration_message() -> str | None:
+    """
+    Monthly calibration report message (MarkdownV2). None when there is no
+    probability data yet or the report can't be built — caller skips posting.
+    """
+    from calibration import MIN_MEANINGFUL_SAMPLE, calibration_report, edge_report
+
+    cal = calibration_report()
+    if not cal or cal["sample_size"] == 0:
+        return None
+
+    lines = [
+        "*\U0001f4d0 Monthly Calibration Report*",
+        "_How well Claude's stated probabilities match reality_\n",
+        "`{:<9} {:>5}  {:>7}  {:>7}`".format("Range", "Picks", "Stated", "Actual"),
+    ]
+    for b in cal["buckets"]:
+        if not b["picks"]:
+            continue
+        lines.append("`{:<9} {:>5}  {:>6}%  {:>6}%`".format(
+            b["range"], b["picks"], b["avg_stated"], b["actual_win_rate"]
+        ))
+
+    if cal["brier_score"] is not None:
+        lines.append(f"\n\U0001f3af Brier score: *{_esc(str(cal['brier_score']))}* \\(lower is better; 0\\.25 \\= coin flip\\)")
+
+    edge = edge_report()
+    if edge and edge["sample_size"]:
+        def _fmt_edge(v):
+            return _esc(f"{v:+.1f}pp") if v is not None else "n/a"
+        pos, neg = edge["positive_edge"], edge["negative_edge"]
+        lines.append(
+            f"\n*Edge analysis* \\({edge['sample_size']} picks with market odds\\)\n"
+            f"  Avg edge on winners: *{_fmt_edge(edge['avg_edge_winners'])}*\n"
+            f"  Avg edge on losers: *{_fmt_edge(edge['avg_edge_losers'])}*"
+        )
+        if pos["roi"] is not None:
+            pos_roi = _esc(f"{pos['roi']:+.1f}%")
+            lines.append(f"  ROI when Claude \\> market: *{pos_roi}* \\({pos['picks']} picks\\)")
+        if neg["roi"] is not None:
+            neg_roi = _esc(f"{neg['roi']:+.1f}%")
+            lines.append(f"  ROI when Claude \\<\\= market: *{neg_roi}* \\({neg['picks']} picks\\)")
+
+    n = cal["sample_size"]
+    lines.append(f"\n\U0001f4e6 Sample size: *{n}* settled picks with probability data")
+    if not cal["meaningful"]:
+        lines.append(
+            f"⚠️ _Results are not statistically meaningful below {MIN_MEANINGFUL_SAMPLE} settled picks\\. "
+            f"Treat these numbers as directional only\\._"
+        )
+
+    return "\n".join(lines)
+
+
+def _is_first_monday_of_month() -> bool:
+    today = date.today()
+    return today.weekday() == 0 and today.day <= 7
+
+
 async def post_weekly_summary():
     log.info("Building weekly summary...")
     data    = get_weekly_data()
@@ -128,6 +189,22 @@ async def post_weekly_summary():
         log.info("Weekly card sent: %s", card_path.name)
     except Exception as exc:
         log.warning("Weekly card failed (non-fatal): %s", exc)
+
+    # First Monday of the month: append the probability calibration report
+    try:
+        if _is_first_monday_of_month():
+            cal_message = build_calibration_message()
+            if cal_message:
+                await bot.send_message(
+                    chat_id=TELEGRAM_CHANNEL_ID,
+                    text=cal_message,
+                    parse_mode="MarkdownV2",
+                )
+                log.info("Monthly calibration report posted")
+            else:
+                log.info("Monthly calibration skipped — no probability data yet")
+    except Exception as exc:
+        log.warning("Monthly calibration report failed (non-fatal): %s", exc)
 
     log.info("Weekly summary posted to Telegram")
 

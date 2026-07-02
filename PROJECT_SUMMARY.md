@@ -205,6 +205,22 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 
 ---
 
+## Roadmap
+
+Completion estimates per area — update these percentages whenever a related change ships.
+
+| Area | Done | Status |
+|---|---|---|
+| Bot core | 95% | Live — picks, results, sheets, cards, Telegram all automated on Railway |
+| Data quality | 70% | Odds API + form/H2H live; no injuries/lineups |
+| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026; verdict ~Oct at 300 picks |
+| Content pipeline | 90% | Cards automatic, posting manual |
+| Socials | 30% | Accounts + branding done, zero posts |
+| Proven edge | 5% | Blocked on calibration data |
+| Site/app/monetization | 0% | Deliberately parked until edge is proven |
+
+---
+
 ## 8. Still To Do
 
 All previously listed items are complete. The bot is fully operational on Railway.

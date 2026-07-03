@@ -539,6 +539,32 @@ IMPORTANT — pick field naming rules:
 Return ONLY the JSON block, no other text."""
 
 
+def _strip_code_fences(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("```")[1]
+        if stripped.startswith("json"):
+            stripped = stripped[4:]
+    return stripped.strip()
+
+
+def _notify_picks_failed(reason: str) -> None:
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID):
+        log.error("Cannot send picks-failed Telegram alert — bot token/channel not configured")
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHANNEL_ID,
+                "text": f"⚠️ Picks failed today — {reason}. Check logs.",
+            },
+            timeout=10,
+        )
+    except Exception as exc:
+        log.error("Failed to send picks-failed Telegram alert: %s", exc)
+
+
 def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
     # Strip internal team/match IDs — not useful to Claude
     _STRIP = {"home_id", "away_id"}
@@ -555,11 +581,23 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
         messages=[{"role": "user", "content": f"Upcoming fixtures (next 48 hours):\n\n{payload}"}],
     )
     raw = message.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    data = json.loads(raw.strip())
+    log.info("Claude raw response (%d chars):\n%s", len(raw), raw)
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        # Fallback: Claude sometimes wraps the JSON in a ```json ... ``` fence
+        try:
+            data = json.loads(_strip_code_fences(raw))
+        except json.JSONDecodeError as exc:
+            log.error(
+                "Claude response is not valid JSON, even after stripping code fences. "
+                "Full raw response:\n%s",
+                raw,
+            )
+            _notify_picks_failed("Claude returned an unparseable response")
+            raise ValueError(f"Could not parse Claude response as JSON: {exc}") from exc
+
     picks = data.get("picks", [])
     seen: set[tuple] = set()
     deduped: list[dict] = []

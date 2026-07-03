@@ -540,12 +540,14 @@ Return ONLY the JSON block, no other text."""
 
 
 def _strip_code_fences(text: str) -> str:
-    stripped = text.strip()
-    if stripped.startswith("```"):
-        stripped = stripped.split("```")[1]
-        if stripped.startswith("json"):
-            stripped = stripped[4:]
-    return stripped.strip()
+    # Claude sometimes prefaces the JSON with a sentence of prose before the
+    # fence (e.g. "I'll analyze these fixtures...\n\n```json\n{...}\n```"),
+    # so search for the fenced block anywhere in the text rather than
+    # assuming it starts at position 0.
+    match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
 
 
 def _notify_picks_failed(reason: str) -> None:

@@ -1,10 +1,11 @@
 """
-card_generator.py — Branded 1080×1080 PNG cards for thepicksai.
+card_generator.py — Branded PNG cards for thepicksai.
 
-Three card types:
-  generate_picks_card()   — daily / evening picks
-  generate_results_card() — daily settled results
-  generate_weekly_card()  — Monday weekly summary
+Four card types:
+  generate_picks_card()    — daily / evening picks, 1080×(dynamic), up to 5 picks (Telegram)
+  generate_picks_card_ig() — Instagram-feed variant, 1080×1350 max, up to 3 picks
+  generate_results_card()  — daily settled results
+  generate_weekly_card()   — Monday weekly summary
 """
 from __future__ import annotations
 
@@ -252,6 +253,138 @@ def generate_picks_card(
     suffix = "_evening" if is_eve else ""
 
     out = CARDS_DIR / f"picks_{today.strftime('%Y-%m-%d')}{suffix}.png"
+    img.save(out, "PNG")
+    return out
+
+
+# ── Card 1b: Daily picks, Instagram variant (max 3 picks, 1080×1350 cap) ──────
+
+_IG_MAX_H = 1350
+
+
+def _ig_pick_priority(p: dict) -> int:
+    """Lower sorts first: 🔥 VALUE picks, then HIGH confidence, then MEDIUM, then everything else."""
+    if p.get("value"):
+        return 0
+    conf = (p.get("confidence") or "").strip().lower()
+    if conf == "high":
+        return 1
+    if conf == "medium":
+        return 2
+    return 3
+
+
+def generate_picks_card_ig(
+    picks: list[dict],
+    card_date: date | None = None,
+) -> Path:
+    """
+    Instagram-feed variant of the picks card: 1080 wide, capped at 1350 tall,
+    at most 3 picks. Selection order: 🔥 VALUE picks first, then HIGH
+    confidence, then MEDIUM (a stable sort — ties keep their original order,
+    and lower-priority picks still fill remaining slots if fewer than 3
+    VALUE/HIGH/MEDIUM picks exist). Rendering matches generate_picks_card()
+    (confidence tag top-right, "[VALUE]" suffix on the odds line) so the two
+    variants look like the same brand.
+
+    Font sizes shrink in small steps (never below 70% of the base size) if 3
+    picks would overflow 1350px — e.g. long match names or bet descriptions
+    that wrap to extra lines. generate_picks_card() (the 5-pick Telegram
+    card) is untouched by this function.
+    """
+    CARDS_DIR.mkdir(parents=True, exist_ok=True)
+    today  = card_date or date.today()
+    datstr = today.strftime("%d %b %Y").upper()
+
+    shown  = sorted(picks, key=_ig_pick_priority)[:3]
+    text_w = IW - 90
+    tag_w  = 240
+
+    base_sizes = {"num": 56, "match": 80, "sub": 60, "stat": 64, "conf": 44}
+    header_h   = PAD + 14 + _th(_font(52)) + 22 + _th(_font(36)) + 32 + 32
+
+    def _build(scale: float):
+        sz = {k: max(round(v * scale), 18) for k, v in base_sizes.items()}
+        f_num   = _font(sz["num"], bold=True)
+        f_match = _font(sz["match"], bold=True)
+        f_sub   = _font(sz["sub"])
+        f_stat  = _font(sz["stat"])
+        f_conf  = _font(sz["conf"], bold=True)
+
+        def _match_lines(name: str) -> list[str]:
+            if _tw(name, f_match) <= text_w - tag_w:
+                return [name]
+            if " vs " in name:
+                home, away = name.split(" vs ", 1)
+                return [_clip(f"{home} vs", f_match, text_w - tag_w), _clip(away, f_match, text_w)]
+            return [_clip(name, f_match, text_w - tag_w)]
+
+        def _bet_lines(p: dict) -> list[str]:
+            bet = f"{p.get('bet_type', '')} · {p.get('pick', '')}"
+            if _tw(bet, f_sub) <= text_w:
+                return [bet]
+            return [_clip(f"{p.get('bet_type', '')} ·", f_sub, text_w),
+                    _clip(str(p.get("pick", "")), f_sub, text_w)]
+
+        def _block_h(p: dict) -> int:
+            nm = len(_match_lines(p.get("match", "")))
+            nb = len(_bet_lines(p))
+            return (nm * _th(f_match) + (nm - 1) * 6 + 10
+                    + nb * _th(f_sub) + (nb - 1) * 6 + 8 + _th(f_stat) + 30)
+
+        canvas_h = header_h + sum(_block_h(p) for p in shown) + max(len(shown) - 1, 0) * 22 + PAD
+        return (f_num, f_match, f_sub, f_stat, f_conf, _match_lines, _bet_lines, canvas_h)
+
+    scale = 1.0
+    built = _build(scale)
+    while built[-1] > _IG_MAX_H and scale > 0.7:
+        scale = round(scale - 0.05, 2)
+        built = _build(scale)
+    f_num, f_match, f_sub, f_stat, f_conf, _match_lines, _bet_lines, canvas_h = built
+    canvas_h = min(canvas_h, _IG_MAX_H)
+
+    img, d = _canvas(canvas_h)
+    _bracket(d, canvas_h)
+
+    y = _draw_header(d, datstr)
+
+    for i, p in enumerate(shown, 1):
+        conf     = p.get("confidence", "")
+        conf_tag = f"[{conf.upper()}]"
+        conf_col = _conf_color(conf)
+
+        d.text((PAD, y + 6), str(i), font=f_num, fill=_NEON)
+        x0 = PAD + 90
+
+        d.text((SIZE - PAD - _tw(conf_tag, f_conf), y + 16),
+               conf_tag, font=f_conf, fill=conf_col)
+        for line in _match_lines(p.get("match", "")):
+            d.text((x0, y), line, font=f_match, fill=_WHITE)
+            y += _th(f_match) + 6
+        y += 4
+
+        bet_lines = _bet_lines(p)
+        for j, line in enumerate(bet_lines):
+            d.text((x0, y), line, font=f_sub, fill=_DIM)
+            y += _th(f_sub) + (6 if j < len(bet_lines) - 1 else 0)
+        y += 8
+
+        market_odds = p.get("market_odds")
+        if market_odds is not None:
+            stat = f"Claude {p.get('odds', '')} · Mkt {market_odds}"
+            if p.get("value"):
+                stat += " [VALUE]"
+        else:
+            stat = f"Odds {p.get('odds', '')}"
+        stat = _clip(stat, f_stat, text_w)
+        d.text((x0, y), stat, font=f_stat, fill=_NEON)
+        y += _th(f_stat) + 30
+
+        if i < len(shown):
+            _sep(d, y, x0=x0)
+            y += 22
+
+    out = CARDS_DIR / f"picks_ig_{today.strftime('%Y-%m-%d')}.png"
     img.save(out, "PNG")
     return out
 

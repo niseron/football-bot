@@ -228,7 +228,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Data quality | 75% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
 | Content pipeline | 90% | Cards automatic, posting manual |
-| Socials | 30% | Accounts + branding done, zero posts |
+| Socials | 35% | Accounts + branding + IG-formatted card generator (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; zero posts, no auto-posting pipeline yet |
 | Proven edge | 5% | Blocked on calibration data |
 | Site/app/monetization | 0% | Deliberately parked until edge is proven |
 

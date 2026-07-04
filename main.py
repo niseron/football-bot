@@ -327,18 +327,17 @@ def _team_match(a: str, b: str) -> bool:
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.72
 
 
-def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | None:
+def _fetch_odds_events(sport_key: str | None) -> list[dict] | None:
     """
-    Fetch real market odds (h2h, totals, spreads/Asian handicap) for a fixture
-    from The Odds API. Returns None if the competition isn't mapped, the API
-    call fails, or the fixture can't be found — callers must treat None as
-    "no real odds available" and fall back to Claude's estimated odds only.
+    Raw fetch of every event + bookmaker odds for one Odds API sport_key.
+    None if the sport_key/API key is missing or the request fails. Split out
+    from fetch_real_odds so callers that need odds for several matches in the
+    same competition (e.g. the closing-odds job) can fetch once and filter
+    client-side, instead of one request per match.
     """
-    sport_key = ODDS_API_SPORT_KEYS.get(competition)
     api_key = os.environ.get("ODDS_API_KEY")
     if not sport_key or not api_key:
         return None
-
     try:
         resp = requests.get(
             f"{ODDS_API_HOST}/sports/{sport_key}/odds",
@@ -351,22 +350,14 @@ def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | 
             timeout=10,
         )
         resp.raise_for_status()
-        events = resp.json()
+        return resp.json()
     except Exception as exc:
-        log.debug("fetch_real_odds(%s vs %s) failed: %s", home_team, away_team, exc)
+        log.debug("_fetch_odds_events(%s) failed: %s", sport_key, exc)
         return None
 
-    event = next(
-        (
-            e for e in events
-            if _team_match(e.get("home_team", ""), home_team)
-            and _team_match(e.get("away_team", ""), away_team)
-        ),
-        None,
-    )
-    if event is None:
-        return None
 
+def _parse_odds_event(event: dict) -> dict:
+    """Average bookmaker odds for one Odds API event into h2h/totals/spreads."""
     h2h: dict[str, list[float]] = {}
     totals: dict[float, dict[str, list[float]]] = {}
     spreads: dict[float, dict[str, list[float]]] = {}
@@ -401,6 +392,32 @@ def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | 
             for pt, outcomes in spreads.items()
         ],
     }
+
+
+def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | None:
+    """
+    Fetch real market odds (h2h, totals, spreads/Asian handicap) for a fixture
+    from The Odds API. Returns None if the competition isn't mapped, the API
+    call fails, or the fixture can't be found — callers must treat None as
+    "no real odds available" and fall back to Claude's estimated odds only.
+    """
+    sport_key = ODDS_API_SPORT_KEYS.get(competition)
+    events = _fetch_odds_events(sport_key)
+    if events is None:
+        return None
+
+    event = next(
+        (
+            e for e in events
+            if _team_match(e.get("home_team", ""), home_team)
+            and _team_match(e.get("away_team", ""), away_team)
+        ),
+        None,
+    )
+    if event is None:
+        return None
+
+    return _parse_odds_event(event)
 
 
 _OU_RE = re.compile(r"(over|under)\s*([\d.]+)", re.IGNORECASE)
@@ -684,6 +701,19 @@ async def _send_photo(path) -> None:
 
 # ── Main job ──────────────────────────────────────────────────────────────────
 
+def _kickoff_lookup(fixtures_by_league: dict[str, list[dict]]) -> dict[str, str]:
+    """
+    Map '<Home> vs <Away>' -> kickoff_utc, so each Claude pick (which uses that
+    exact match string per SYSTEM_PROMPT) can be tagged with its kickoff time
+    for the closing-odds job. Purely additive metadata — never affects picks.
+    """
+    lookup: dict[str, str] = {}
+    for fixtures in fixtures_by_league.values():
+        for f in fixtures:
+            lookup[f"{f['home']} vs {f['away']}"] = f.get("kickoff_utc", "")
+    return lookup
+
+
 async def daily_picks_job():
     log.info("Starting morning picks job")
 
@@ -719,6 +749,12 @@ async def daily_picks_job():
         return
 
     try:
+        kickoff_lookup = _kickoff_lookup(fixtures_by_league)
+    except Exception as exc:
+        log.warning("Kickoff lookup build failed (non-fatal): %s", exc)
+        kickoff_lookup = {}
+
+    try:
         enrich_picks_with_real_odds(picks)
     except Exception as exc:
         log.warning("Real odds enrichment failed — proceeding with Claude odds only: %s", exc)
@@ -744,6 +780,7 @@ async def daily_picks_job():
                 session="morning",
                 claude_prob=float(claude_prob) if claude_prob is not None else None,
                 market_prob=pick.get("market_prob"),
+                kickoff_utc=kickoff_lookup.get(pick["match"], ""),
             )
         except Exception as exc:
             log.warning("Failed to log pick: %s", exc)

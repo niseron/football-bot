@@ -8,6 +8,7 @@ An automated football betting analysis bot that:
 - Sends the enriched fixture list to Claude AI (claude-sonnet-4-6) for betting analysis
 - Posts the top 5 value picks daily to a Telegram channel at 09:00 Brussels time as a text message and a branded PNG card
 - Automatically checks match results every 30 minutes and updates Google Sheets
+- Polls closing odds every 15 minutes as kickoff approaches, for closing line value (CLV) tracking
 - Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
 - Tracks all picks and P&L in a Google Sheet with conditional formatting, a Picks tab and a Summary tab
 
@@ -20,15 +21,16 @@ Covered competitions: Premier League, Belgian Jupiler Pro League, FIFA World Cup
 ```
 football-bot/
 │
-├── run_all.py            Entry point for Railway — combines all 3 schedulers into one process
+├── run_all.py            Entry point for Railway — combines all 4 schedulers into one process
 ├── main.py               Daily picks: fetches fixtures, enriches with form/H2H, runs Claude analysis, posts to Telegram
 ├── auto_results.py       Automatic result checker — polls API every 30 min, updates Sheets, posts result cards
+├── closing_odds.py       Closing line value (CLV) tracker — polls odds every 15 min near kickoff, writes 'Closing Odds'
 ├── weekly_summary.py     Posts Monday performance summary to Telegram with PNG card
 ├── excel_tracker.py      Google Sheets data layer — all read/write to the spreadsheet
 ├── tracker.py            SQLite layer — local backup of every pick in picks.db
 ├── card_generator.py     Generates branded 1080×1080 PNG cards (picks, results, weekly summary)
 │
-├── calibration.py        Probability calibration engine — calibration_report() + edge_report()
+├── calibration.py        Probability calibration engine — calibration_report() + edge_report() + clv_report()
 ├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID/HALF WIN/HALF LOSS
 ├── backtest.py           Backtesting script against 2023-24 historical data (CSV output)
 ├── _run_now.py           Manual one-shot trigger — fetch + analyse + post immediately
@@ -72,10 +74,11 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Entry point:** `python run_all.py`
 - **Python version:** 3.12 (runtime.txt)
 - **Font support:** `nixpacks.toml` installs `fonts-dejavu` so Pillow can render card text on Railway
-- **Process:** Single process running three APScheduler jobs:
+- **Process:** Single process running four APScheduler jobs:
   - Daily picks — cron, 09:00 Europe/Brussels
   - Weekly summary — cron, Monday 09:05 Europe/Brussels
   - Live result checks — interval, every 30 minutes
+  - Closing odds check (CLV tracking) — interval, every 15 minutes
 
 **To deploy a change:**
 1. Edit code locally
@@ -108,7 +111,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 
 | Tab | Columns |
 |---|---|
-| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob % |
+| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds |
 | Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, bet type breakdown table |
 
 **Conditional formatting (applied via batchUpdate on every write):**
@@ -166,6 +169,16 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - No backfill: picks logged before the columns existed have no probability data and are skipped
 - Run manually: `python calibration.py`
 
+### Closing Line Value (CLV) tracking (added — `closing_odds.py`)
+- Each pick's kickoff time is captured from the RapidAPI fixture data at pick-log time and stored in the 'Kickoff UTC' column (plus 'League', for odds-batching)
+- `closing_odds_job` polls every 15 minutes; for any unsettled pick whose kickoff is 5-65 minutes away, it fetches current market odds from The Odds API and overwrites the 'Closing Odds' column — the last write before kickoff becomes the closing price
+- Odds API calls are batched per competition (one request covers every due match in that league that cycle), not one request per match
+- Self-imposed cap of 20 Odds API requests/day; polling is skipped with a warning if exceeded
+- `calibration.py`'s `clv_report()` computes CLV = (original odds / closing odds − 1) × 100 for every settled pick with both values — average CLV, % of picks with positive CLV, and ROI split between positive- and negative-CLV picks
+- Appended to the existing monthly calibration Telegram message, with the same below-300-picks sample size warning
+- Purely additive measurement: never touches pick generation, Kelly staking, or the calibration engine's existing reports; every step fails silently on error
+- Run manually: `python closing_odds.py`
+
 ### Kelly Criterion staking (added)
 - Each pick gets a suggested stake calculated as half-Kelly, capped at 5% of real bankroll
 - Based on historical win rate for that specific bet type from settled Sheets data
@@ -196,7 +209,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 
 ## Known Limitations & Future Issues (not yet addressed)
 
-- **Odds timing bias** — Market probabilities in column L are captured at 9AM pick time, not closing odds. Closing line value is the true gold standard for measuring edge; odds move all day as sharp money arrives. The `edge_report` is therefore flattering by an unknown amount. Future fix: capture odds a second time near kickoff and log closing odds in a separate column.
+- **Odds timing bias** — *In progress, CLV tracking live from 4 Jul 2026.* Market probabilities in column L are still captured at 9AM pick time, and `edge_report` is still flattering by an unknown amount for picks logged before the fix. `closing_odds_job` now polls The Odds API 5-65 minutes before each kickoff and logs the true closing price to a separate 'Closing Odds' column; `calibration.py`'s `clv_report()` measures closing line value on top of it. This resolves the bias for every pick logged from 4 Jul 2026 onward — historical picks before that date have no closing odds and are excluded from `clv_report()`. Sample size is still tiny; see the calibration sample size limitation below.
 - **Calibration sample size** — `calibration_report` and `edge_report` are statistically meaningless below ~300 settled picks with probability data. Data collection started 30 Jun 2026. Do not draw conclusions from early monthly reports.
 - **Win rate is the wrong success metric** — a high win rate at low average odds can still be break-even or negative ROI. The metric that matters is ROI vs market implied probability, which the `edge_report` now tracks.
 - **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap.
@@ -212,8 +225,8 @@ Completion estimates per area — update these percentages whenever a related ch
 | Area | Done | Status |
 |---|---|---|
 | Bot core | 95% | Live — picks, results, sheets, cards, Telegram all automated on Railway |
-| Data quality | 70% | Odds API + form/H2H live; no injuries/lineups |
-| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026; verdict ~Oct at 300 picks |
+| Data quality | 75% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; no injuries/lineups |
+| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
 | Content pipeline | 90% | Cards automatic, posting manual |
 | Socials | 30% | Accounts + branding done, zero posts |
 | Proven edge | 5% | Blocked on calibration data |
@@ -246,6 +259,11 @@ python _run_now.py
 **To check and settle results now:**
 ```
 python auto_results.py --results
+```
+
+**To run a closing-odds poll now** (writes 'Closing Odds' for any pick 5-65 min from kickoff):
+```
+python closing_odds.py
 ```
 
 **To manually update a pick result:**

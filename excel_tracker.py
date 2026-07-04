@@ -24,6 +24,7 @@ PICKS_HEADERS = [
     "Date", "Match", "Bet Type", "Pick", "Odds",
     "Confidence", "Result", "Profit/Loss", "Running Total P&L", "Bankroll (€)",
     "Claude Prob %", "Market Prob %",
+    "League", "Kickoff UTC", "Closing Odds",
 ]
 
 STARTING_BANKROLL = 100.0    # € tracked bankroll (used for running P&L in the sheet)
@@ -323,6 +324,7 @@ def log_to_excel(
     pick_date: str | None = None,
     claude_prob: float | None = None,
     market_prob: float | None = None,
+    kickoff_utc: str | None = None,
 ) -> None:
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
     date_str = dt.strftime("%d-%b-%Y")
@@ -367,6 +369,9 @@ def log_to_excel(
         date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", "", "",
         round(float(claude_prob), 1) if claude_prob is not None else "",
         round(float(market_prob), 1) if market_prob is not None else "",
+        league or "",
+        kickoff_utc or "",
+        "",  # Closing Odds — populated later by the closing-odds job, if at all
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
@@ -412,6 +417,53 @@ def get_pending_picks_rows(lookback_days: int = 7) -> list[dict]:
     return pending
 
 
+# ── Pending rows with kickoff time (used by closing_odds job) ────────────────
+
+def get_unsettled_picks_with_kickoff() -> list[dict]:
+    """
+    Return unsettled (no Result) picks that have a logged Kickoff UTC value,
+    each with its 1-based sheet row, league, bet_type, pick, and kickoff_utc.
+    Empty list (never raises) if the sheet can't be read or pre-dates the
+    League/Kickoff UTC columns — callers should treat that as "nothing to do".
+    """
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return []
+
+    if not rows:
+        return []
+
+    header = rows[0]
+    try:
+        result_col  = header.index("Result")
+        league_col  = header.index("League")
+        kickoff_col = header.index("Kickoff UTC")
+    except ValueError:
+        return []  # sheet pre-dates these columns — nothing to check yet
+
+    out = []
+    for i, row in enumerate(rows[1:], start=2):
+        if not row or not row[0]:
+            continue
+        if len(row) > result_col and row[result_col]:
+            continue  # already settled
+        kickoff_utc = row[kickoff_col] if len(row) > kickoff_col else ""
+        if not kickoff_utc:
+            continue
+        out.append({
+            "sheet_row":   i,
+            "match":       row[1] if len(row) > 1 else "",
+            "bet_type":    row[2] if len(row) > 2 else "",
+            "pick":        row[3] if len(row) > 3 else "",
+            "league":      row[league_col] if len(row) > league_col else "",
+            "kickoff_utc": kickoff_utc,
+        })
+    return out
+
+
 # ── Write result for one row ──────────────────────────────────────────────────
 
 def update_row_result(sheet_row: int, result: str, pnl: float) -> None:
@@ -426,6 +478,22 @@ def update_row_result(sheet_row: int, result: str, pnl: float) -> None:
         _format_result_row(ss, ws.id, sheet_row, result, pnl)
     except Exception as exc:
         log.error("Sheets update_row_result failed: %s", exc)
+
+
+def update_closing_odds(sheet_row: int, closing_odds: float) -> None:
+    """
+    Write (overwriting any prior value) the Closing Odds cell for one row.
+    Called repeatedly as kickoff approaches — the last write before kickoff
+    is the closing price. Column is located by header name, not a hardcoded
+    letter, so it survives future column reordering.
+    """
+    try:
+        ws = _picks_ws()
+        header = ws.row_values(1)
+        col = header.index("Closing Odds") + 1  # gspread columns are 1-based
+        ws.update_cell(sheet_row, col, round(float(closing_odds), 2))
+    except Exception as exc:
+        log.error("Sheets update_closing_odds failed (row %d): %s", sheet_row, exc)
 
 
 # ── Recalculate running totals + Summary ──────────────────────────────────────

@@ -172,6 +172,89 @@ def edge_report() -> dict | None:
     }
 
 
+_EMPTY_CLV_REPORT: dict = {
+    "avg_clv": None, "pct_positive": None, "sample_size": 0, "meaningful": False,
+    "positive_clv_roi": {"picks": 0, "pnl": 0.0, "roi": None},
+    "negative_clv_roi": {"picks": 0, "pnl": 0.0, "roi": None},
+}
+
+
+def clv_report() -> dict | None:
+    """
+    Closing Line Value (CLV) — the gold-standard measure of genuine edge,
+    independent of whether a pick actually won. For every settled pick with
+    both an original 'Odds' value and a logged 'Closing Odds' value:
+
+        CLV % = (original_odds / closing_odds − 1) × 100
+
+    Positive CLV means the price shortened after the pick was made (the
+    market moved toward our side) — a real signal of edge that a single
+    win/loss can't fake. Requires closing_odds.py to have run near kickoff;
+    picks with no Closing Odds value yet are skipped, not counted as zero.
+
+    Returns {"avg_clv", "pct_positive", "sample_size", "meaningful",
+             "positive_clv_roi", "negative_clv_roi"} or None on read failure.
+    An empty/pre-migration sheet returns the zeroed report above, not None,
+    so callers can distinguish "nothing to report yet" from "read failed".
+    """
+    try:
+        rows = _picks_ws().get_all_values()
+    except Exception as exc:
+        log.warning("clv_report: Sheets read failed: %s", exc)
+        return None
+    if not rows:
+        return dict(_EMPTY_CLV_REPORT)
+
+    header = rows[0]
+    try:
+        result_col  = header.index("Result")
+        odds_col    = header.index("Odds")
+        pnl_col     = header.index("Profit/Loss")
+        closing_col = header.index("Closing Odds")
+    except ValueError:
+        # Sheet pre-dates the Closing Odds column — nothing to evaluate yet
+        return dict(_EMPTY_CLV_REPORT)
+
+    scored = []
+    for row in rows[1:]:
+        result = row[result_col].strip().upper() if len(row) > result_col else ""
+        if result not in ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"):
+            continue
+        odds    = _safe_float(row[odds_col])    if len(row) > odds_col    else None
+        closing = _safe_float(row[closing_col]) if len(row) > closing_col else None
+        if odds is None or closing is None or closing == 0:
+            continue
+        scored.append({
+            "clv": (odds / closing - 1) * 100,
+            "pnl": _safe_float(row[pnl_col]) if len(row) > pnl_col else None,
+        })
+
+    n = len(scored)
+    if n == 0:
+        return dict(_EMPTY_CLV_REPORT)
+
+    def _roi_group(group: list[dict]) -> dict:
+        staked = [r for r in group if r["pnl"] is not None]
+        pnl = round(sum(r["pnl"] for r in staked), 2)
+        return {
+            "picks": len(staked),
+            "pnl":   pnl,
+            "roi":   round(pnl / len(staked) * 100, 1) if staked else None,
+        }
+
+    positive = [r for r in scored if r["clv"] > 0]
+    negative = [r for r in scored if r["clv"] <= 0]
+
+    return {
+        "avg_clv":          round(sum(r["clv"] for r in scored) / n, 2),
+        "pct_positive":     round(len(positive) / n * 100, 1),
+        "sample_size":      n,
+        "meaningful":       n >= MIN_MEANINGFUL_SAMPLE,
+        "positive_clv_roi": _roi_group(positive),
+        "negative_clv_roi": _roi_group(negative),
+    }
+
+
 if __name__ == "__main__":
     import json as _json
 
@@ -183,3 +266,5 @@ if __name__ == "__main__":
     print(_json.dumps(calibration_report(), indent=2))
     print("\nEdge report:")
     print(_json.dumps(edge_report(), indent=2))
+    print("\nCLV report:")
+    print(_json.dumps(clv_report(), indent=2))

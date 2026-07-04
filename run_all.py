@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from auto_results import _format_result_notification, _telegram_send, run_auto_results
+from closing_odds import run_closing_odds_check
 from main import daily_picks_job
 from tracker import init_db
 from weekly_summary import post_weekly_summary
@@ -35,6 +36,13 @@ async def live_results_check() -> None:
         _notified.add(key)
 
 
+async def closing_odds_job() -> None:
+    try:
+        await asyncio.to_thread(run_closing_odds_check)
+    except Exception as exc:
+        log.error("Closing odds check failed (non-fatal): %s", exc)
+
+
 async def main() -> None:
     init_db()
 
@@ -50,11 +58,15 @@ async def main() -> None:
     scheduler.add_job(
         live_results_check, "interval", minutes=30,
     )
+    scheduler.add_job(
+        closing_odds_job, "interval", minutes=15,
+    )
     scheduler.start()
 
     log.info(
         "Scheduler running — morning picks 09:00, "
-        "weekly summary Mon 09:05, live results every 30 min (Europe/Brussels)"
+        "weekly summary Mon 09:05, live results every 30 min, "
+        "closing odds check every 15 min (Europe/Brussels)"
     )
 
     try:

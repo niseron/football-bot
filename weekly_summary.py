@@ -115,7 +115,7 @@ def build_calibration_message() -> str | None:
     Monthly calibration report message (MarkdownV2). None when there is no
     probability data yet or the report can't be built — caller skips posting.
     """
-    from calibration import MIN_MEANINGFUL_SAMPLE, calibration_report, edge_report
+    from calibration import MIN_MEANINGFUL_SAMPLE, calibration_report, clv_report, edge_report
 
     cal = calibration_report()
     if not cal or cal["sample_size"] == 0:
@@ -160,6 +160,32 @@ def build_calibration_message() -> str | None:
             f"⚠️ _Results are not statistically meaningful below {MIN_MEANINGFUL_SAMPLE} settled picks\\. "
             f"Treat these numbers as directional only\\._"
         )
+
+    clv = clv_report()
+    if clv and clv["sample_size"]:
+        avg_clv_str = f"{clv['avg_clv']:+.1f}%"
+        pos_pct_str = f"{clv['pct_positive']:.1f}%"
+        lines.append(
+            f"\n*\U0001f4c9 Closing Line Value \\(CLV\\)*\n"
+            f"_How much the price moved after the pick was made — the true edge signal_\n"
+            f"  Avg CLV: *{_esc(avg_clv_str)}*\n"
+            f"  Picks with positive CLV: *{_esc(pos_pct_str)}*"
+        )
+        pos_clv, neg_clv = clv["positive_clv_roi"], clv["negative_clv_roi"]
+        if pos_clv["roi"] is not None:
+            pos_clv_roi_str = f"{pos_clv['roi']:+.1f}%"
+            lines.append(f"  ROI on positive\\-CLV picks: *{_esc(pos_clv_roi_str)}* \\({pos_clv['picks']} picks\\)")
+        if neg_clv["roi"] is not None:
+            neg_clv_roi_str = f"{neg_clv['roi']:+.1f}%"
+            lines.append(f"  ROI on negative\\-CLV picks: *{_esc(neg_clv_roi_str)}* \\({neg_clv['picks']} picks\\)")
+
+        n_clv = clv["sample_size"]
+        lines.append(f"  Sample size: *{n_clv}* settled picks with closing odds")
+        if not clv["meaningful"]:
+            lines.append(
+                f"⚠️ _CLV results are not statistically meaningful below {MIN_MEANINGFUL_SAMPLE} settled picks\\. "
+                f"Treat these numbers as directional only\\._"
+            )
 
     return "\n".join(lines)
 

@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
+TELEGRAM_IG_CHANNEL_ID = os.environ.get("TELEGRAM_IG_CHANNEL_ID")
 
 # Single-ID domestic leagues (fotmob-based IDs)
 LEAGUES = {
@@ -693,10 +694,10 @@ async def send_to_telegram(text: str):
     )
 
 
-async def _send_photo(path) -> None:
+async def _send_photo(path, chat_id: str | None = None) -> None:
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     with open(path, "rb") as f:
-        await bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=f)
+        await bot.send_photo(chat_id=chat_id or TELEGRAM_CHANNEL_ID, photo=f)
 
 
 # ── Main job ──────────────────────────────────────────────────────────────────
@@ -801,7 +802,12 @@ async def daily_picks_job():
 
     try:
         ig_card = generate_picks_card_ig(picks)
-        log.info("Instagram picks card saved (not auto-posted): %s", ig_card.name)
+        log.info("Instagram picks card saved: %s", ig_card.name)
+        if TELEGRAM_IG_CHANNEL_ID:
+            await _send_photo(ig_card, chat_id=TELEGRAM_IG_CHANNEL_ID)
+            log.info("Instagram picks card sent to TELEGRAM_IG_CHANNEL_ID")
+        else:
+            log.info("TELEGRAM_IG_CHANNEL_ID not set — skipping send")
     except Exception as exc:
         log.warning("Instagram picks card failed (non-fatal): %s", exc)
 

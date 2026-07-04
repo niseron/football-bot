@@ -62,6 +62,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `TELEGRAM_CHANNEL_ID` | Telegram channel ID where picks are posted |
 | `GOOGLE_SHEETS_ID` | ID from the Google Sheet URL (between /d/ and /edit) |
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
+| `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated and saved to `/cards`, just not sent anywhere. |
 
 ---
 
@@ -228,7 +229,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Data quality | 75% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
 | Content pipeline | 90% | Cards automatic, posting manual |
-| Socials | 35% | Accounts + branding + IG-formatted card generator (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; zero posts, no auto-posting pipeline yet |
+| Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` (optional) for manual download and posting — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |
 | Site/app/monetization | 0% | Deliberately parked until edge is proven |
 

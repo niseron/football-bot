@@ -16,7 +16,7 @@ from telegram import Bot
 
 from tracker import log_pick, picks_exist_for_session
 from excel_tracker import calculate_kelly_stake
-from card_generator import generate_picks_card
+from card_generator import generate_picks_card, generate_picks_card_ig
 
 load_dotenv()
 
@@ -798,6 +798,12 @@ async def daily_picks_job():
         log.info("Picks card sent: %s", card.name)
     except Exception as exc:
         log.warning("Picks card failed (non-fatal): %s", exc)
+
+    try:
+        ig_card = generate_picks_card_ig(picks)
+        log.info("Instagram picks card saved (not auto-posted): %s", ig_card.name)
+    except Exception as exc:
+        log.warning("Instagram picks card failed (non-fatal): %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

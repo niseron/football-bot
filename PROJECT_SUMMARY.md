@@ -173,7 +173,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - Each pick's kickoff time is captured from the RapidAPI fixture data at pick-log time and stored in the 'Kickoff UTC' column (plus 'League', for odds-batching)
 - `closing_odds_job` polls every 15 minutes; for any unsettled pick whose kickoff is 5-65 minutes away, it fetches current market odds from The Odds API and overwrites the 'Closing Odds' column — the last write before kickoff becomes the closing price
 - Odds API calls are batched per competition (one request covers every due match in that league that cycle), not one request per match
-- Self-imposed cap of 20 Odds API requests/day; polling is skipped with a warning if exceeded
+- Self-imposed cap of 12 Odds API requests/day (keeps this job + main.py's morning odds enrichment comfortably under the 500/month free-tier limit); polling is skipped with a warning if exceeded
 - `calibration.py`'s `clv_report()` computes CLV = (original odds / closing odds − 1) × 100 for every settled pick with both values — average CLV, % of picks with positive CLV, and ROI split between positive- and negative-CLV picks
 - Appended to the existing monthly calibration Telegram message, with the same below-300-picks sample size warning
 - Purely additive measurement: never touches pick generation, Kelly staking, or the calibration engine's existing reports; every step fails silently on error

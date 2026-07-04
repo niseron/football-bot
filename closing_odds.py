@@ -31,7 +31,10 @@ log = logging.getLogger(__name__)
 # Self-imposed daily cap so a scheduling bug (or an unexpectedly busy fixture
 # day) can't burn through The Odds API quota. Reset at midnight local process
 # time — "local counter" per the design brief, not persisted across restarts.
-MAX_DAILY_REQUESTS = 20
+# Kept low enough that this job's usage plus main.py's morning odds-enrichment
+# calls stay comfortably under the 500/month free-tier limit (12/day here is
+# ~360/month; enrichment adds a handful more per day on top of that).
+MAX_DAILY_REQUESTS = 12
 
 # Only poll for matches whose kickoff falls in this window from "now".
 _WINDOW_MIN_MINUTES = 5

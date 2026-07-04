@@ -507,6 +507,14 @@ Each fixture may include the following enriched context — use it to sharpen yo
 - h2h: last 5 head-to-head meetings between the two teams with scores.
 When this data is present, weight recent form and H2H trends heavily in your reasoning.
 
+Your knowledge of player rosters, retirements, transfers, injuries, and international squad selections
+may be outdated — squads (especially international ones) change up to matchday due to injuries, form,
+and late call-ups, and a player you recall as a starter may have retired, moved clubs, or been dropped
+entirely. Do NOT name specific players in your reasoning unless that player is explicitly mentioned in
+the home_recent, away_recent, or h2h context provided for that fixture. Otherwise, reason at the team
+level only — attacking depth, defensive organization, midfield control, squad experience, tournament
+pedigree, and home advantage — rather than citing individual names from memory.
+
 Since live odds are not provided, use your knowledge of typical market pricing to estimate realistic
 decimal odds (e.g. a heavy favourite ~1.35, slight favourite ~1.75, toss-up ~2.00 each side).
 

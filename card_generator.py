@@ -369,13 +369,10 @@ def generate_picks_card_ig(
             y += _th(f_sub) + (6 if j < len(bet_lines) - 1 else 0)
         y += 8
 
-        market_odds = p.get("market_odds")
-        if market_odds is not None:
-            stat = f"Claude {p.get('odds', '')} · Mkt {market_odds}"
-            if p.get("value"):
-                stat += " [VALUE]"
-        else:
-            stat = f"Odds {p.get('odds', '')}"
+        # IG card always shows the plain odds line — never the Claude/Mkt
+        # comparison — regardless of whether market_odds/value are present
+        # on the pick dict. That data still drives the Telegram card above.
+        stat = f"Odds {p.get('odds', '')}"
         stat = _clip(stat, f_stat, text_w)
         d.text((x0, y), stat, font=f_stat, fill=_NEON)
         y += _th(f_stat) + 30

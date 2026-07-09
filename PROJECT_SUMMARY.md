@@ -125,7 +125,7 @@ Purely additive delivery channel via `discord_bot.py` — no changes to pick gen
 | Key | Content | Sent from |
 |---|---|---|
 | `picks-cards` | Daily picks PNG card | `main.py` (after the Telegram card send) |
-| `results-cards` | Results PNG card | `auto_results.py --results` |
+| `results-cards` | Live result notifications (text) — mirrored from the same 30-min automatic trigger that sends them to Telegram; plus the results PNG card when the manual `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
 | `premier-league` | Each Premier League pick as text (match, bet, odds, confidence, reasoning) | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as text | `main.py` |
@@ -242,7 +242,8 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - Font: DejaVu (installed on Railway via `nixpacks.toml`)
 
 ### Discord delivery (added — `discord_bot.py`)
-- Every daily picks card, results card, and weekly card is mirrored to Discord right after its Telegram send
+- Every daily picks card and weekly card is mirrored to Discord right after its Telegram send
+- Live result notifications (the automatic 30-minute checker) mirror to Discord from the identical trigger as the Telegram notification; the results PNG card additionally mirrors when the manual `--results` path generates it
 - Each individual pick's text is routed to a league-specific Discord channel (`premier-league` / `jupiler-pro-league` / `world-cup`)
 - Entirely fail-silent — see section 5b for the mapping structure and guarantees
 

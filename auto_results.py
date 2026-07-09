@@ -455,6 +455,7 @@ if __name__ == "__main__":
                 msg = _format_result_notification(r)
                 print(f"\nSending notification:\n{msg}")
                 _telegram_send(msg)
+                send_to_discord("results-cards", message=msg)  # same trigger as Telegram
                 notified.add(key)
 
         _live_check()

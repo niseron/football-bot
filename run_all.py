@@ -23,12 +23,18 @@ from auto_results import _format_result_notification, _telegram_send, run_auto_r
 from closing_odds import run_closing_odds_check
 from discord_bot import send_to_discord
 from main import daily_picks_job
+from tennis_auto_results import (
+    _format_tennis_result_notification,
+    _tennis_telegram_send,
+    run_tennis_auto_results,
+)
 from tennis_closing_odds import run_tennis_closing_odds_check
 from tennis_main import daily_tennis_picks_job
 from tracker import init_db
 from weekly_summary import post_weekly_summary
 
 _notified: set[tuple] = set()
+_tennis_notified: set[tuple] = set()
 
 
 async def live_results_check() -> None:
@@ -64,6 +70,26 @@ async def tennis_closing_odds_job() -> None:
         log.error("Tennis closing odds check failed (non-fatal): %s", exc)
 
 
+async def tennis_live_results_check() -> None:
+    """Tennis mirror of live_results_check — fully independent of the football job."""
+    log.info("Running tennis live results check...")
+    try:
+        stats, resolved = await asyncio.to_thread(run_tennis_auto_results)
+    except Exception as exc:
+        log.error("Tennis live results check failed: %s", exc)
+        return
+    for r in resolved:
+        key = (r["match"], r["bet_type"], r["pick"])
+        if key in _tennis_notified:
+            continue
+        msg = _format_tennis_result_notification(r)
+        log.info("Sending tennis result notification: %s | %s", r["match"], r["result"])
+        await asyncio.to_thread(_tennis_telegram_send, msg)
+        # Discord mirror — same trigger, same text; send_to_discord never raises
+        await asyncio.to_thread(send_to_discord, "results-cards", msg)
+        _tennis_notified.add(key)
+
+
 async def main() -> None:
     init_db()
 
@@ -90,13 +116,16 @@ async def main() -> None:
     scheduler.add_job(
         tennis_closing_odds_job, "interval", minutes=15,
     )
+    scheduler.add_job(
+        tennis_live_results_check, "interval", minutes=30,
+    )
     scheduler.start()
 
     log.info(
         "Scheduler running — football: morning picks 09:00, "
         "weekly summary Mon 09:05, live results every 30 min, "
         "closing odds every 15 min | tennis: picks 09:30, "
-        "closing odds every 15 min (Europe/Brussels)"
+        "live results every 30 min, closing odds every 15 min (Europe/Brussels)"
     )
 
     try:

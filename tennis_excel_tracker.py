@@ -268,6 +268,7 @@ def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
 
     cutoff = date.today() - timedelta(days=lookback_days)
     result_col = TENNIS_HEADERS.index("Result")
+    start_col  = TENNIS_HEADERS.index("Kickoff/Start Time")
     pending = []
     for i, row in enumerate(rows[1:], start=2):
         if not row or not row[0]:
@@ -287,6 +288,7 @@ def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
             "bet_type":  row[2] if len(row) > 2 else "",
             "pick":      row[3] if len(row) > 3 else "",
             "odds":      float(row[4]) if len(row) > 4 and row[4] else 1.0,
+            "start_utc": row[start_col] if len(row) > start_col else "",
         })
     return pending
 

@@ -41,9 +41,10 @@ football-bot/
 │
 ├── tennis_main.py            TENNIS system (separate) — daily ATP/WTA picks pipeline
 ├── tennis_excel_tracker.py   TENNIS Sheets layer — reads/writes ONLY the 'Tennis Picks' tab
+├── tennis_auto_results.py    TENNIS automatic result checker — polls every 30 min via run_all.py
 ├── tennis_closing_odds.py    TENNIS closing line value (CLV) tracker
 ├── tennis_calibration.py     TENNIS calibration engine — independent reports & 300-pick threshold
-├── tennis_update_result.py   CLI to manually settle a tennis pick WIN/LOSS/VOID
+├── tennis_update_result.py   CLI to manually settle/override a tennis pick WIN/LOSS/VOID
 │
 ├── cards/                Output folder for generated PNG cards (gitignored)
 ├── START_BOT.bat         Windows launcher — opens 4 cmd windows for local development
@@ -89,13 +90,14 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Entry point:** `python run_all.py`
 - **Python version:** 3.12 (runtime.txt)
 - **Font support:** `nixpacks.toml` installs `fonts-dejavu` so Pillow can render card text on Railway
-- **Process:** Single process running six APScheduler jobs — four football, two tennis (the tennis jobs share the process but no data paths):
+- **Process:** Single process running seven APScheduler jobs — four football, three tennis (the tennis jobs share the process but no data paths):
   - Daily picks (football) — cron, 09:00 Europe/Brussels
   - Weekly summary (football) — cron, Monday 09:05 Europe/Brussels
   - Live result checks (football) — interval, every 30 minutes
   - Closing odds check (football CLV) — interval, every 15 minutes
   - Daily tennis picks — cron, 09:30 Europe/Brussels
   - Tennis closing odds check (tennis CLV) — interval, every 15 minutes
+  - Tennis live result checks — interval, every 30 minutes
 
 **To deploy a change:**
 1. Edit code locally
@@ -125,7 +127,7 @@ Purely additive delivery channel via `discord_bot.py` — no changes to pick gen
 | Key | Content | Sent from |
 |---|---|---|
 | `picks-cards` | Daily picks PNG card | `main.py` (after the Telegram card send) |
-| `results-cards` | Live result notifications (text) — mirrored from the same 30-min automatic trigger that sends them to Telegram; plus the results PNG card when the manual `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
+| `results-cards` | Live result notifications (text) — mirrored from the same 30-min automatic triggers that send them to Telegram (football AND tennis); plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` + `tennis_live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
 | `premier-league` | Each Premier League pick as text (match, bet, odds, confidence, reasoning) | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as text | `main.py` |
@@ -304,7 +306,8 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 | Sheets layer | `tennis_excel_tracker.py` → 'Tennis Picks' tab only | `excel_tracker.py` → Picks/Summary tabs |
 | CLV tracker | `tennis_closing_odds.py` (own daily request cap) | `closing_odds.py` |
 | Calibration | `tennis_calibration.py` (own Brier, edge, CLV reports, own 300-pick threshold) | `calibration.py` |
-| Manual settle | `tennis_update_result.py` | `update_result.py` |
+| Auto results | `tennis_auto_results.py` + `run_all.py` `tennis_live_results_check` (every 30 min) | `auto_results.py` + `live_results_check` |
+| Manual settle/override | `tennis_update_result.py` | `update_result.py` |
 | Duplicate-run guard | reads the Tennis Picks tab | SQLite `picks.db` (tennis never touches it) |
 
 ### Pipeline (mirrors the football flow)
@@ -316,11 +319,12 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 - **Posting:** Telegram channel `TELEGRAM_TENNIS_CHANNEL_ID` (never the football channel) at **09:30 Europe/Brussels** — its own schedule slot, 30 min after the football picks.
 - **Tracking:** 'Tennis Picks' tab — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds. Results are WIN/LOSS/VOID (units P&L: WIN = odds−1, LOSS = −1). No half results — tennis game handicaps and totals use half lines.
 - **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of 12 tennis odds requests/day, budgeted separately from the football cap.
+- **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick sends a Telegram notification to `TELEGRAM_TENNIS_CHANNEL_ID` and mirrors the same text to the `results-cards` Discord channel from the identical trigger.
 
 ### Tennis limitations (own list, separate from football's)
 
-- **Results are settled manually** for now (`python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN`) — there is no tennis auto-results job yet. This is the biggest gap: unsettled picks never enter the calibration sample.
-- **No injury/retirement data** — mid-match retirements are common in tennis and settle differently across bookmakers; VOID is available for those.
+- **Retirements/walkovers settle VOID for all bet types** — bookmaker rules differ (many settle Match Winner if a set was completed). Override a specific pick with `python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN` when your book settled differently.
+- **Result detection depends on the fixtures-by-date endpoint filling the `result` field** for finished matches. If a finished match never shows a result there, the pick stays pending and must be settled manually.
 - **Set Betting picks have no market/closing odds**, so they contribute to the calibration report but never to the edge/CLV reports.
 - **Calibration sample size** — all tennis reports are statistically meaningless below ~300 settled picks. Same rule as football, independent counter.
 
@@ -328,10 +332,10 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 
 | Area | Done | Status |
 |---|---|---|
-| Tennis bot core | 70% | Picks, Sheets tab, Telegram, CLV polling live from 9 Jul 2026; results still manual |
+| Tennis bot core | 85% | Picks, Sheets tab, Telegram, Discord, CLV polling, auto-results all live (10 Jul 2026) |
 | Tennis data quality | 60% | Form/H2H/surface enrichment + dynamic Odds API keys; no injury/retirement data |
 | Tennis calibration engine | 10% | Infrastructure done, collecting from 9 Jul 2026; verdict ~Oct-Nov 2026 at 300 picks |
-| Tennis auto-results | 0% | Not built — manual settling via tennis_update_result.py |
+| Tennis auto-results | 90% | Live from 10 Jul 2026, all 4 bet types; retirements settle VOID (manual override available) |
 | Tennis proven edge | 0% | Blocked on tennis calibration data |
 
 ---
@@ -383,8 +387,9 @@ Supports: `WIN`, `LOSS`, `VOID`, `HALF WIN`, `HALF LOSS`
 ```
 python tennis_main.py --now                                            # one-shot: fetch + analyse + post tennis picks now
 python tennis_main.py                                                  # start the tennis scheduler (09:30 Brussels)
+python tennis_auto_results.py                                          # one-shot: check + settle tennis results now
 python tennis_closing_odds.py                                          # one closing-odds poll for tennis picks
-python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN  # manually settle a tennis pick (WIN/LOSS/VOID)
+python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN  # manually settle/override a tennis pick (WIN/LOSS/VOID)
 python tennis_calibration.py                                           # print tennis calibration / edge / CLV reports
 ```
 

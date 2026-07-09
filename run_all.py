@@ -1,4 +1,13 @@
-"""Single entry point for Railway: daily picks, live result checks, weekly summary."""
+"""Single entry point for Railway.
+
+Football jobs: daily picks, live result checks, closing odds, weekly summary.
+Tennis jobs:   daily tennis picks, tennis closing odds.
+
+The tennis jobs are a fully separate system (tennis_main / tennis_excel_tracker /
+tennis_closing_odds / tennis_calibration): they share this process and scheduler
+but no data paths, sheet tabs, calibration samples, or request budgets with the
+football jobs.
+"""
 import asyncio
 import logging
 
@@ -13,6 +22,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from auto_results import _format_result_notification, _telegram_send, run_auto_results
 from closing_odds import run_closing_odds_check
 from main import daily_picks_job
+from tennis_closing_odds import run_tennis_closing_odds_check
+from tennis_main import daily_tennis_picks_job
 from tracker import init_db
 from weekly_summary import post_weekly_summary
 
@@ -43,6 +54,13 @@ async def closing_odds_job() -> None:
         log.error("Closing odds check failed (non-fatal): %s", exc)
 
 
+async def tennis_closing_odds_job() -> None:
+    try:
+        await asyncio.to_thread(run_tennis_closing_odds_check)
+    except Exception as exc:
+        log.error("Tennis closing odds check failed (non-fatal): %s", exc)
+
+
 async def main() -> None:
     init_db()
 
@@ -61,12 +79,21 @@ async def main() -> None:
     scheduler.add_job(
         closing_odds_job, "interval", minutes=15,
     )
+    # Tennis system — independent jobs, never intermixed with the football ones
+    scheduler.add_job(
+        daily_tennis_picks_job, "cron",
+        hour=9, minute=30, timezone="Europe/Brussels",
+    )
+    scheduler.add_job(
+        tennis_closing_odds_job, "interval", minutes=15,
+    )
     scheduler.start()
 
     log.info(
-        "Scheduler running — morning picks 09:00, "
+        "Scheduler running — football: morning picks 09:00, "
         "weekly summary Mon 09:05, live results every 30 min, "
-        "closing odds check every 15 min (Europe/Brussels)"
+        "closing odds every 15 min | tennis: picks 09:30, "
+        "closing odds every 15 min (Europe/Brussels)"
     )
 
     try:

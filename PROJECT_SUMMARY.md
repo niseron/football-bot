@@ -14,6 +14,8 @@ An automated football betting analysis bot that:
 
 Covered competitions: Premier League, Belgian Jupiler Pro League, FIFA World Cup 2026.
 
+Since 9 Jul 2026 the repo also hosts a **fully separate tennis picks system** (ATP/WTA) — see the "Tennis System — SEPARATE from football" section below. The two systems share the Railway process and API keys but no data paths, tabs, or calibration samples.
+
 ---
 
 ## 2. File Structure
@@ -34,6 +36,12 @@ football-bot/
 ├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID/HALF WIN/HALF LOSS
 ├── backtest.py           Backtesting script against 2023-24 historical data (CSV output)
 ├── _run_now.py           Manual one-shot trigger — fetch + analyse + post immediately
+│
+├── tennis_main.py            TENNIS system (separate) — daily ATP/WTA picks pipeline
+├── tennis_excel_tracker.py   TENNIS Sheets layer — reads/writes ONLY the 'Tennis Picks' tab
+├── tennis_closing_odds.py    TENNIS closing line value (CLV) tracker
+├── tennis_calibration.py     TENNIS calibration engine — independent reports & 300-pick threshold
+├── tennis_update_result.py   CLI to manually settle a tennis pick WIN/LOSS/VOID
 │
 ├── cards/                Output folder for generated PNG cards (gitignored)
 ├── START_BOT.bat         Windows launcher — opens 4 cmd windows for local development
@@ -63,6 +71,8 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `GOOGLE_SHEETS_ID` | ID from the Google Sheet URL (between /d/ and /edit) |
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
 | `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated and saved to `/cards`, just not sent anywhere. |
+| `TELEGRAM_TENNIS_CHANNEL_ID` | **Tennis system.** Telegram channel ID where tennis picks are posted — must be a DIFFERENT channel from the football one. If unset, tennis picks are still logged to the Tennis Picks tab but the Telegram send fails (logged, non-fatal). |
+| `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
 
 ---
 
@@ -75,11 +85,13 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Entry point:** `python run_all.py`
 - **Python version:** 3.12 (runtime.txt)
 - **Font support:** `nixpacks.toml` installs `fonts-dejavu` so Pillow can render card text on Railway
-- **Process:** Single process running four APScheduler jobs:
-  - Daily picks — cron, 09:00 Europe/Brussels
-  - Weekly summary — cron, Monday 09:05 Europe/Brussels
-  - Live result checks — interval, every 30 minutes
-  - Closing odds check (CLV tracking) — interval, every 15 minutes
+- **Process:** Single process running six APScheduler jobs — four football, two tennis (the tennis jobs share the process but no data paths):
+  - Daily picks (football) — cron, 09:00 Europe/Brussels
+  - Weekly summary (football) — cron, Monday 09:05 Europe/Brussels
+  - Live result checks (football) — interval, every 30 minutes
+  - Closing odds check (football CLV) — interval, every 15 minutes
+  - Daily tennis picks — cron, 09:30 Europe/Brussels
+  - Tennis closing odds check (tennis CLV) — interval, every 15 minutes
 
 **To deploy a change:**
 1. Edit code locally
@@ -114,6 +126,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 |---|---|
 | Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds |
 | Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, bet type breakdown table |
+| Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 
 **Conditional formatting (applied via batchUpdate on every write):**
 
@@ -233,6 +246,55 @@ Completion estimates per area — update these percentages whenever a related ch
 | Proven edge | 5% | Blocked on calibration data |
 | Site/app/monetization | 0% | Deliberately parked until edge is proven |
 
+The roadmap percentages above are **football only** — the tennis system below tracks its own roadmap and is never merged into these numbers.
+
+---
+
+## Tennis System — SEPARATE from football
+
+A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026. It shares the Railway process, the Telegram bot token, and the API keys — and **nothing else**. No shared calibration data, no shared Sheet columns/tabs, no shared SQLite, no shared functions in the data path. A bug or bad streak in one system cannot contaminate the other's data or reports.
+
+### Data collection start date: **9 Jul 2026**
+### Independent verdict timeline: ~300 settled tennis picks with probability data — at ~3-5 picks/day, expect a first meaningful calibration read around **Oct-Nov 2026**. This clock is completely separate from the football calibration timeline; do not merge the two samples or compare their early reports.
+
+### Architecture
+
+| Piece | Tennis | Football equivalent (NOT shared) |
+|---|---|---|
+| Picks pipeline | `tennis_main.py` | `main.py` |
+| Sheets layer | `tennis_excel_tracker.py` → 'Tennis Picks' tab only | `excel_tracker.py` → Picks/Summary tabs |
+| CLV tracker | `tennis_closing_odds.py` (own daily request cap) | `closing_odds.py` |
+| Calibration | `tennis_calibration.py` (own Brier, edge, CLV reports, own 300-pick threshold) | `calibration.py` |
+| Manual settle | `tennis_update_result.py` | `update_result.py` |
+| Duplicate-run guard | reads the Tennis Picks tab | SQLite `picks.db` (tennis never touches it) |
+
+### Pipeline (mirrors the football flow)
+
+- **Fixtures:** "Tennis API - ATP WTA ITF" (MatchStat) on RapidAPI — ATP + WTA singles for the next 48 hours, capped at 25 fixtures/tour on busy days. Doubles are filtered out. Uses the same `RAPIDAPI_KEY`; the RapidAPI account must be **subscribed to this API** (separate from the football one). Host overridable via `TENNIS_RAPIDAPI_HOST`.
+- **Enrichment:** per fixture — tournament name/surface/tier (`tournament/info`), last-5 form per player (`player/past-matches`), and head-to-head (`fixtures/h2h`); capped at 20 enriched fixtures per run. In this API's archive data the first-listed player is always the winner.
+- **Claude analysis:** separate `TENNIS_SYSTEM_PROMPT` (claude-sonnet-4-6) — weights player form, H2H, surface type (Hard/Clay/Grass), and tournament tier. Bet types: **Match Winner, Total Games Over/Under, Set Betting, Handicap (games)**. Outputs the same JSON shape as football, incl. the calibration `probability` field.
+- **Real odds:** The Odds API lists tennis tournaments as dynamic per-event sport keys (`tennis_atp_*` / `tennis_wta_*`), so active keys are discovered at runtime via the quota-free `/v4/sports` call (max 6 odds requests per picks run). Same ≥5pp value-flag rule as football. Set Betting has no Odds API market → those picks stay Claude-odds-only.
+- **Posting:** Telegram channel `TELEGRAM_TENNIS_CHANNEL_ID` (never the football channel) at **09:30 Europe/Brussels** — its own schedule slot, 30 min after the football picks.
+- **Tracking:** 'Tennis Picks' tab — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds. Results are WIN/LOSS/VOID (units P&L: WIN = odds−1, LOSS = −1). No half results — tennis game handicaps and totals use half lines.
+- **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of 12 tennis odds requests/day, budgeted separately from the football cap.
+
+### Tennis limitations (own list, separate from football's)
+
+- **Results are settled manually** for now (`python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN`) — there is no tennis auto-results job yet. This is the biggest gap: unsettled picks never enter the calibration sample.
+- **No injury/retirement data** — mid-match retirements are common in tennis and settle differently across bookmakers; VOID is available for those.
+- **Set Betting picks have no market/closing odds**, so they contribute to the calibration report but never to the edge/CLV reports.
+- **Calibration sample size** — all tennis reports are statistically meaningless below ~300 settled picks. Same rule as football, independent counter.
+
+### Tennis roadmap (independent — do NOT merge into the football percentages)
+
+| Area | Done | Status |
+|---|---|---|
+| Tennis bot core | 70% | Picks, Sheets tab, Telegram, CLV polling live from 9 Jul 2026; results still manual |
+| Tennis data quality | 60% | Form/H2H/surface enrichment + dynamic Odds API keys; no injury/retirement data |
+| Tennis calibration engine | 10% | Infrastructure done, collecting from 9 Jul 2026; verdict ~Oct-Nov 2026 at 300 picks |
+| Tennis auto-results | 0% | Not built — manual settling via tennis_update_result.py |
+| Tennis proven edge | 0% | Blocked on tennis calibration data |
+
 ---
 
 ## 8. Still To Do
@@ -272,6 +334,15 @@ python closing_odds.py
 python update_result.py "Brazil vs Morocco" "BTTS" WIN
 ```
 Supports: `WIN`, `LOSS`, `VOID`, `HALF WIN`, `HALF LOSS`
+
+**Tennis system (all commands hit only the Tennis Picks tab):**
+```
+python tennis_main.py --now                                            # one-shot: fetch + analyse + post tennis picks now
+python tennis_main.py                                                  # start the tennis scheduler (09:30 Brussels)
+python tennis_closing_odds.py                                          # one closing-odds poll for tennis picks
+python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN  # manually settle a tennis pick (WIN/LOSS/VOID)
+python tennis_calibration.py                                           # print tennis calibration / edge / CLV reports
+```
 
 **To apply a manual fix with custom P&L:**
 ```

@@ -15,6 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from telegram import Bot
 
+from discord_bot import send_to_discord
 from excel_tracker import get_bet_type_breakdown, get_weekly_data
 
 load_dotenv()
@@ -213,6 +214,7 @@ async def post_weekly_summary():
         with open(card_path, "rb") as f:
             await bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=f)
         log.info("Weekly card sent: %s", card_path.name)
+        send_to_discord("weekly-cards", image_path=card_path)
     except Exception as exc:
         log.warning("Weekly card failed (non-fatal): %s", exc)
 

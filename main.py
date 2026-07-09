@@ -17,6 +17,7 @@ from telegram import Bot
 from tracker import log_pick, picks_exist_for_session
 from excel_tracker import calculate_kelly_stake
 from card_generator import generate_picks_card, generate_picks_card_ig
+from discord_bot import send_to_discord
 
 load_dotenv()
 
@@ -93,6 +94,15 @@ ODDS_API_SPORT_KEYS: dict[str, str] = {
     "Premier League": "soccer_epl",
     "Jupiler Pro League": "soccer_belgium_first_div",
     "FIFA World Cup 2026": "soccer_fifa_world_cup",
+}
+
+# Maps competition names to Discord channel-mapping keys (discord_bot.py).
+# A league missing here (or a key missing from DISCORD_CHANNELS_JSON) is
+# simply not routed to Discord.
+DISCORD_LEAGUE_CHANNEL_KEYS: dict[str, str] = {
+    "Premier League": "premier-league",
+    "Jupiler Pro League": "jupiler-pro-league",
+    "FIFA World Cup 2026": "world-cup",
 }
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -694,6 +704,28 @@ async def send_to_telegram(text: str):
     )
 
 
+# ── Discord (additive delivery — never affects the Telegram flow) ────────────
+
+def _format_discord_pick(p: dict) -> str:
+    """One pick as a plain Discord-markdown message (no MarkdownV2 escaping)."""
+    lines = [
+        f"**{p.get('match', '?')}** ({p.get('league', '?')})",
+        f"Bet: {p.get('bet_type', '?')} — **{p.get('pick', '?')}**",
+    ]
+    market_odds = p.get("market_odds")
+    if market_odds is not None:
+        value_tag = " 🔥 **VALUE**" if p.get("value") else ""
+        lines.append(
+            f"Odds: Claude `{p.get('odds', '?')}` | Market `{market_odds}`{value_tag}"
+            f" | Confidence: {p.get('confidence', 'N/A')}"
+        )
+    else:
+        lines.append(f"Odds: `{p.get('odds', '?')}` | Confidence: {p.get('confidence', 'N/A')}")
+    if p.get("reasoning"):
+        lines.append(f"_{p['reasoning']}_")
+    return "\n".join(lines)
+
+
 async def _send_photo(path, chat_id: str | None = None) -> None:
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     with open(path, "rb") as f:
@@ -793,12 +825,24 @@ async def daily_picks_job():
     except Exception as exc:
         log.error("Telegram send failed: %s", exc)
 
+    card = None
     try:
         card = generate_picks_card(picks, session="morning")
         await _send_photo(card)
         log.info("Picks card sent: %s", card.name)
     except Exception as exc:
         log.warning("Picks card failed (non-fatal): %s", exc)
+
+    # Discord delivery — additive; send_to_discord never raises
+    try:
+        if card is not None:
+            send_to_discord("picks-cards", image_path=card)
+        for pick in picks:
+            channel_key = DISCORD_LEAGUE_CHANNEL_KEYS.get(pick.get("league", ""))
+            if channel_key:
+                send_to_discord(channel_key, message=_format_discord_pick(pick))
+    except Exception as exc:
+        log.warning("Discord picks delivery failed (non-fatal): %s", exc)
 
     try:
         ig_card = generate_picks_card_ig(picks)

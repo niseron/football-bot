@@ -7,6 +7,7 @@ An automated football betting analysis bot that:
 - Enriches each fixture with last-5 team form and head-to-head history from the same API
 - Sends the enriched fixture list to Claude AI (claude-sonnet-4-6) for betting analysis
 - Posts the top 5 value picks daily to a Telegram channel at 09:00 Brussels time as a text message and a branded PNG card
+- Mirrors delivery to Discord (purely additive): picks/results/weekly PNG cards to card channels, plus each pick's text routed to a per-league Discord channel
 - Automatically checks match results every 30 minutes and updates Google Sheets
 - Polls closing odds every 15 minutes as kickoff approaches, for closing line value (CLV) tracking
 - Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
@@ -31,6 +32,7 @@ football-bot/
 ├── excel_tracker.py      Google Sheets data layer — all read/write to the spreadsheet
 ├── tracker.py            SQLite layer — local backup of every pick in picks.db
 ├── card_generator.py     Generates branded 1080×1080 PNG cards (picks, results, weekly summary)
+├── discord_bot.py        Discord delivery layer — send_to_discord() via Discord REST API (send-only, fail-silent)
 │
 ├── calibration.py        Probability calibration engine — calibration_report() + edge_report() + clv_report()
 ├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID/HALF WIN/HALF LOSS
@@ -72,6 +74,8 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
 | `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated and saved to `/cards`, just not sent anywhere. |
 | `TELEGRAM_TENNIS_CHANNEL_ID` | **Tennis system.** Telegram channel ID where tennis picks are posted — must be a DIFFERENT channel from the football one. If unset, tennis picks are still logged to the Tennis Picks tab but the Telegram send fails (logged, non-fatal). |
+| `DISCORD_BOT_TOKEN` | *Optional.* Discord bot token (Developer Portal → Bot → Reset Token). If unset, all Discord delivery is skipped silently — Telegram is unaffected. |
+| `DISCORD_CHANNELS_JSON` | *Optional.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. |
 | `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
 
 ---
@@ -109,6 +113,35 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
   - Result notifications when a pick settles (WIN / LOSS / HALF WIN / HALF LOSS with score and P&L)
   - Results card (PNG) posted after all picks for a day are settled
   - Weekly summary every Monday at 09:05 — text + PNG weekly summary card
+
+---
+
+## 5b. Discord Delivery (added 9 Jul 2026)
+
+Purely additive delivery channel via `discord_bot.py` — no changes to pick generation, calibration, or any Telegram logic. Send-only: uses Discord's REST API directly through `requests` (no discord.py dependency, no gateway/event client).
+
+**Channel mapping** (`DISCORD_CHANNELS_JSON` keys → what gets posted there):
+
+| Key | Content | Sent from |
+|---|---|---|
+| `picks-cards` | Daily picks PNG card | `main.py` (after the Telegram card send) |
+| `results-cards` | Results PNG card | `auto_results.py --results` |
+| `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
+| `premier-league` | Each Premier League pick as text (match, bet, odds, confidence, reasoning) | `main.py` |
+| `jupiler-pro-league` | Each Jupiler Pro League pick as text | `main.py` |
+| `world-cup` | Each World Cup 2026 pick as text | `main.py` |
+
+The league-name → key routing lives in `main.py`'s `DISCORD_LEAGUE_CHANNEL_KEYS`.
+
+**Fail-silent guarantee:** `send_to_discord(channel_key, message=None, image_path=None)` never raises. Missing `DISCORD_BOT_TOKEN`, missing/malformed `DISCORD_CHANNELS_JSON`, an unmapped key, a bad image path, or a Discord API error each log one line and return `False` — the Telegram flow can never be affected. Rate limits (HTTP 429) get one retry after Discord's `retry_after`.
+
+**Bot setup (already done):** application + bot in the Discord Developer Portal, no privileged intents, invited with the `bot` OAuth2 scope and View Channels / Send Messages / Attach Files / Embed Links permissions.
+
+**To test all configured channels** (sends a text + image to each):
+```
+python discord_bot.py --test
+```
+Verified 9 Jul 2026: all 6 channels received the test message and image.
 
 ---
 
@@ -208,6 +241,11 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - Cards saved to `cards/` folder; win rate in the footer is pulled live from the Summary sheet
 - Font: DejaVu (installed on Railway via `nixpacks.toml`)
 
+### Discord delivery (added — `discord_bot.py`)
+- Every daily picks card, results card, and weekly card is mirrored to Discord right after its Telegram send
+- Each individual pick's text is routed to a league-specific Discord channel (`premier-league` / `jupiler-pro-league` / `world-cup`)
+- Entirely fail-silent — see section 5b for the mapping structure and guarantees
+
 ### Tracking and reporting
 - Auto result detection with score-based evaluation for all supported bet types
 - Live result notifications sent to Telegram as each match finishes
@@ -241,7 +279,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Bot core | 95% | Live — picks, results, sheets, cards, Telegram all automated on Railway |
 | Data quality | 75% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
-| Content pipeline | 90% | Cards automatic, posting manual |
+| Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` (optional) for manual download and posting — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |
 | Site/app/monetization | 0% | Deliberately parked until edge is proven |
@@ -327,6 +365,11 @@ python auto_results.py --results
 **To run a closing-odds poll now** (writes 'Closing Odds' for any pick 5-65 min from kickoff):
 ```
 python closing_odds.py
+```
+
+**To test Discord delivery** (posts a test text + image to every channel in `DISCORD_CHANNELS_JSON`):
+```
+python discord_bot.py --test
 ```
 
 **To manually update a pick result:**

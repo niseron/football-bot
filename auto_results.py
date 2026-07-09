@@ -20,6 +20,7 @@ import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
 
+from discord_bot import send_to_discord
 from excel_tracker import (
     EXCEL_PATH,
     finalize_workbook,
@@ -574,6 +575,7 @@ if __name__ == "__main__":
                 card_path = generate_results_card(settled, card_date=yesterday)
                 _telegram_send_photo(card_path)
                 log.info("Results card sent: %s", card_path.name)
+                send_to_discord("results-cards", image_path=card_path)
             except Exception as exc:
                 log.warning("Results card failed (non-fatal): %s", exc)
 

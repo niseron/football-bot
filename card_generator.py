@@ -329,16 +329,19 @@ def generate_picks_card_ig(
         def _block_h(p: dict) -> int:
             nm = len(_match_lines(p.get("match", "")))
             nb = len(_bet_lines(p))
-            return (nm * _th(f_match) + (nm - 1) * 6 + 10
-                    + nb * _th(f_sub) + (nb - 1) * 6 + 8 + _th(f_stat) + 30)
+            return (nm * _th(f_match) + (nm - 1) * 6 + 7
+                    + nb * _th(f_sub) + (nb - 1) * 6 + 5 + _th(f_stat) + 18)
 
-        canvas_h = header_h + sum(_block_h(p) for p in shown) + max(len(shown) - 1, 0) * 22 + PAD
+        canvas_h = header_h + sum(_block_h(p) for p in shown) + max(len(shown) - 1, 0) * 16 + PAD
         return (f_num, f_match, f_sub, f_stat, f_conf, _match_lines, _bet_lines, canvas_h)
 
+    # Fine-grained steps (2%, not 5%) so that on the rare day 3 picks still
+    # don't fit even after the tightened spacing above, the shrink is a barely
+    # perceptible nudge rather than a visible jump between days.
     scale = 1.0
     built = _build(scale)
     while built[-1] > _IG_MAX_H and scale > 0.7:
-        scale = round(scale - 0.05, 2)
+        scale = round(scale - 0.02, 2)
         built = _build(scale)
     f_num, f_match, f_sub, f_stat, f_conf, _match_lines, _bet_lines, canvas_h = built
     canvas_h = min(canvas_h, _IG_MAX_H)
@@ -361,13 +364,13 @@ def generate_picks_card_ig(
         for line in _match_lines(p.get("match", "")):
             d.text((x0, y), line, font=f_match, fill=_WHITE)
             y += _th(f_match) + 6
-        y += 4
+        y += 1
 
         bet_lines = _bet_lines(p)
         for j, line in enumerate(bet_lines):
             d.text((x0, y), line, font=f_sub, fill=_DIM)
             y += _th(f_sub) + (6 if j < len(bet_lines) - 1 else 0)
-        y += 8
+        y += 5
 
         # IG card always shows the plain odds line — never the Claude/Mkt
         # comparison — regardless of whether market_odds/value are present
@@ -375,11 +378,11 @@ def generate_picks_card_ig(
         stat = f"Odds {p.get('odds', '')}"
         stat = _clip(stat, f_stat, text_w)
         d.text((x0, y), stat, font=f_stat, fill=_NEON)
-        y += _th(f_stat) + 30
+        y += _th(f_stat) + 18
 
         if i < len(shown):
             _sep(d, y, x0=x0)
-            y += 22
+            y += 16
 
     out = CARDS_DIR / f"picks_ig_{today.strftime('%Y-%m-%d')}.png"
     img.save(out, "PNG")

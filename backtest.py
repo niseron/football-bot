@@ -18,9 +18,10 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+from env_loader import load_env
+
+load_env()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)

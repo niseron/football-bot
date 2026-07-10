@@ -11,15 +11,15 @@ from datetime import date, datetime, timedelta, timezone
 import anthropic
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
 from telegram import Bot
 
+from env_loader import load_env
 from tracker import log_pick, picks_exist_for_session
 from excel_tracker import calculate_kelly_stake
 from card_generator import generate_picks_card, generate_picks_card_ig
 from discord_bot import send_to_discord
 
-load_dotenv()
+load_env()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)

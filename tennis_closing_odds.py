@@ -168,9 +168,9 @@ def run_tennis_closing_odds_check() -> None:
 
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv
+    from env_loader import load_env
 
-    load_dotenv()
+    load_env()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     run_tennis_closing_odds_check()
     print("Done.")

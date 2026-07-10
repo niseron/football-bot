@@ -29,5 +29,9 @@ it or add any Telegram send to the tennis pipeline.
 
 ## Working Rules
 
+- Load `.env` via `from env_loader import load_env; load_env()` — never call
+  `dotenv.load_dotenv()` directly. `load_env()` guards against the UTF-8 BOM
+  issue that silently broke the first .env variable on 10 Jul 2026.
+
 - Always commit and push after completing any code change — never leave changes uncommitted at the end of a task.
 - When a shipped change affects a Roadmap area in `PROJECT_SUMMARY.md`, update that area's completion percentage in the same commit.

@@ -425,9 +425,9 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
 
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv
+    from env_loader import load_env
 
-    load_dotenv()
+    load_env()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     init_tennis_sheet()
     print(f"'{TENNIS_SHEET_NAME}' tab ready.")

@@ -258,8 +258,8 @@ def clv_report() -> dict | None:
 if __name__ == "__main__":
     import json as _json
 
-    from dotenv import load_dotenv
-    load_dotenv()
+    from env_loader import load_env
+    load_env()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     print("Calibration report:")

@@ -39,9 +39,10 @@ import time
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 
-load_dotenv()
+from env_loader import load_env
+
+load_env()
 
 log = logging.getLogger(__name__)
 

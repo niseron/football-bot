@@ -18,9 +18,9 @@ from datetime import date, datetime, timedelta
 
 import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
-from dotenv import load_dotenv
 
 from discord_bot import send_to_discord
+from env_loader import load_env
 from excel_tracker import (
     EXCEL_PATH,
     finalize_workbook,
@@ -30,7 +30,7 @@ from excel_tracker import (
     update_row_result,
 )
 
-load_dotenv()
+load_env()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 

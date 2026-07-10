@@ -15,8 +15,7 @@ Arguments:
 """
 import sys
 
-from dotenv import load_dotenv
-
+from env_loader import load_env
 from tennis_excel_tracker import update_tennis_result
 
 
@@ -25,7 +24,7 @@ def main():
         print(__doc__)
         sys.exit(1)
 
-    load_dotenv()
+    load_env()
 
     match_query = sys.argv[1].strip()
     pick_query  = sys.argv[2].strip()

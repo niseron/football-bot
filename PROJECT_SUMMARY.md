@@ -33,6 +33,7 @@ football-bot/
 ├── tracker.py            SQLite layer — local backup of every pick in picks.db
 ├── card_generator.py     Generates branded 1080×1080 PNG cards (picks, results, weekly summary)
 ├── discord_bot.py        Discord delivery layer — send_to_discord() via Discord REST API (send-only, fail-silent)
+├── env_loader.py         .env loading with a UTF-8 BOM guard — all entry points use load_env(), never load_dotenv() directly
 │
 ├── calibration.py        Probability calibration engine — calibration_report() + edge_report() + clv_report()
 ├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID/HALF WIN/HALF LOSS
@@ -63,6 +64,8 @@ football-bot/
 ## 3. Environment Variables
 
 All of these must be set in Railway's Variables tab (and in `.env` for local use):
+
+> **.env encoding:** save the file as plain UTF-8 **without BOM**. A BOM once made python-dotenv silently fail to load the first line's variable (10 Jul 2026). All entry points now load `.env` via `env_loader.load_env()`, which tolerates a BOM (`utf-8-sig`) and logs a warning when one is present — never call `dotenv.load_dotenv()` directly in new code.
 
 | Variable | Purpose |
 |---|---|

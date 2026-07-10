@@ -333,9 +333,9 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
 
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv
+    from env_loader import load_env
 
-    load_dotenv()
+    load_env()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     stats, resolved = run_tennis_auto_results()
     print(f"\n  Checked     : {stats['checked']}")

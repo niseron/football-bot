@@ -34,12 +34,12 @@ from datetime import datetime, timedelta, timezone
 import anthropic
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
 
 from discord_bot import send_to_discord
+from env_loader import load_env
 from tennis_excel_tracker import log_tennis_pick, tennis_picks_exist_for_today
 
-load_dotenv()
+load_env()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)

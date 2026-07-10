@@ -131,13 +131,15 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `picks-cards` | Daily picks PNG card | `main.py` (after the Telegram card send) |
 | `results-cards` | Football live result notifications (text) — mirrored from the same 30-min automatic trigger that sends them to Telegram; plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
-| `premier-league` | Each Premier League pick as text (match, bet, odds, confidence, reasoning) | `main.py` |
-| `jupiler-pro-league` | Each Jupiler Pro League pick as text | `main.py` |
-| `world-cup` | Each World Cup 2026 pick as text | `main.py` |
-| `tennis-picks` | **TENNIS (Discord-only)** — dated header + each tennis pick as text at 09:30 Brussels, plus the picks-failed alert | `tennis_main.py` |
+| `premier-league` | Each Premier League pick as an embed | `main.py` |
+| `jupiler-pro-league` | Each Jupiler Pro League pick as an embed | `main.py` |
+| `world-cup` | Each World Cup 2026 pick as an embed | `main.py` |
+| `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each tennis pick as an embed at 09:30 Brussels, plus the picks-failed alert | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
 
 The league-name → key routing lives in `main.py`'s `DISCORD_LEAGUE_CHANNEL_KEYS`.
+
+**Pick embed format** (built by `discord_bot.py`'s `build_pick_embed()`, since 10 Jul 2026 — previously plain text): title = match name; stripe colour by confidence (High = green `#00c853`, Medium = amber `#ffab00`, Low = gray `#9e9e9e`); a full-width **Pick** field with the selection; inline **Bet Type** / **Odds** / **Confidence** fields side by side (Odds shows `Claude X | Market Y` when real odds were matched); the full reasoning as the description; a `🔥 VALUE` footer only when the pick beat the market by ≥5pp. Context renders as the small author line — the league for football, `Tour | Tournament | Surface` for tennis. Card/result sends (`picks-cards`, `results-cards`, `weekly-cards`, `tennis-results`) are unchanged plain text/images.
 
 **Fail-silent guarantee:** `send_to_discord(channel_key, message=None, image_path=None)` never raises. Missing `DISCORD_BOT_TOKEN`, missing/malformed `DISCORD_CHANNELS_JSON`, an unmapped key, a bad image path, or a Discord API error each log one line and return `False` — the Telegram flow can never be affected. Rate limits (HTTP 429) get one retry after Discord's `retry_after`.
 
@@ -250,7 +252,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 ### Discord delivery (added — `discord_bot.py`)
 - Every daily picks card and weekly card is mirrored to Discord right after its Telegram send
 - Live result notifications (the automatic 30-minute checker) mirror to Discord from the identical trigger as the Telegram notification; the results PNG card additionally mirrors when the manual `--results` path generates it
-- Each individual pick's text is routed to a league-specific Discord channel (`premier-league` / `jupiler-pro-league` / `world-cup`)
+- Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup`) — see section 5b for the embed format
 - Entirely fail-silent — see section 5b for the mapping structure and guarantees
 
 ### Tracking and reporting
@@ -322,7 +324,7 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 - **Enrichment:** per fixture — tournament name/surface/tier (`tournament/info`), last-5 form per player (`player/past-matches`), and head-to-head (`fixtures/h2h`); capped at 20 enriched fixtures per run. In this API's archive data the first-listed player is always the winner.
 - **Claude analysis:** separate `TENNIS_SYSTEM_PROMPT` (claude-sonnet-4-6) — weights player form, H2H, surface type (Hard/Clay/Grass), and tournament tier. Bet types: **Match Winner, Total Games Over/Under, Set Betting, Handicap (games)**. Outputs the same JSON shape as football, incl. the calibration `probability` field.
 - **Real odds:** The Odds API lists tennis tournaments as dynamic per-event sport keys (`tennis_atp_*` / `tennis_wta_*`), so active keys are discovered at runtime via the quota-free `/v4/sports` call (max 6 odds requests per picks run). Same ≥5pp value-flag rule as football. Set Betting has no Odds API market → those picks stay Claude-odds-only.
-- **Posting:** Discord-ONLY — a dated header plus each pick's text to the `tennis-picks` Discord channel (via `send_to_discord`) at **09:30 Europe/Brussels**, its own schedule slot 30 min after the football picks. No Telegram send exists in the tennis pipeline.
+- **Posting:** Discord-ONLY — a dated header (text) plus each pick as an embed (section 5b format, `Tour | Tournament | Surface` as the author line) to the `tennis-picks` Discord channel at **09:30 Europe/Brussels**, its own schedule slot 30 min after the football picks. No Telegram send exists in the tennis pipeline.
 - **Tracking:** 'Tennis Picks' tab — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds. Results are WIN/LOSS/VOID (units P&L: WIN = odds−1, LOSS = −1). No half results — tennis game handicaps and totals use half lines.
 - **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of 12 tennis odds requests/day, budgeted separately from the football cap.
 - **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick posts its result text to the `tennis-results` Discord channel — Discord-only, never Telegram and never the football `results-cards` channel.

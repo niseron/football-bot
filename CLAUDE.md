@@ -13,9 +13,11 @@ current features, and known limitations.
 `jupiler-pro-league`, `world-cup`, `tennis-picks`, `tennis-results` to
 Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
 missing token/key skips that piece without touching the rest of the flow.
-For football, Discord is purely additive (mirrors Telegram). Test all
-configured channels with `python discord_bot.py --test`. Details in
-PROJECT_SUMMARY.md section 5b.
+For football, Discord is purely additive (mirrors Telegram). Individual pick
+messages (league channels + `tennis-picks`) are Discord EMBEDS built by
+`discord_bot.py`'s `build_pick_embed()` — never plain text; card and result
+sends stay plain text/images. Test all configured channels with
+`python discord_bot.py --test`. Details in PROJECT_SUMMARY.md section 5b.
 
 ## Tennis Delivery — Discord-ONLY
 

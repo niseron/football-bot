@@ -17,7 +17,7 @@ from env_loader import load_env
 from tracker import log_pick, picks_exist_for_session
 from excel_tracker import calculate_kelly_stake
 from card_generator import generate_picks_card, generate_picks_card_ig
-from discord_bot import send_to_discord
+from discord_bot import build_pick_embed, send_to_discord
 
 load_env()
 
@@ -706,24 +706,9 @@ async def send_to_telegram(text: str):
 
 # ── Discord (additive delivery — never affects the Telegram flow) ────────────
 
-def _format_discord_pick(p: dict) -> str:
-    """One pick as a plain Discord-markdown message (no MarkdownV2 escaping)."""
-    lines = [
-        f"**{p.get('match', '?')}** ({p.get('league', '?')})",
-        f"Bet: {p.get('bet_type', '?')} — **{p.get('pick', '?')}**",
-    ]
-    market_odds = p.get("market_odds")
-    if market_odds is not None:
-        value_tag = " 🔥 **VALUE**" if p.get("value") else ""
-        lines.append(
-            f"Odds: Claude `{p.get('odds', '?')}` | Market `{market_odds}`{value_tag}"
-            f" | Confidence: {p.get('confidence', 'N/A')}"
-        )
-    else:
-        lines.append(f"Odds: `{p.get('odds', '?')}` | Confidence: {p.get('confidence', 'N/A')}")
-    if p.get("reasoning"):
-        lines.append(f"_{p['reasoning']}_")
-    return "\n".join(lines)
+def _discord_pick_embed(p: dict) -> dict:
+    """One pick as a Discord embed; the league renders as the author line."""
+    return build_pick_embed(p, context=p.get("league", ""))
 
 
 async def _send_photo(path, chat_id: str | None = None) -> None:
@@ -840,7 +825,7 @@ async def daily_picks_job():
         for pick in picks:
             channel_key = DISCORD_LEAGUE_CHANNEL_KEYS.get(pick.get("league", ""))
             if channel_key:
-                send_to_discord(channel_key, message=_format_discord_pick(pick))
+                send_to_discord(channel_key, embed=_discord_pick_embed(pick))
     except Exception as exc:
         log.warning("Discord picks delivery failed (non-fatal): %s", exc)
 

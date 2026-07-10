@@ -35,7 +35,7 @@ import anthropic
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from discord_bot import send_to_discord
+from discord_bot import build_pick_embed, send_to_discord
 from env_loader import load_env
 from tennis_excel_tracker import log_tennis_pick, tennis_picks_exist_for_today
 
@@ -638,35 +638,21 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
 
 # ── Discord (tennis is Discord-only — no Telegram) ────────────────────────────
 
-def _format_discord_tennis_pick(p: dict) -> str:
-    """One tennis pick as a plain Discord-markdown message (mirrors main.py's
-    _format_discord_pick, with tour/tournament/surface context)."""
+def _discord_tennis_pick_embed(p: dict) -> dict:
+    """One tennis pick as a Discord embed; tour/tournament/surface render as
+    the author line."""
     context = " | ".join(str(p[k]) for k in ("tour", "tournament", "surface") if p.get(k))
-    lines = [
-        f"**{p.get('match', '?')}**" + (f" ({context})" if context else ""),
-        f"Bet: {p.get('bet_type', '?')} — **{p.get('pick', '?')}**",
-    ]
-    market_odds = p.get("market_odds")
-    if market_odds is not None:
-        value_tag = " 🔥 **VALUE**" if p.get("value") else ""
-        lines.append(
-            f"Odds: Claude `{p.get('odds', '?')}` | Market `{market_odds}`{value_tag}"
-            f" | Confidence: {p.get('confidence', 'N/A')}"
-        )
-    else:
-        lines.append(f"Odds: `{p.get('odds', '?')}` | Confidence: {p.get('confidence', 'N/A')}")
-    if p.get("reasoning"):
-        lines.append(f"_{p['reasoning']}_")
-    return "\n".join(lines)
+    return build_pick_embed(p, context=context)
 
 
 def post_tennis_picks_to_discord(picks: list[dict]) -> int:
-    """Post a dated header then each pick's text to the 'tennis-picks' channel.
-    Returns how many pick messages Discord accepted (send_to_discord never raises)."""
+    """Post a dated header then each pick as an embed to the 'tennis-picks'
+    channel. Returns how many pick embeds Discord accepted (send_to_discord
+    never raises)."""
     today = datetime.now(timezone.utc).strftime("%d %b %Y")
     send_to_discord("tennis-picks", message=f"🎾 **Tennis Picks — {today}**")
     return sum(
-        send_to_discord("tennis-picks", message=_format_discord_tennis_pick(p))
+        send_to_discord("tennis-picks", embed=_discord_tennis_pick_embed(p))
         for p in picks
     )
 

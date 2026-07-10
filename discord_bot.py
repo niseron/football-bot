@@ -17,11 +17,16 @@ Channel keys used by the pipeline (any key may be omitted — it is skipped):
     picks-cards         daily picks PNG card            (main.py)
     results-cards       results PNG card                (auto_results.py)
     weekly-cards        weekly summary PNG card         (weekly_summary.py)
-    premier-league      per-pick text                   (main.py)
-    jupiler-pro-league  per-pick text                   (main.py)
-    world-cup           per-pick text                   (main.py)
-    tennis-picks        TENNIS per-pick text, Discord-only    (tennis_main.py)
+    premier-league      per-pick embed                  (main.py)
+    jupiler-pro-league  per-pick embed                  (main.py)
+    world-cup           per-pick embed                  (main.py)
+    tennis-picks        TENNIS per-pick embed, Discord-only   (tennis_main.py)
     tennis-results      TENNIS settled result text, Discord-only (run_all.py)
+
+Individual pick messages are Discord EMBEDS built by build_pick_embed()
+(title = match, colour by confidence, inline Bet Type / Odds / Confidence
+fields, reasoning as description, 🔥 VALUE footer). Card and result sends
+are unchanged plain text/images.
 
 send_to_discord() NEVER raises: missing token/mapping/key, a bad image path,
 or a Discord API failure all log a line and return False, so the existing
@@ -66,11 +71,55 @@ def _parse_channel_map() -> dict[str, str]:
 
 DISCORD_CHANNELS: dict[str, str] = _parse_channel_map()
 
+# Embed accent colours by pick confidence (same palette as the Sheets
+# formatting: WIN green / HALF WIN amber, plus a neutral gray).
+_EMBED_COLORS = {"high": 0x00C853, "medium": 0xFFAB00, "low": 0x9E9E9E}
 
-def send_to_discord(channel_key: str, message: str | None = None, image_path=None) -> bool:
+
+def build_pick_embed(pick: dict, context: str | None = None) -> dict:
     """
-    Post text and/or an image to the Discord channel mapped to channel_key.
-    Returns True on success, False on any skip or failure. Never raises.
+    One pick as a Discord embed dict: title = match, colour by confidence,
+    the selection as a full-width field, Bet Type / Odds / Confidence as
+    inline fields, the full reasoning as description, and a 🔥 VALUE footer
+    when the pick beat the market. `context` (e.g. tennis's
+    'ATP | Wimbledon | Grass') renders as the small author line on top.
+    """
+    confidence = str(pick.get("confidence", "N/A"))
+    market_odds = pick.get("market_odds")
+    if market_odds is not None:
+        odds_value = f"Claude {pick.get('odds', '?')} | Market {market_odds}"
+    else:
+        odds_value = str(pick.get("odds", "?"))
+
+    embed: dict = {
+        "title": str(pick.get("match", "?"))[:256],
+        "color": _EMBED_COLORS.get(confidence.lower(), _EMBED_COLORS["low"]),
+        "description": str(pick.get("reasoning", "") or ""),
+        "fields": [
+            {"name": "Pick", "value": f"**{pick.get('pick', '?')}**", "inline": False},
+            {"name": "Bet Type", "value": str(pick.get("bet_type", "?")), "inline": True},
+            {"name": "Odds", "value": odds_value, "inline": True},
+            {"name": "Confidence", "value": confidence, "inline": True},
+        ],
+    }
+    if context:
+        embed["author"] = {"name": context[:256]}
+    if pick.get("value"):
+        embed["footer"] = {"text": "🔥 VALUE"}
+    return embed
+
+
+def send_to_discord(
+    channel_key: str,
+    message: str | None = None,
+    image_path=None,
+    embed: dict | None = None,
+) -> bool:
+    """
+    Post text, an image, and/or an embed (a dict matching Discord's embed
+    JSON schema — see build_pick_embed) to the Discord channel mapped to
+    channel_key. Returns True on success, False on any skip or failure.
+    Never raises.
     """
     try:
         if not DISCORD_BOT_TOKEN or not DISCORD_CHANNELS:
@@ -80,13 +129,15 @@ def send_to_discord(channel_key: str, message: str | None = None, image_path=Non
         if not channel_id:
             log.info("Discord channel key '%s' not mapped — skipping", channel_key)
             return False
-        if message is None and image_path is None:
+        if message is None and image_path is None and embed is None:
             log.info("Discord send to '%s' skipped — nothing to send", channel_key)
             return False
 
         url = f"{DISCORD_API}/channels/{channel_id}/messages"
         headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
-        content = (message or "")[:_MAX_CONTENT_LEN]
+        payload: dict = {"content": (message or "")[:_MAX_CONTENT_LEN]}
+        if embed is not None:
+            payload["embeds"] = [embed]
 
         for attempt in (1, 2):
             if image_path is not None:
@@ -94,12 +145,12 @@ def send_to_discord(channel_key: str, message: str | None = None, image_path=Non
                     resp = requests.post(
                         url,
                         headers=headers,
-                        data={"payload_json": json.dumps({"content": content})},
+                        data={"payload_json": json.dumps(payload)},
                         files={"files[0]": (Path(image_path).name, f, "image/png")},
                         timeout=30,
                     )
             else:
-                resp = requests.post(url, headers=headers, json={"content": content}, timeout=15)
+                resp = requests.post(url, headers=headers, json=payload, timeout=15)
 
             if resp.status_code == 429 and attempt == 1:
                 # Rate limited — wait what Discord asks (capped) and retry once

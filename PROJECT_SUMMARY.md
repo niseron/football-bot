@@ -80,6 +80,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `DISCORD_BOT_TOKEN` | *Optional for football, required for tennis delivery.* Discord bot token (Developer Portal → Bot → Reset Token). If unset, all Discord delivery is skipped silently — football's Telegram is unaffected, but tennis (Discord-only) posts nowhere. |
 | `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-results` keys carry ALL tennis delivery (tennis is Discord-only — no Telegram). |
 | `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
+| `TENNIS_RANK_THRESHOLD` | *Optional (tennis system).* Rank filter cutoff, default `150`: fixtures where BOTH players rank outside the top N are skipped (unknown ranks are kept). If fewer than `MAX_ENRICHED_FIXTURES` (20) fixtures survive, the best-ranked excluded ones are re-added up to that count. Filtered/re-added counts are logged every run to measure impact before tuning. |
 
 ---
 
@@ -321,6 +322,7 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 ### Pipeline (mirrors the football flow)
 
 - **Fixtures:** "Tennis API - ATP WTA ITF" (MatchStat) on RapidAPI — ATP + WTA singles for the next 48 hours, capped at 25 fixtures/tour on busy days. Doubles are filtered out. Uses the same `RAPIDAPI_KEY`; the RapidAPI account must be **subscribed to this API** (separate from the football one). Host overridable via `TENNIS_RAPIDAPI_HOST`.
+- **Rankings & rank filter (added 10 Jul 2026):** fixture data carries no rankings, so each player's `currentRank` is fetched from the `player/profile/{id}` endpoint (cached per run; ~2 extra API calls per fixture, ≤100/day worst case). Fixtures where BOTH players rank outside the top `TENNIS_RANK_THRESHOLD` (default 150) are skipped — unknown ranks are kept — with a fallback that re-adds the best-ranked excluded fixtures whenever fewer than 20 survive. Both counts are logged every run. Ranks are sent to Claude (`player1_rank`/`player2_rank`) and shown in the pick embed's author line as `#54 vs #88` (`NR` = unranked).
 - **Enrichment:** per fixture — tournament name/surface/tier (`tournament/info`), last-5 form per player (`player/past-matches`), and head-to-head (`fixtures/h2h`); capped at 20 enriched fixtures per run. In this API's archive data the first-listed player is always the winner.
 - **Claude analysis:** separate `TENNIS_SYSTEM_PROMPT` (claude-sonnet-4-6) — weights player form, H2H, surface type (Hard/Clay/Grass), and tournament tier. Bet types: **Match Winner, Total Games Over/Under, Set Betting, Handicap (games)**. Outputs the same JSON shape as football, incl. the calibration `probability` field.
 - **Real odds:** The Odds API lists tennis tournaments as dynamic per-event sport keys (`tennis_atp_*` / `tennis_wta_*`), so active keys are discovered at runtime via the quota-free `/v4/sports` call (max 6 odds requests per picks run). Same ≥5pp value-flag rule as football. Set Betting has no Odds API market → those picks stay Claude-odds-only.
@@ -341,7 +343,7 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 | Area | Done | Status |
 |---|---|---|
 | Tennis bot core | 85% | Picks, Sheets tab, Discord-only delivery (`tennis-picks`/`tennis-results`, 10 Jul 2026 — no Telegram), CLV polling, auto-results all live |
-| Tennis data quality | 60% | Form/H2H/surface enrichment + dynamic Odds API keys; no injury/retirement data |
+| Tennis data quality | 65% | Form/H2H/surface enrichment + live rankings & top-150 rank filter (10 Jul 2026) + dynamic Odds API keys; no injury/retirement data |
 | Tennis calibration engine | 10% | Infrastructure done, collecting from 9 Jul 2026; verdict ~Oct-Nov 2026 at 300 picks |
 | Tennis auto-results | 90% | Live from 10 Jul 2026, all 4 bet types; retirements settle VOID (manual override available) |
 | Tennis proven edge | 0% | Blocked on tennis calibration data |

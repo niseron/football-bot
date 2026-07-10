@@ -59,6 +59,14 @@ TOURS = ("atp", "wta")
 MAX_FIXTURES_PER_TOUR = 25
 MAX_ENRICHED_FIXTURES = 20
 
+# Skip fixtures where BOTH players are ranked outside the top
+# TENNIS_RANK_THRESHOLD (unknown ranks are kept — a data gap shouldn't starve
+# the pipeline). If the filter leaves fewer than MAX_ENRICHED_FIXTURES total
+# fixtures, the best-ranked excluded fixtures are re-added up to that count so
+# a thin day still produces picks. Both outcomes are logged every run to
+# measure the filter's real impact before tuning the threshold.
+TENNIS_RANK_THRESHOLD = int(os.environ.get("TENNIS_RANK_THRESHOLD", "150"))
+
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
@@ -110,6 +118,76 @@ def _parse_start(fixture: dict) -> datetime | None:
         return None
 
 
+# ── Player rankings (player/profile endpoint — fixtures carry no rank) ───────
+
+_rank_cache: dict[tuple[str, int], int | None] = {}
+
+
+def _fetch_player_rank(tour: str, player_id: int | None) -> int | None:
+    """Current official tour ranking via the player profile endpoint.
+    None when unknown/unranked. Cached per (tour, player) within a run."""
+    if not player_id:
+        return None
+    key = (tour, player_id)
+    if key not in _rank_cache:
+        time.sleep(0.4)
+        js = _tennis_get(f"/tennis/v2/{tour}/player/profile/{player_id}")
+        info = js.get("data", js) if isinstance(js, dict) else None
+        rank = info.get("currentRank") if isinstance(info, dict) else None
+        try:
+            rank = int(rank)
+            _rank_cache[key] = rank if rank > 0 else None
+        except (TypeError, ValueError):
+            _rank_cache[key] = None
+    return _rank_cache[key]
+
+
+def _apply_rank_filter(result: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """
+    Drop fixtures where both players are ranked outside the top
+    TENNIS_RANK_THRESHOLD. Fixtures with any unknown rank are kept. If fewer
+    than MAX_ENRICHED_FIXTURES fixtures survive, the best-ranked excluded
+    ones are re-added up to that count. Logs counts every run.
+    """
+    filtered: dict[str, list[dict]] = {}
+    excluded: list[tuple[str, dict]] = []
+    total = 0
+
+    for tour_label, fixtures in result.items():
+        keep = []
+        for f in fixtures:
+            total += 1
+            r1, r2 = f.get("_p1_rank"), f.get("_p2_rank")
+            both_outside = (
+                r1 is not None and r1 > TENNIS_RANK_THRESHOLD
+                and r2 is not None and r2 > TENNIS_RANK_THRESHOLD
+            )
+            (excluded.append((tour_label, f)) if both_outside else keep.append(f))
+        filtered[tour_label] = keep
+
+    kept = total - len(excluded)
+    log.info(
+        "Rank filter (top %d): %d of %d fixtures filtered out, %d kept",
+        TENNIS_RANK_THRESHOLD, len(excluded), total, kept,
+    )
+
+    if kept < MAX_ENRICHED_FIXTURES and excluded:
+        # Excluded fixtures always have both ranks known — sort by their best
+        excluded.sort(key=lambda tf: min(tf[1]["_p1_rank"], tf[1]["_p2_rank"]))
+        readd = excluded[: MAX_ENRICHED_FIXTURES - kept]
+        for tour_label, f in readd:
+            filtered[tour_label].append(f)
+        for fixtures in filtered.values():
+            fixtures.sort(key=lambda f: f.get("date", ""))
+        log.info(
+            "Rank filter fallback: only %d fixtures passed (< %d) — re-added "
+            "%d best-ranked excluded fixtures",
+            kept, MAX_ENRICHED_FIXTURES, len(readd),
+        )
+
+    return {t: fx for t, fx in filtered.items() if fx}
+
+
 def fetch_upcoming_tennis_matches() -> dict[str, list[dict]]:
     """
     Fetch upcoming ATP and WTA singles fixtures for the next 48 hours
@@ -143,9 +221,16 @@ def fetch_upcoming_tennis_matches() -> dict[str, list[dict]]:
         if len(upcoming) > MAX_FIXTURES_PER_TOUR:
             log.info("Capping %s fixtures %d → %d", tour.upper(), len(upcoming), MAX_FIXTURES_PER_TOUR)
             upcoming = upcoming[:MAX_FIXTURES_PER_TOUR]
+
+        # Rankings live on the player profile endpoint, not in fixture data
+        for f in upcoming:
+            f["_p1_rank"] = _fetch_player_rank(tour, (f.get("player1") or {}).get("id"))
+            f["_p2_rank"] = _fetch_player_rank(tour, (f.get("player2") or {}).get("id"))
+
         if upcoming:
             result[tour.upper()] = upcoming
-    return result
+
+    return _apply_rank_filter(result)
 
 
 # ── Tournament info (name / surface / tier) ──────────────────────────────────
@@ -178,12 +263,14 @@ def build_tennis_fixture_summary(tour: str, fixture: dict) -> dict:
     p1 = fixture.get("player1") or {}
     p2 = fixture.get("player2") or {}
     summary = {
-        "match_id":   fixture.get("id"),
-        "player1":    p1.get("name", ""),
-        "player2":    p2.get("name", ""),
-        "start_utc":  fixture.get("date", ""),
-        "player1_id": p1.get("id"),
-        "player2_id": p2.get("id"),
+        "match_id":     fixture.get("id"),
+        "player1":      p1.get("name", ""),
+        "player2":      p2.get("name", ""),
+        "start_utc":    fixture.get("date", ""),
+        "player1_id":   p1.get("id"),
+        "player2_id":   p2.get("id"),
+        "player1_rank": fixture.get("_p1_rank"),
+        "player2_rank": fixture.get("_p2_rank"),
     }
     summary.update(_fetch_tournament_info(tour, fixture.get("tournamentId")))
     return summary
@@ -525,6 +612,8 @@ top 5 value bets across both tours.
 Each fixture may include the following enriched context — use it to sharpen your analysis:
 - tournament / surface / tier: the event, its court surface (Hard, Clay, Grass) and level
   (Grand Slam, Masters, ATP 500/250, WTA 1000/500/250).
+- player1_rank / player2_rank: the player's CURRENT official tour ranking (null when
+  unranked/unknown). This is live data — trust it over any ranking you remember.
 - player1_form / player2_form: last 5 results for each player as W/L (newest → oldest).
 - player1_recent / player2_recent: score details for those matches ('X def. Y', set scores).
 - h2h: previous head-to-head meetings between the two players with scores. In this archive
@@ -639,9 +728,9 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
 # ── Discord (tennis is Discord-only — no Telegram) ────────────────────────────
 
 def _discord_tennis_pick_embed(p: dict) -> dict:
-    """One tennis pick as a Discord embed; tour/tournament/surface render as
-    the author line."""
-    context = " | ".join(str(p[k]) for k in ("tour", "tournament", "surface") if p.get(k))
+    """One tennis pick as a Discord embed; tour/tournament/surface plus the
+    players' rankings ('#54 vs #88') render as the author line."""
+    context = " | ".join(str(p[k]) for k in ("tour", "tournament", "surface", "ranks") if p.get(k))
     return build_pick_embed(p, context=context)
 
 
@@ -665,6 +754,20 @@ def _start_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
     for fixtures in fixtures_by_tour.values():
         for f in fixtures:
             lookup[f"{f['player1']} vs {f['player2']}"] = f.get("start_utc", "")
+    return lookup
+
+
+def _rank_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
+    """Map '<Player 1> vs <Player 2>' -> '#54 vs #88' for the pick embeds.
+    'NR' marks an unranked/unknown player; matches with no rank at all are omitted."""
+    lookup: dict[str, str] = {}
+    for fixtures in fixtures_by_tour.values():
+        for f in fixtures:
+            r1, r2 = f.get("player1_rank"), f.get("player2_rank")
+            if r1 is None and r2 is None:
+                continue
+            fmt = lambda r: f"#{r}" if r is not None else "NR"
+            lookup[f"{f['player1']} vs {f['player2']}"] = f"{fmt(r1)} vs {fmt(r2)}"
     return lookup
 
 
@@ -711,6 +814,13 @@ async def daily_tennis_picks_job():
     except Exception as exc:
         log.warning("Tennis start-time lookup build failed (non-fatal): %s", exc)
         start_lookup = {}
+
+    try:
+        rank_lookup = _rank_lookup(fixtures_by_tour)
+        for pick in picks:
+            pick["ranks"] = rank_lookup.get(pick.get("match", ""), "")
+    except Exception as exc:
+        log.warning("Tennis rank lookup build failed (non-fatal): %s", exc)
 
     try:
         enrich_tennis_picks_with_real_odds(picks)

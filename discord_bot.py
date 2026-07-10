@@ -20,7 +20,10 @@ Channel keys used by the pipeline (any key may be omitted — it is skipped):
     premier-league      per-pick embed                  (main.py)
     jupiler-pro-league  per-pick embed                  (main.py)
     world-cup           per-pick embed                  (main.py)
-    tennis-picks        TENNIS per-pick embed, Discord-only   (tennis_main.py)
+    tennis-picks        TENNIS top-tier per-pick embed (both players inside
+                        TENNIS_RANK_THRESHOLD), Discord-only  (tennis_main.py)
+    tennis-picks-lower  TENNIS lower-tier per-pick embed (either player
+                        outside the threshold or unranked)    (tennis_main.py)
     tennis-results      TENNIS settled result text, Discord-only (run_all.py)
 
 Individual pick messages are Discord EMBEDS built by build_pick_embed()

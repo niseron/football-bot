@@ -59,13 +59,15 @@ TOURS = ("atp", "wta")
 MAX_FIXTURES_PER_TOUR = 25
 MAX_ENRICHED_FIXTURES = 20
 
-# Skip fixtures where BOTH players are ranked outside the top
-# TENNIS_RANK_THRESHOLD (unknown ranks are kept — a data gap shouldn't starve
-# the pipeline). If the filter leaves fewer than MAX_ENRICHED_FIXTURES total
-# fixtures, the best-ranked excluded fixtures are re-added up to that count so
-# a thin day still produces picks. Both outcomes are logged every run to
-# measure the filter's real impact before tuning the threshold.
+# Rank tier split — no fixtures are ever excluded by rank. Picks where BOTH
+# players are ranked inside the top TENNIS_RANK_THRESHOLD go to the
+# 'tennis-picks' Discord channel; everything else (either player outside the
+# threshold, or unranked) goes to 'tennis-picks-lower'. The tier is also
+# logged to the Sheet's 'Rank Tier' column so calibration/CLV can eventually
+# be reported per tier.
 TENNIS_RANK_THRESHOLD = int(os.environ.get("TENNIS_RANK_THRESHOLD", "150"))
+TENNIS_TOP_TIER_LABEL = f"Top {TENNIS_RANK_THRESHOLD}"
+TENNIS_LOWER_TIER_LABEL = "Lower Ranked"
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -142,50 +144,14 @@ def _fetch_player_rank(tour: str, player_id: int | None) -> int | None:
     return _rank_cache[key]
 
 
-def _apply_rank_filter(result: dict[str, list[dict]]) -> dict[str, list[dict]]:
-    """
-    Drop fixtures where both players are ranked outside the top
-    TENNIS_RANK_THRESHOLD. Fixtures with any unknown rank are kept. If fewer
-    than MAX_ENRICHED_FIXTURES fixtures survive, the best-ranked excluded
-    ones are re-added up to that count. Logs counts every run.
-    """
-    filtered: dict[str, list[dict]] = {}
-    excluded: list[tuple[str, dict]] = []
-    total = 0
-
-    for tour_label, fixtures in result.items():
-        keep = []
-        for f in fixtures:
-            total += 1
-            r1, r2 = f.get("_p1_rank"), f.get("_p2_rank")
-            both_outside = (
-                r1 is not None and r1 > TENNIS_RANK_THRESHOLD
-                and r2 is not None and r2 > TENNIS_RANK_THRESHOLD
-            )
-            (excluded.append((tour_label, f)) if both_outside else keep.append(f))
-        filtered[tour_label] = keep
-
-    kept = total - len(excluded)
-    log.info(
-        "Rank filter (top %d): %d of %d fixtures filtered out, %d kept",
-        TENNIS_RANK_THRESHOLD, len(excluded), total, kept,
+def _fixture_tier(r1: int | None, r2: int | None) -> str:
+    """'Top {N}' when BOTH players are ranked inside TENNIS_RANK_THRESHOLD,
+    else 'Lower Ranked' (an unranked/unknown player counts as lower)."""
+    both_top = (
+        r1 is not None and r1 <= TENNIS_RANK_THRESHOLD
+        and r2 is not None and r2 <= TENNIS_RANK_THRESHOLD
     )
-
-    if kept < MAX_ENRICHED_FIXTURES and excluded:
-        # Excluded fixtures always have both ranks known — sort by their best
-        excluded.sort(key=lambda tf: min(tf[1]["_p1_rank"], tf[1]["_p2_rank"]))
-        readd = excluded[: MAX_ENRICHED_FIXTURES - kept]
-        for tour_label, f in readd:
-            filtered[tour_label].append(f)
-        for fixtures in filtered.values():
-            fixtures.sort(key=lambda f: f.get("date", ""))
-        log.info(
-            "Rank filter fallback: only %d fixtures passed (< %d) — re-added "
-            "%d best-ranked excluded fixtures",
-            kept, MAX_ENRICHED_FIXTURES, len(readd),
-        )
-
-    return {t: fx for t, fx in filtered.items() if fx}
+    return TENNIS_TOP_TIER_LABEL if both_top else TENNIS_LOWER_TIER_LABEL
 
 
 def fetch_upcoming_tennis_matches() -> dict[str, list[dict]]:
@@ -230,7 +196,7 @@ def fetch_upcoming_tennis_matches() -> dict[str, list[dict]]:
         if upcoming:
             result[tour.upper()] = upcoming
 
-    return _apply_rank_filter(result)
+    return result
 
 
 # ── Tournament info (name / surface / tier) ──────────────────────────────────
@@ -735,15 +701,32 @@ def _discord_tennis_pick_embed(p: dict) -> dict:
 
 
 def post_tennis_picks_to_discord(picks: list[dict]) -> int:
-    """Post a dated header then each pick as an embed to the 'tennis-picks'
-    channel. Returns how many pick embeds Discord accepted (send_to_discord
-    never raises)."""
+    """Post each pick as an embed to its rank-tier channel: 'tennis-picks'
+    when both players rank inside TENNIS_RANK_THRESHOLD, 'tennis-picks-lower'
+    otherwise. Every pick goes to exactly one channel. A dated header (text)
+    precedes the picks in each channel that receives any. Returns how many
+    pick embeds Discord accepted (send_to_discord never raises)."""
     today = datetime.now(timezone.utc).strftime("%d %b %Y")
-    send_to_discord("tennis-picks", message=f"🎾 **Tennis Picks — {today}**")
-    return sum(
-        send_to_discord("tennis-picks", embed=_discord_tennis_pick_embed(p))
-        for p in picks
+
+    by_channel: dict[str, list[dict]] = {}
+    for p in picks:
+        key = (
+            "tennis-picks"
+            if p.get("rank_tier") == TENNIS_TOP_TIER_LABEL
+            else "tennis-picks-lower"
+        )
+        by_channel.setdefault(key, []).append(p)
+    log.info(
+        "Tennis picks by rank tier: %s",
+        ", ".join(f"{k}={len(v)}" for k, v in by_channel.items()),
     )
+
+    sent = 0
+    for key, channel_picks in by_channel.items():
+        send_to_discord(key, message=f"🎾 **Tennis Picks — {today}**")
+        for p in channel_picks:
+            sent += send_to_discord(key, embed=_discord_tennis_pick_embed(p))
+    return sent
 
 
 # ── Main job ──────────────────────────────────────────────────────────────────
@@ -768,6 +751,18 @@ def _rank_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
                 continue
             fmt = lambda r: f"#{r}" if r is not None else "NR"
             lookup[f"{f['player1']} vs {f['player2']}"] = f"{fmt(r1)} vs {fmt(r2)}"
+    return lookup
+
+
+def _tier_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
+    """Map '<Player 1> vs <Player 2>' -> rank tier label for channel routing
+    and the Sheet's 'Rank Tier' column."""
+    lookup: dict[str, str] = {}
+    for fixtures in fixtures_by_tour.values():
+        for f in fixtures:
+            lookup[f"{f['player1']} vs {f['player2']}"] = _fixture_tier(
+                f.get("player1_rank"), f.get("player2_rank")
+            )
     return lookup
 
 
@@ -817,10 +812,14 @@ async def daily_tennis_picks_job():
 
     try:
         rank_lookup = _rank_lookup(fixtures_by_tour)
+        tier_lookup = _tier_lookup(fixtures_by_tour)
         for pick in picks:
-            pick["ranks"] = rank_lookup.get(pick.get("match", ""), "")
+            match = pick.get("match", "")
+            pick["ranks"] = rank_lookup.get(match, "")
+            # Unmatched picks default to the lower tier — never dropped
+            pick["rank_tier"] = tier_lookup.get(match, TENNIS_LOWER_TIER_LABEL)
     except Exception as exc:
-        log.warning("Tennis rank lookup build failed (non-fatal): %s", exc)
+        log.warning("Tennis rank/tier lookup build failed (non-fatal): %s", exc)
 
     try:
         enrich_tennis_picks_with_real_odds(picks)
@@ -839,6 +838,7 @@ async def daily_tennis_picks_job():
                 claude_prob=float(claude_prob) if claude_prob is not None else None,
                 market_prob=pick.get("market_prob"),
                 start_time_utc=start_lookup.get(pick["match"], ""),
+                rank_tier=pick.get("rank_tier", TENNIS_LOWER_TIER_LABEL),
             )
         except Exception as exc:
             log.warning("Failed to log tennis pick: %s", exc)

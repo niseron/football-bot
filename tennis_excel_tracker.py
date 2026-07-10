@@ -27,6 +27,7 @@ TENNIS_HEADERS = [
     "Confidence", "Result", "P&L",
     "Claude Prob %", "Market Prob %",
     "Kickoff/Start Time", "Closing Odds",
+    "Rank Tier",  # 'Top 150' / 'Lower Ranked' — for per-tier calibration later
 ]
 
 # Tennis results have no half outcomes (no quarter-line handicaps in games)
@@ -188,6 +189,7 @@ def log_tennis_pick(
     claude_prob: float | None = None,
     market_prob: float | None = None,
     start_time_utc: str | None = None,
+    rank_tier: str | None = None,
 ) -> None:
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
     date_str = dt.strftime("%d-%b-%Y")
@@ -224,6 +226,7 @@ def log_tennis_pick(
         round(float(market_prob), 1) if market_prob is not None else "",
         start_time_utc or "",
         "",  # Closing Odds — populated later by the tennis closing-odds job, if at all
+        rank_tier or "",
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")

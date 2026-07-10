@@ -10,8 +10,8 @@ current features, and known limitations.
 `requests` — no discord.py). Env vars: `DISCORD_BOT_TOKEN` plus
 `DISCORD_CHANNELS_JSON`, a single-line JSON dict mapping the keys
 `picks-cards`, `results-cards`, `weekly-cards`, `premier-league`,
-`jupiler-pro-league`, `world-cup`, `tennis-picks`, `tennis-results` to
-Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
+`jupiler-pro-league`, `world-cup`, `tennis-picks`, `tennis-picks-lower`,
+`tennis-results` to Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
 missing token/key skips that piece without touching the rest of the flow.
 For football, Discord is purely additive (mirrors Telegram). Individual pick
 messages (league channels + `tennis-picks`) are Discord EMBEDS built by
@@ -23,9 +23,12 @@ sends stay plain text/images. Test all configured channels with
 
 The tennis system never posts to Telegram, unlike football's Telegram +
 Discord pattern. Reason: user preference — Discord is easier to view. Tennis
-picks (plus the picks-failed alert) go to the `tennis-picks` channel key
-(`tennis_main.py`); settled results go to `tennis-results` (`run_all.py`
-`tennis_live_results_check`) — never the football `results-cards` channel.
+picks are split by rank tier: both players inside `TENNIS_RANK_THRESHOLD`
+(default 150) → `tennis-picks`; either player outside or unranked →
+`tennis-picks-lower` (the tier is also logged to the Sheet's 'Rank Tier'
+column). The picks-failed alert goes to `tennis-picks`. Settled results go
+to `tennis-results` (`run_all.py` `tennis_live_results_check`) — never the
+football `results-cards` channel.
 `TELEGRAM_TENNIS_CHANNEL_ID` was removed on 10 Jul 2026; do not reintroduce
 it or add any Telegram send to the tennis pipeline.
 

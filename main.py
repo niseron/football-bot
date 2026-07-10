@@ -845,9 +845,9 @@ async def daily_picks_job():
 
 async def main():
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(daily_picks_job, "cron", hour=9, minute=0, timezone="Europe/Brussels")
+    scheduler.add_job(daily_picks_job, "cron", hour=12, minute=0, timezone="Europe/Brussels")
     scheduler.start()
-    log.info("Scheduler started — picks will post daily at 09:00 Europe/Brussels")
+    log.info("Scheduler started — picks will post daily at 12:00 Europe/Brussels")
 
     try:
         while True:

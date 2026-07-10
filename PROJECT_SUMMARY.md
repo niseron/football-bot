@@ -6,7 +6,7 @@ An automated football betting analysis bot that:
 - Fetches upcoming fixtures from a live football API (RapidAPI)
 - Enriches each fixture with last-5 team form and head-to-head history from the same API
 - Sends the enriched fixture list to Claude AI (claude-sonnet-4-6) for betting analysis
-- Posts the top 5 value picks daily to a Telegram channel at 09:00 Brussels time as a text message and a branded PNG card
+- Posts the top 5 value picks daily to a Telegram channel at 12:00 Brussels time as a text message and a branded PNG card
 - Mirrors delivery to Discord (purely additive): picks/results/weekly PNG cards to card channels, plus each pick's text routed to a per-league Discord channel
 - Automatically checks match results every 30 minutes and updates Google Sheets
 - Polls closing odds every 15 minutes as kickoff approaches, for closing line value (CLV) tracking
@@ -94,11 +94,11 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Python version:** 3.12 (runtime.txt)
 - **Font support:** `nixpacks.toml` installs `fonts-dejavu` so Pillow can render card text on Railway
 - **Process:** Single process running seven APScheduler jobs — four football, three tennis (the tennis jobs share the process but no data paths):
-  - Daily picks (football) — cron, 09:00 Europe/Brussels
+  - Daily picks (football) — cron, 12:00 Europe/Brussels
   - Weekly summary (football) — cron, Monday 09:05 Europe/Brussels
   - Live result checks (football) — interval, every 30 minutes
   - Closing odds check (football CLV) — interval, every 15 minutes
-  - Daily tennis picks — cron, 09:30 Europe/Brussels
+  - Daily tennis picks — cron, 12:30 Europe/Brussels (30 min after football's daily picks)
   - Tennis closing odds check (tennis CLV) — interval, every 15 minutes
   - Tennis live result checks — interval, every 30 minutes
 
@@ -114,7 +114,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Channel ID:** `-1003617316561`
 - **Message format:** MarkdownV2
 - **What gets posted:**
-  - Daily picks at 09:00 — MarkdownV2 text message + 1080×1080 PNG picks card
+  - Daily picks at 12:00 — MarkdownV2 text message + 1080×1080 PNG picks card
   - Result notifications when a pick settles (WIN / LOSS / HALF WIN / HALF LOSS with score and P&L)
   - Results card (PNG) posted after all picks for a day are settled
   - Weekly summary every Monday at 09:05 — text + PNG weekly summary card
@@ -135,7 +135,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `premier-league` | Each Premier League pick as an embed | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as an embed | `main.py` |
 | `world-cup` | Each World Cup 2026 pick as an embed | `main.py` |
-| `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 09:30 Brussels, plus the picks-failed alert | `tennis_main.py` |
+| `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
 
@@ -194,7 +194,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - Confidence rating per pick (High / Medium / Low)
 - 2–3 sentence reasoning per pick citing form, head-to-head, and value
 - Duplicate pick prevention (won't re-post same pick same day)
-- Single daily job at 09:00 Brussels — evening picks job removed
+- Single daily job at 12:00 Brussels — evening picks job removed
 
 ### Form & H2H enrichment (added)
 - Before calling Claude, `enrich_with_context()` fetches from RapidAPI:
@@ -327,7 +327,7 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 - **Enrichment:** per fixture — tournament name/surface/tier (`tournament/info`), last-5 form per player (`player/past-matches`), and head-to-head (`fixtures/h2h`); capped at 20 enriched fixtures per run. In this API's archive data the first-listed player is always the winner.
 - **Claude analysis:** separate `TENNIS_SYSTEM_PROMPT` (claude-sonnet-4-6) — weights player form, H2H, surface type (Hard/Clay/Grass), and tournament tier. Bet types: **Match Winner, Total Games Over/Under, Set Betting, Handicap (games)**. Outputs the same JSON shape as football, incl. the calibration `probability` field.
 - **Real odds:** The Odds API lists tennis tournaments as dynamic per-event sport keys (`tennis_atp_*` / `tennis_wta_*`), so active keys are discovered at runtime via the quota-free `/v4/sports` call (max 6 odds requests per picks run). Same ≥5pp value-flag rule as football. Set Betting has no Odds API market → those picks stay Claude-odds-only.
-- **Posting:** Discord-ONLY — a dated header (text) plus each pick as an embed (section 5b format, `Tour | Tournament | Surface` as the author line) to the `tennis-picks` Discord channel at **09:30 Europe/Brussels**, its own schedule slot 30 min after the football picks. No Telegram send exists in the tennis pipeline.
+- **Posting:** Discord-ONLY — a dated header (text) plus each pick as an embed (section 5b format, `Tour | Tournament | Surface` as the author line) to the `tennis-picks` Discord channel at **12:30 Europe/Brussels**, its own schedule slot 30 min after the football picks. No Telegram send exists in the tennis pipeline.
 - **Tracking:** 'Tennis Picks' tab — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier. Results are WIN/LOSS/VOID (units P&L: WIN = odds−1, LOSS = −1). No half results — tennis game handicaps and totals use half lines. The 'Rank Tier' column enables future per-tier calibration/CLV reports in `tennis_calibration.py` once each tier has enough settled picks.
 - **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of 12 tennis odds requests/day, budgeted separately from the football cap.
 - **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick posts its result text to the `tennis-results` Discord channel — Discord-only, never Telegram and never the football `results-cards` channel.
@@ -363,7 +363,7 @@ Double-click `START_BOT.bat` in the `football-bot` folder. It opens 4 separate c
 
 | Window | Command | Purpose |
 |---|---|---|
-| Picks Bot | `python main.py` | Scheduled daily picks at 09:00 |
+| Picks Bot | `python main.py` | Scheduled daily picks at 12:00 |
 | Weekly Summary | `python weekly_summary.py` | Scheduled Monday summary at 09:05 |
 | Results Schedule | `python auto_results.py --schedule` | Nightly result check at 00:15 |
 | Results Live | `python auto_results.py --live` | Live check every 30 minutes |
@@ -397,7 +397,7 @@ Supports: `WIN`, `LOSS`, `VOID`, `HALF WIN`, `HALF LOSS`
 **Tennis system (all commands hit only the Tennis Picks tab):**
 ```
 python tennis_main.py --now                                            # one-shot: fetch + analyse + post tennis picks now
-python tennis_main.py                                                  # start the tennis scheduler (09:30 Brussels)
+python tennis_main.py                                                  # start the tennis scheduler (12:30 Brussels)
 python tennis_auto_results.py                                          # one-shot: check + settle tennis results now
 python tennis_closing_odds.py                                          # one closing-odds poll for tennis picks
 python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN  # manually settle/override a tennis pick (WIN/LOSS/VOID)

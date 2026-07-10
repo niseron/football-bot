@@ -95,7 +95,7 @@ async def main() -> None:
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         daily_picks_job, "cron",
-        hour=9, minute=0, timezone="Europe/Brussels",
+        hour=12, minute=0, timezone="Europe/Brussels",
     )
     scheduler.add_job(
         post_weekly_summary, "cron",
@@ -110,7 +110,7 @@ async def main() -> None:
     # Tennis system — independent jobs, never intermixed with the football ones
     scheduler.add_job(
         daily_tennis_picks_job, "cron",
-        hour=9, minute=30, timezone="Europe/Brussels",
+        hour=12, minute=30, timezone="Europe/Brussels",
     )
     scheduler.add_job(
         tennis_closing_odds_job, "interval", minutes=15,
@@ -121,9 +121,9 @@ async def main() -> None:
     scheduler.start()
 
     log.info(
-        "Scheduler running — football: morning picks 09:00, "
+        "Scheduler running — football: daily picks 12:00, "
         "weekly summary Mon 09:05, live results every 30 min, "
-        "closing odds every 15 min | tennis: picks 09:30, "
+        "closing odds every 15 min | tennis: picks 12:30, "
         "live results every 30 min, closing odds every 15 min (Europe/Brussels)"
     )
 

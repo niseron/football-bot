@@ -3,9 +3,10 @@ tennis_main.py — daily ATP/WTA tennis picks pipeline.
 
 Fully separate from the football system (main.py): its own RapidAPI data
 source, its own Claude system prompt, its own Google Sheets tab ('Tennis
-Picks' via tennis_excel_tracker.py), and its own schedule slot (09:30
-Europe/Brussels). It imports nothing from main.py / excel_tracker.py /
-tracker.py and shares no calibration data or sheet columns with football.
+Picks' via tennis_excel_tracker.py), and its own schedule slot (12:30
+Europe/Brussels, 30 min after football's daily picks). It imports nothing
+from main.py / excel_tracker.py / tracker.py and shares no calibration data
+or sheet columns with football.
 
 Delivery is Discord-ONLY — unlike football, which posts to Telegram and
 mirrors to Discord, tennis never touches Telegram (user preference: Discord
@@ -18,7 +19,7 @@ API separately. Host overridable via TENNIS_RAPIDAPI_HOST.
 
 Run manually:
     python tennis_main.py --now     one-shot: fetch + analyse + post immediately
-    python tennis_main.py           start the scheduler (09:30 Europe/Brussels)
+    python tennis_main.py           start the scheduler (12:30 Europe/Brussels)
 """
 import asyncio
 import difflib
@@ -857,9 +858,9 @@ async def daily_tennis_picks_job():
 
 async def main():
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(daily_tennis_picks_job, "cron", hour=9, minute=30, timezone="Europe/Brussels")
+    scheduler.add_job(daily_tennis_picks_job, "cron", hour=12, minute=30, timezone="Europe/Brussels")
     scheduler.start()
-    log.info("Tennis scheduler started — picks will post daily at 09:30 Europe/Brussels")
+    log.info("Tennis scheduler started — picks will post daily at 12:30 Europe/Brussels")
 
     try:
         while True:

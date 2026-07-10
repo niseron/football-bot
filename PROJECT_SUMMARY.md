@@ -76,7 +76,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `TELEGRAM_CHANNEL_ID` | Telegram channel ID where picks are posted |
 | `GOOGLE_SHEETS_ID` | ID from the Google Sheet URL (between /d/ and /edit) |
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
-| `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated and saved to `/cards`, just not sent anywhere. |
+| `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated, saved to `/cards`, and sent to Discord's `picks-cards` channel — only the Telegram send is skipped. |
 | `DISCORD_BOT_TOKEN` | *Optional for football, required for tennis delivery.* Discord bot token (Developer Portal → Bot → Reset Token). If unset, all Discord delivery is skipped silently — football's Telegram is unaffected, but tennis (Discord-only) posts nowhere. |
 | `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-picks-lower` / `tennis-results` keys carry ALL tennis delivery (tennis is Discord-only — no Telegram). |
 | `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
@@ -129,7 +129,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 
 | Key | Content | Sent from |
 |---|---|---|
-| `picks-cards` | Daily picks PNG card | `main.py` (after the Telegram card send) |
+| `picks-cards` | Daily picks PNG card, **plus** the Instagram-variant card (`generate_picks_card_ig`) — both land in this same channel every run (since 11 Jul 2026, intentional) | `main.py` (after the Telegram card send; IG card sent right after its optional `TELEGRAM_IG_CHANNEL_ID` send) |
 | `results-cards` | Football live result notifications (text) — mirrored from the same 30-min automatic trigger that sends them to Telegram; plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
 | `premier-league` | Each Premier League pick as an embed | `main.py` |
@@ -291,7 +291,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Data quality | 75% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
-| Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` (optional) for manual download and posting — actual Instagram posting is still manual, zero posts so far |
+| Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |
 | Site/app/monetization | 0% | Deliberately parked until edge is proven |
 

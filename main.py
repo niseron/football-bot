@@ -837,6 +837,10 @@ async def daily_picks_job():
             log.info("Instagram picks card sent to TELEGRAM_IG_CHANNEL_ID")
         else:
             log.info("TELEGRAM_IG_CHANNEL_ID not set — skipping send")
+        # Discord mirror — same 'picks-cards' channel as the regular card,
+        # intentional (both card variants land in one place); send_to_discord
+        # never raises
+        send_to_discord("picks-cards", image_path=ig_card)
     except Exception as exc:
         log.warning("Instagram picks card failed (non-fatal): %s", exc)
 

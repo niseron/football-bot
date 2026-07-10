@@ -14,7 +14,8 @@ Config (both must be set for any send to happen):
                             {"picks-cards": "111...", "premier-league": "222..."}
 
 Channel keys used by the pipeline (any key may be omitted — it is skipped):
-    picks-cards         daily picks PNG card            (main.py)
+    picks-cards         daily picks PNG card, plus the IG-variant card
+                        (both land here every run, intentional)  (main.py)
     results-cards       results PNG card                (auto_results.py)
     weekly-cards        weekly summary PNG card         (weekly_summary.py)
     premier-league      per-pick embed                  (main.py)

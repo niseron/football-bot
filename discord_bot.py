@@ -71,9 +71,10 @@ def _parse_channel_map() -> dict[str, str]:
 
 DISCORD_CHANNELS: dict[str, str] = _parse_channel_map()
 
-# Embed accent colours by pick confidence (same palette as the Sheets
-# formatting: WIN green / HALF WIN amber, plus a neutral gray).
-_EMBED_COLORS = {"high": 0x00C853, "medium": 0xFFAB00, "low": 0x9E9E9E}
+# Embed stripe colours by pick confidence: High green, Medium blue,
+# Low orange. Colours only affect the embed's left-side stripe — Discord
+# embeds have no per-field text colouring.
+_EMBED_COLORS = {"high": 0x00C853, "medium": 0x2196F3, "low": 0xFF6F00}
 
 
 def build_pick_embed(pick: dict, context: str | None = None) -> dict:

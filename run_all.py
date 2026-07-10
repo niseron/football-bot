@@ -25,7 +25,6 @@ from discord_bot import send_to_discord
 from main import daily_picks_job
 from tennis_auto_results import (
     _format_tennis_result_notification,
-    _tennis_telegram_send,
     run_tennis_auto_results,
 )
 from tennis_closing_odds import run_tennis_closing_odds_check
@@ -84,9 +83,9 @@ async def tennis_live_results_check() -> None:
             continue
         msg = _format_tennis_result_notification(r)
         log.info("Sending tennis result notification: %s | %s", r["match"], r["result"])
-        await asyncio.to_thread(_tennis_telegram_send, msg)
-        # Discord mirror — same trigger, same text; send_to_discord never raises
-        await asyncio.to_thread(send_to_discord, "results-cards", msg)
+        # Tennis is Discord-ONLY (no Telegram, own channel — never the
+        # football 'results-cards'); send_to_discord never raises
+        await asyncio.to_thread(send_to_discord, "tennis-results", msg)
         _tennis_notified.add(key)
 
 

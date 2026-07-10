@@ -2,11 +2,15 @@
 tennis_main.py — daily ATP/WTA tennis picks pipeline.
 
 Fully separate from the football system (main.py): its own RapidAPI data
-source, its own Claude system prompt, its own Telegram channel
-(TELEGRAM_TENNIS_CHANNEL_ID), its own Google Sheets tab ('Tennis Picks' via
-tennis_excel_tracker.py), and its own schedule slot (09:30 Europe/Brussels).
-It imports nothing from main.py / excel_tracker.py / tracker.py and shares no
-calibration data or sheet columns with football.
+source, its own Claude system prompt, its own Google Sheets tab ('Tennis
+Picks' via tennis_excel_tracker.py), and its own schedule slot (09:30
+Europe/Brussels). It imports nothing from main.py / excel_tracker.py /
+tracker.py and shares no calibration data or sheet columns with football.
+
+Delivery is Discord-ONLY — unlike football, which posts to Telegram and
+mirrors to Discord, tennis never touches Telegram (user preference: Discord
+is easier to view). Each pick's text is posted to the 'tennis-picks' Discord
+channel key via discord_bot.py's send_to_discord.
 
 Data source: "Tennis API - ATP WTA ITF" (MatchStat) on RapidAPI — same
 RAPIDAPI_KEY as the football API, but the account must be subscribed to this
@@ -31,8 +35,8 @@ import anthropic
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
-from telegram import Bot
 
+from discord_bot import send_to_discord
 from tennis_excel_tracker import log_tennis_pick, tennis_picks_exist_for_today
 
 load_dotenv()
@@ -41,8 +45,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_TENNIS_CHANNEL_ID = os.environ.get("TELEGRAM_TENNIS_CHANNEL_ID")
 
 TENNIS_RAPIDAPI_HOST = os.environ.get(
     "TENNIS_RAPIDAPI_HOST", "tennis-api-atp-wta-itf.p.rapidapi.com"
@@ -588,20 +590,11 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _notify_tennis_picks_failed(reason: str) -> None:
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_TENNIS_CHANNEL_ID):
-        log.error("Cannot send tennis picks-failed alert — bot token/tennis channel not configured")
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_TENNIS_CHANNEL_ID,
-                "text": f"⚠️ Tennis picks failed today — {reason}. Check logs.",
-            },
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Failed to send tennis picks-failed alert: %s", exc)
+    # Tennis is Discord-only — the alert goes to the picks channel, never Telegram
+    if not send_to_discord(
+        "tennis-picks", message=f"⚠️ Tennis picks failed today — {reason}. Check logs."
+    ):
+        log.error("Could not deliver tennis picks-failed alert to Discord ('tennis-picks')")
 
 
 def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[dict]:
@@ -643,54 +636,38 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
     return deduped
 
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
+# ── Discord (tennis is Discord-only — no Telegram) ────────────────────────────
 
-def _escape_md(text: str) -> str:
-    for ch in r"\_*[]()~`>#+-=|{}.!":
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
-
-def format_tennis_telegram_message(picks: list[dict], header: str = "Tennis Picks") -> str:
-    today = datetime.now(timezone.utc).strftime("%d %b %Y")
-    lines = [f"*🎾 {_escape_md(header)} — {_escape_md(today)}*\n"]
-    for i, p in enumerate(picks, 1):
-        context_bits = " \\| ".join(
-            _escape_md(str(p[k])) for k in ("tour", "tournament", "surface") if p.get(k)
-        )
-
-        market_odds = p.get("market_odds")
-        if market_odds is not None:
-            value_tag = " 🔥 *VALUE*" if p.get("value") else ""
-            odds_line = (
-                f"  Odds: Claude `{_escape_md(str(p['odds']))}` "
-                f"\\| Market `{_escape_md(str(market_odds))}`{value_tag} "
-                f"\\| Confidence: {_escape_md(p['confidence'])}\n"
-            )
-        else:
-            odds_line = (
-                f"  Odds: `{_escape_md(str(p['odds']))}` \\| Confidence: {_escape_md(p['confidence'])}\n"
-            )
-
+def _format_discord_tennis_pick(p: dict) -> str:
+    """One tennis pick as a plain Discord-markdown message (mirrors main.py's
+    _format_discord_pick, with tour/tournament/surface context)."""
+    context = " | ".join(str(p[k]) for k in ("tour", "tournament", "surface") if p.get(k))
+    lines = [
+        f"**{p.get('match', '?')}**" + (f" ({context})" if context else ""),
+        f"Bet: {p.get('bet_type', '?')} — **{p.get('pick', '?')}**",
+    ]
+    market_odds = p.get("market_odds")
+    if market_odds is not None:
+        value_tag = " 🔥 **VALUE**" if p.get("value") else ""
         lines.append(
-            f"*{i}\\. {_escape_md(p['match'])}*"
-            + (f" \\({context_bits}\\)\n" if context_bits else "\n")
-            + f"  Bet: {_escape_md(p['bet_type'])} — *{_escape_md(p['pick'])}*\n"
-            + odds_line
-            + f"  _{_escape_md(p['reasoning'])}_\n"
+            f"Odds: Claude `{p.get('odds', '?')}` | Market `{market_odds}`{value_tag}"
+            f" | Confidence: {p.get('confidence', 'N/A')}"
         )
-    lines.append("_Good luck\\! Bet responsibly\\._")
+    else:
+        lines.append(f"Odds: `{p.get('odds', '?')}` | Confidence: {p.get('confidence', 'N/A')}")
+    if p.get("reasoning"):
+        lines.append(f"_{p['reasoning']}_")
     return "\n".join(lines)
 
 
-async def send_to_tennis_telegram(text: str):
-    if not TELEGRAM_TENNIS_CHANNEL_ID:
-        raise RuntimeError("TELEGRAM_TENNIS_CHANNEL_ID is not set")
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    await bot.send_message(
-        chat_id=TELEGRAM_TENNIS_CHANNEL_ID,
-        text=text,
-        parse_mode="MarkdownV2",
+def post_tennis_picks_to_discord(picks: list[dict]) -> int:
+    """Post a dated header then each pick's text to the 'tennis-picks' channel.
+    Returns how many pick messages Discord accepted (send_to_discord never raises)."""
+    today = datetime.now(timezone.utc).strftime("%d %b %Y")
+    send_to_discord("tennis-picks", message=f"🎾 **Tennis Picks — {today}**")
+    return sum(
+        send_to_discord("tennis-picks", message=_format_discord_tennis_pick(p))
+        for p in picks
     )
 
 
@@ -770,12 +747,14 @@ async def daily_tennis_picks_job():
         except Exception as exc:
             log.warning("Failed to log tennis pick: %s", exc)
 
-    message = format_tennis_telegram_message(picks)
-    try:
-        await send_to_tennis_telegram(message)
-        log.info("Sent %d tennis picks to Telegram", len(picks))
-    except Exception as exc:
-        log.error("Tennis Telegram send failed: %s", exc)
+    sent = await asyncio.to_thread(post_tennis_picks_to_discord, picks)
+    if sent:
+        log.info("Posted %d/%d tennis picks to Discord 'tennis-picks'", sent, len(picks))
+    else:
+        log.error(
+            "No tennis picks reached Discord — check DISCORD_BOT_TOKEN / "
+            "DISCORD_CHANNELS_JSON ('tennis-picks' key)"
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -74,9 +74,8 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `GOOGLE_SHEETS_ID` | ID from the Google Sheet URL (between /d/ and /edit) |
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
 | `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated and saved to `/cards`, just not sent anywhere. |
-| `TELEGRAM_TENNIS_CHANNEL_ID` | **Tennis system.** Telegram channel ID where tennis picks are posted — must be a DIFFERENT channel from the football one. If unset, tennis picks are still logged to the Tennis Picks tab but the Telegram send fails (logged, non-fatal). |
-| `DISCORD_BOT_TOKEN` | *Optional.* Discord bot token (Developer Portal → Bot → Reset Token). If unset, all Discord delivery is skipped silently — Telegram is unaffected. |
-| `DISCORD_CHANNELS_JSON` | *Optional.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. |
+| `DISCORD_BOT_TOKEN` | *Optional for football, required for tennis delivery.* Discord bot token (Developer Portal → Bot → Reset Token). If unset, all Discord delivery is skipped silently — football's Telegram is unaffected, but tennis (Discord-only) posts nowhere. |
+| `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-results` keys carry ALL tennis delivery (tennis is Discord-only — no Telegram). |
 | `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
 
 ---
@@ -120,18 +119,20 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 
 ## 5b. Discord Delivery (added 9 Jul 2026)
 
-Purely additive delivery channel via `discord_bot.py` — no changes to pick generation, calibration, or any Telegram logic. Send-only: uses Discord's REST API directly through `requests` (no discord.py dependency, no gateway/event client).
+Delivery channel via `discord_bot.py` — no changes to pick generation or calibration. For **football** it is purely additive (mirrors what already goes to Telegram). For **tennis** it is the ONLY delivery channel — see the tennis section; tennis never posts to Telegram (user preference: Discord is easier to view). Send-only: uses Discord's REST API directly through `requests` (no discord.py dependency, no gateway/event client).
 
 **Channel mapping** (`DISCORD_CHANNELS_JSON` keys → what gets posted there):
 
 | Key | Content | Sent from |
 |---|---|---|
 | `picks-cards` | Daily picks PNG card | `main.py` (after the Telegram card send) |
-| `results-cards` | Live result notifications (text) — mirrored from the same 30-min automatic triggers that send them to Telegram (football AND tennis); plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` + `tennis_live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
+| `results-cards` | Football live result notifications (text) — mirrored from the same 30-min automatic trigger that sends them to Telegram; plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
 | `premier-league` | Each Premier League pick as text (match, bet, odds, confidence, reasoning) | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as text | `main.py` |
 | `world-cup` | Each World Cup 2026 pick as text | `main.py` |
+| `tennis-picks` | **TENNIS (Discord-only)** — dated header + each tennis pick as text at 09:30 Brussels, plus the picks-failed alert | `tennis_main.py` |
+| `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
 
 The league-name → key routing lives in `main.py`'s `DISCORD_LEAGUE_CHANNEL_KEYS`.
 
@@ -293,7 +294,9 @@ The roadmap percentages above are **football only** — the tennis system below 
 
 ## Tennis System — SEPARATE from football
 
-A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026. It shares the Railway process, the Telegram bot token, and the API keys — and **nothing else**. No shared calibration data, no shared Sheet columns/tabs, no shared SQLite, no shared functions in the data path. A bug or bad streak in one system cannot contaminate the other's data or reports.
+A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026. It shares the Railway process, the Discord bot token, and the API keys — and **nothing else**. No shared calibration data, no shared Sheet columns/tabs, no shared SQLite, no shared functions in the data path. A bug or bad streak in one system cannot contaminate the other's data or reports.
+
+**Delivery is Discord-ONLY (since 10 Jul 2026)** — unlike football, which posts to Telegram and mirrors to Discord, tennis never touches Telegram at all. Reason: user preference — Discord is easier to view. Picks go to the `tennis-picks` channel key and settled results to `tennis-results` (both in `DISCORD_CHANNELS_JSON`, never the football channels). The former `TELEGRAM_TENNIS_CHANNEL_ID` variable is removed and must not be reintroduced.
 
 ### Data collection start date: **9 Jul 2026**
 ### Independent verdict timeline: ~300 settled tennis picks with probability data — at ~3-5 picks/day, expect a first meaningful calibration read around **Oct-Nov 2026**. This clock is completely separate from the football calibration timeline; do not merge the two samples or compare their early reports.
@@ -316,10 +319,10 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 - **Enrichment:** per fixture — tournament name/surface/tier (`tournament/info`), last-5 form per player (`player/past-matches`), and head-to-head (`fixtures/h2h`); capped at 20 enriched fixtures per run. In this API's archive data the first-listed player is always the winner.
 - **Claude analysis:** separate `TENNIS_SYSTEM_PROMPT` (claude-sonnet-4-6) — weights player form, H2H, surface type (Hard/Clay/Grass), and tournament tier. Bet types: **Match Winner, Total Games Over/Under, Set Betting, Handicap (games)**. Outputs the same JSON shape as football, incl. the calibration `probability` field.
 - **Real odds:** The Odds API lists tennis tournaments as dynamic per-event sport keys (`tennis_atp_*` / `tennis_wta_*`), so active keys are discovered at runtime via the quota-free `/v4/sports` call (max 6 odds requests per picks run). Same ≥5pp value-flag rule as football. Set Betting has no Odds API market → those picks stay Claude-odds-only.
-- **Posting:** Telegram channel `TELEGRAM_TENNIS_CHANNEL_ID` (never the football channel) at **09:30 Europe/Brussels** — its own schedule slot, 30 min after the football picks.
+- **Posting:** Discord-ONLY — a dated header plus each pick's text to the `tennis-picks` Discord channel (via `send_to_discord`) at **09:30 Europe/Brussels**, its own schedule slot 30 min after the football picks. No Telegram send exists in the tennis pipeline.
 - **Tracking:** 'Tennis Picks' tab — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds. Results are WIN/LOSS/VOID (units P&L: WIN = odds−1, LOSS = −1). No half results — tennis game handicaps and totals use half lines.
 - **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of 12 tennis odds requests/day, budgeted separately from the football cap.
-- **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick sends a Telegram notification to `TELEGRAM_TENNIS_CHANNEL_ID` and mirrors the same text to the `results-cards` Discord channel from the identical trigger.
+- **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick posts its result text to the `tennis-results` Discord channel — Discord-only, never Telegram and never the football `results-cards` channel.
 
 ### Tennis limitations (own list, separate from football's)
 
@@ -332,7 +335,7 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 
 | Area | Done | Status |
 |---|---|---|
-| Tennis bot core | 85% | Picks, Sheets tab, Telegram, Discord, CLV polling, auto-results all live (10 Jul 2026) |
+| Tennis bot core | 85% | Picks, Sheets tab, Discord-only delivery (`tennis-picks`/`tennis-results`, 10 Jul 2026 — no Telegram), CLV polling, auto-results all live |
 | Tennis data quality | 60% | Form/H2H/surface enrichment + dynamic Odds API keys; no injury/retirement data |
 | Tennis calibration engine | 10% | Infrastructure done, collecting from 9 Jul 2026; verdict ~Oct-Nov 2026 at 300 picks |
 | Tennis auto-results | 90% | Live from 10 Jul 2026, all 4 bet types; retirements settle VOID (manual override available) |

@@ -5,10 +5,12 @@ Mirrors the football auto_results.py structure: scans unsettled Tennis Picks
 rows, fetches completed matches from the Tennis API (fixtures by date, both
 tours), evaluates each bet type, writes Result/P&L to the Tennis Picks tab,
 and returns the newly settled picks so run_all.py's tennis_live_results_check
-can send Telegram/Discord notifications from the identical trigger.
+can send Discord notifications from the identical trigger.
 
 Fully independent of the football data path: reads/writes only via
-tennis_excel_tracker, notifies only TELEGRAM_TENNIS_CHANNEL_ID.
+tennis_excel_tracker. Notifications are Discord-ONLY — each settled pick's
+result text goes to the 'tennis-results' Discord channel key (tennis never
+touches Telegram, unlike football's Telegram + Discord delivery).
 
 Bet type settlement (units: WIN = odds−1, LOSS = −1, VOID = 0):
 - Match Winner     — picked player won the match
@@ -27,12 +29,9 @@ Usage:
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
-
-import requests
 
 from tennis_excel_tracker import get_pending_tennis_picks, update_tennis_row_result
 from tennis_main import TOURS, _data_list, _tennis_get, player_match
@@ -45,25 +44,7 @@ _fixtures_cache: dict[tuple[str, date], tuple[datetime, list[dict]]] = {}
 _CACHE_TTL = timedelta(minutes=30)
 
 
-# ── Telegram (tennis channel only) ───────────────────────────────────────────
-
-def _tennis_telegram_send(text: str) -> None:
-    token   = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_TENNIS_CHANNEL_ID")
-    if not token or not chat_id:
-        log.warning("Tennis Telegram not configured — skipping notification")
-        return
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=10,
-        )
-        r.raise_for_status()
-        log.info("Tennis Telegram notification sent")
-    except Exception as exc:
-        log.error("Tennis Telegram send failed: %s", exc)
-
+# ── Result notification text (sent to Discord 'tennis-results' by run_all.py) ─
 
 def _format_tennis_result_notification(r: dict) -> str:
     _EMOJI  = {"WIN": "✅", "LOSS": "❌", "VOID": "⬜"}

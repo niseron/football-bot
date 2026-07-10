@@ -1,10 +1,11 @@
 """
-discord_bot.py — Discord delivery layer for the football pipeline.
+discord_bot.py — Discord delivery layer for the football AND tennis pipelines.
 
-Purely additive delivery: posts the same picks/results/weekly content that
-already goes to Telegram into mapped Discord channels. Send-only, so it talks
-to Discord's REST API directly via requests — no discord.py client, no
-gateway connection, no event loop of its own.
+For football this is purely additive: it mirrors the same picks/results/weekly
+content that already goes to Telegram. For TENNIS it is the ONLY delivery
+channel — tennis never posts to Telegram (user preference: Discord is easier
+to view). Send-only, so it talks to Discord's REST API directly via requests —
+no discord.py client, no gateway connection, no event loop of its own.
 
 Config (both must be set for any send to happen):
     DISCORD_BOT_TOKEN     — bot token from the Discord Developer Portal
@@ -19,6 +20,8 @@ Channel keys used by the pipeline (any key may be omitted — it is skipped):
     premier-league      per-pick text                   (main.py)
     jupiler-pro-league  per-pick text                   (main.py)
     world-cup           per-pick text                   (main.py)
+    tennis-picks        TENNIS per-pick text, Discord-only    (tennis_main.py)
+    tennis-results      TENNIS settled result text, Discord-only (run_all.py)
 
 send_to_discord() NEVER raises: missing token/mapping/key, a bad image path,
 or a Discord API failure all log a line and return False, so the existing

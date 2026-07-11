@@ -9,10 +9,13 @@ Four card types:
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
+
+log = logging.getLogger(__name__)
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 _BG     = (6,   6,   6)
@@ -23,6 +26,7 @@ _DIM    = (148, 148, 148)
 _WIN    = (0,   255, 136)
 _LOSS   = (255, 51,  85)
 _VOID   = (200, 175, 60)
+_CONF_LOW = (255, 111, 0)   # Low-confidence tag — same orange as the Discord embed stripe
 _GRID   = (13,  43,  26)
 _SEP    = (28,  58,  42)
 
@@ -38,16 +42,27 @@ _FC: dict[tuple, ImageFont.FreeTypeFont] = {}
 
 # ── Font helpers ──────────────────────────────────────────────────────────────
 
+# Bundled fonts render identically everywhere — critically on Railway (Linux),
+# where none of the Windows paths exist. Before these were bundled, the Windows
+# miss cascaded to ImageFont.load_default(), an ~11px bitmap font that ignores
+# the requested size; because every canvas is sized FROM font metrics, whole
+# cards silently collapsed (IG card: 460px tall instead of ~1340px, 10-11 Jul
+# 2026). The bundled paths go first so manual Windows renders match production.
+_FONTS_DIR = Path(__file__).parent / "fonts"
+
+
 def _font(sz: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     key = (sz, bold)
     if key in _FC:
         return _FC[key]
     paths = (
-        [r"C:\Windows\Fonts\consolab.ttf",
+        [str(_FONTS_DIR / "DejaVuSansMono-Bold.ttf"),
+         r"C:\Windows\Fonts\consolab.ttf",
          r"C:\Windows\Fonts\courbd.ttf",
          r"C:\Windows\Fonts\arialbd.ttf"]
         if bold else
-        [r"C:\Windows\Fonts\consola.ttf",
+        [str(_FONTS_DIR / "DejaVuSansMono.ttf"),
+         r"C:\Windows\Fonts\consola.ttf",
          r"C:\Windows\Fonts\cour.ttf",
          r"C:\Windows\Fonts\arial.ttf"]
     )
@@ -58,6 +73,10 @@ def _font(sz: int, bold: bool = False) -> ImageFont.FreeTypeFont:
             return f
         except OSError:
             pass
+    log.error(
+        "No TrueType font found (bundled fonts/ missing?) — falling back to "
+        "the tiny PIL bitmap font; cards WILL render collapsed/unreadable"
+    )
     f = ImageFont.load_default()
     _FC[key] = f
     return f
@@ -147,8 +166,14 @@ def _pnl_str(v: float) -> str:
 
 
 def _conf_color(conf: str) -> tuple:
+    # Low matches the Discord embed stripe orange (0xFF6F00) — before this it
+    # fell through to _LOSS red, which reads as "pick already lost". Unknown
+    # tiers render dim grey rather than any signal colour.
     cl = conf.strip().lower()
-    return _WIN if cl == "high" else _VOID if cl == "medium" else _LOSS
+    return (_WIN if cl == "high"
+            else _VOID if cl == "medium"
+            else _CONF_LOW if cl == "low"
+            else _DIM)
 
 
 # ── Card 1: Daily picks ───────────────────────────────────────────────────────

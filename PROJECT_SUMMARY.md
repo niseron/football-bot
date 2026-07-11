@@ -51,7 +51,7 @@ football-bot/
 ├── START_BOT.bat         Windows launcher — opens 4 cmd windows for local development
 ├── Procfile              Railway process definition: worker: python run_all.py
 ├── runtime.txt           Python version for Railway: python-3.12
-├── nixpacks.toml         Railway build config — installs fonts-dejavu for card text rendering
+├── fonts/                Bundled DejaVu Sans Mono TTFs (+ license) — card text on any OS
 ├── requirements.txt      Python dependencies
 │
 ├── .env                  Local secrets (not committed — in .gitignore)
@@ -92,7 +92,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Process type:** `worker` (defined in Procfile — no HTTP port needed)
 - **Entry point:** `python run_all.py`
 - **Python version:** 3.12 (runtime.txt)
-- **Font support:** `nixpacks.toml` installs `fonts-dejavu` so Pillow can render card text on Railway
+- **Font support:** DejaVu Sans Mono TTFs are bundled in `fonts/` and tried first by `card_generator._font()` — no system font package needed. (A `nixpacks.toml` installing `fonts-dejavu` was documented here before, but that file was never committed, and `_font()` only searched `C:\Windows\Fonts` paths — so every Railway render fell back to Pillow's ~11px bitmap font and cards collapsed, e.g. 1080×460 on 11 Jul 2026. Fixed 11 Jul 2026.)
 - **Process:** Single process running seven APScheduler jobs — four football, three tennis (the tennis jobs share the process but no data paths):
   - Daily picks (football) — cron, 12:00 Europe/Brussels
   - Weekly summary (football) — cron, Monday 09:05 Europe/Brussels
@@ -249,7 +249,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - **Results card** (1080×1080): generated after results are finalized; sent as a photo to Telegram
 - **Weekly summary card** (1080×1080): generated and sent with the Monday weekly summary
 - Cards saved to `cards/` folder; win rate in the footer is pulled live from the Summary sheet
-- Font: DejaVu (installed on Railway via `nixpacks.toml`)
+- Font: DejaVu Sans Mono, bundled in `fonts/` (Consolas et al. remain later fallbacks on Windows)
 
 ### Discord delivery (added — `discord_bot.py`)
 - Every daily picks card and weekly card is mirrored to Discord right after its Telegram send

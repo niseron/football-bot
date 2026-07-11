@@ -307,11 +307,27 @@ def evaluate_pick(
 
 # ── Core checker ─────────────────────────────────────────────────────────────
 
-def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dict]]:
+def run_auto_results(
+    lookback_days: int = LOOKBACK_DAYS,
+    *,
+    pending_source=None,
+    row_writer=None,
+    finalizer=None,
+) -> tuple[dict, list[dict]]:
     """
     Scan pending Google Sheets rows, fetch API scores, update the sheet.
     Returns (stats_dict, list_of_newly_resolved_picks).
+
+    The three hooks default to the production football tab
+    (get_pending_picks_rows / update_row_result / finalize_workbook); the
+    Fable 5 shadow experiment passes its own tab's reader/writer plus a
+    no-op finalizer, so the identical evaluation logic settles the
+    'Fable Picks' rows instead.
     """
+    pending_source = pending_source or get_pending_picks_rows
+    row_writer     = row_writer or update_row_result
+    finalizer      = finalizer if finalizer is not None else finalize_workbook
+
     init_excel()
 
     stats   = {"checked": 0, "updated": 0, "not_finished": 0,
@@ -319,7 +335,7 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
     resolved: list[dict] = []
 
     # ── 1. Collect pending rows from Google Sheets ────────────────────────────
-    pending = get_pending_picks_rows(lookback_days)
+    pending = pending_source(lookback_days)
 
     if not pending:
         log.info("No pending picks in the lookback window.")
@@ -395,7 +411,7 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
             pnl = -1.0
         else:
             pnl = 0.0
-        update_row_result(sheet_row, result, pnl)
+        row_writer(sheet_row, result, pnl)
         changed = True
         stats["updated"] += 1
 
@@ -417,7 +433,7 @@ def run_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dic
 
     # ── 4. Recalculate running totals + refresh Summary ───────────────────────
     if changed:
-        finalize_workbook()
+        finalizer()
         log.info("Google Sheets updated — %d row(s) written.", stats["updated"])
     else:
         log.info("No changes.")

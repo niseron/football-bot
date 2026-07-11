@@ -36,6 +36,9 @@ football-bot/
 ├── env_loader.py         .env loading with a UTF-8 BOM guard — all entry points use load_env(), never load_dotenv() directly
 │
 ├── calibration.py        Probability calibration engine — calibration_report() + edge_report() + clv_report()
+├── fable_shadow.py       FABLE 5 SHADOW EXPERIMENT — parallel picks on the same fixtures with claude-fable-5
+├── fable_tracker.py      Sheets layer for the 'Fable Picks' tab (experiment only — never touches 'Picks')
+├── fable_calibration.py  Fable 5's own Brier/buckets/edge/CLV reports, separate from Sonnet's
 ├── update_result.py      CLI script to manually mark a pick WIN/LOSS/VOID/HALF WIN/HALF LOSS
 ├── backtest.py           Backtesting script against 2023-24 historical data (CSV output)
 ├── _run_now.py           Manual one-shot trigger — fetch + analyse + post immediately
@@ -135,6 +138,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `premier-league` | Each Premier League pick as an embed | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as an embed | `main.py` |
 | `world-cup` | Each World Cup 2026 pick as an embed | `main.py` |
+| `fable-picks` | **EXPERIMENT** — Fable 5 shadow picks (dated header + embeds, author line 'Fable 5 experiment'), posted right after the production picks each day. *Awaiting a Discord channel ID; until the key is added to `DISCORD_CHANNELS_JSON`, sends skip silently while picks still log to the Fable Picks tab.* | `fable_shadow.py` |
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
@@ -171,6 +175,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 | Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, bet type breakdown table |
 | Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier ('Top 150' / 'Lower Ranked', for future per-tier calibration), Stake € (SIM), Running P&L (u), Bankroll € (SIM), Player IDs. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 | Tennis Summary | **Tennis system only** — mirror of football's Summary tab, rebuilt by `_refresh_tennis_summary()` whenever a tennis result settles (`finalize_tennis_workbook()`, called from auto-results and the manual override): overall record, win rate, units P&L, simulated bankroll + ROI, best bet type / confidence level, Bet Type Breakdown (win-rate-desc), plus a tennis-only Rank Tier Breakdown (Top 150 vs Lower Ranked; pre-10-Jul rows show as '(untracked)'). Header labels the staking as SIMULATED. |
+| Fable Picks | **FABLE 5 EXPERIMENT only** — mirrors the football Picks tab structure (Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds; no staking/bankroll columns — units P&L only). Written exclusively by `fable_tracker.py`. |
 
 **Conditional formatting (applied via batchUpdate on every write):**
 
@@ -270,6 +275,17 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - Youth team filtering (U19, U21, U23 matches excluded)
 
 ---
+
+### Fable 5 shadow pipeline (EXPERIMENT — added 12 Jul 2026, `fable_shadow.py`)
+
+**An explicit side-by-side model comparison experiment — NOT a replacement for Sonnet and NOT part of the production picks.** Every day, immediately after the production Sonnet 4.6 picks are generated, `run_fable_shadow()` sends the exact same enriched fixture pool (same form/H2H/odds data, same SYSTEM_PROMPT, no separate fixture fetch) to **claude-fable-5** and records its independent picks:
+
+- **Sheet:** 'Fable Picks' tab (`fable_tracker.py`) — same structure as the football Picks tab minus the staking columns; no bankroll, units P&L only.
+- **Discord:** posts to the `fable-picks` channel key, clearly labelled as an experiment (fail-silent until the channel ID is configured).
+- **Settlement:** the production `run_auto_results` evaluation settles Fable rows through its pending_source/row_writer hooks — identical logic, different tab — every 30 min alongside the football check. Closing odds likewise via `run_closing_odds_check`'s hooks (shared daily Odds API request cap).
+- **Calibration:** `fable_calibration.py` computes Fable 5's own Brier score, calibration buckets, edge and CLV — **completely separate from Sonnet's numbers**, same MIN_MEANINGFUL_SAMPLE bar. **Independent calibration timeline starts 12 Jul 2026**; do not merge or compare the two samples until both are meaningful.
+- **Cost control:** Fable 5 is ~$10/$50 per MTok (5-10x Sonnet 4.6). Every call logs `FABLE 5 COST: X input + Y output tokens = $Z` so actual spend is visible in the Railway logs. **Football only — the tennis pipeline has no shadow.**
+- A Fable failure is always non-fatal to the production flow (guarded at every call site).
 
 ## Known Limitations & Future Issues (not yet addressed)
 

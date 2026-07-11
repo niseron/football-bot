@@ -66,17 +66,24 @@ def _in_kickoff_window(kickoff_utc: str, now: datetime) -> bool:
     return _WINDOW_MIN_MINUTES <= minutes_away <= _WINDOW_MAX_MINUTES
 
 
-def run_closing_odds_check() -> None:
+def run_closing_odds_check(*, picks_source=None, odds_writer=None) -> None:
     """
     One poll cycle: find due picks, fetch odds once per competition
     represented among them (batched, not one request per match), write
     Closing Odds for every due pick that finds a market match.
+
+    The hooks default to the production football tab; the Fable 5 shadow
+    experiment passes its own reader/writer so the identical polling logic
+    (incl. the shared daily Odds API request cap) covers 'Fable Picks' rows.
     """
     global _request_count
     _reset_counter_if_new_day()
 
+    picks_source = picks_source or get_unsettled_picks_with_kickoff
+    odds_writer  = odds_writer or update_closing_odds
+
     try:
-        picks = get_unsettled_picks_with_kickoff()
+        picks = picks_source()
     except Exception as exc:
         log.warning("closing_odds: could not read unsettled picks (non-fatal): %s", exc)
         return
@@ -155,7 +162,7 @@ def run_closing_odds_check() -> None:
                 if closing_odds is None:
                     continue
 
-                update_closing_odds(p["sheet_row"], closing_odds)
+                odds_writer(p["sheet_row"], closing_odds)
                 log.info(
                     "closing_odds: wrote %.2f for '%s' | %s (kickoff %s)",
                     closing_odds, match, p.get("pick", ""), p.get("kickoff_utc", ""),

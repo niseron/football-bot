@@ -43,7 +43,7 @@ def _safe_float(val: str) -> float | None:
         return None
 
 
-def _settled_prob_rows() -> list[dict] | None:
+def _settled_prob_rows(ws_getter=_picks_ws) -> list[dict] | None:
     """
     Return settled picks that carry a Claude Prob value, as dicts with:
     claude_prob, market_prob (may be None), result, pnl (may be None),
@@ -51,7 +51,7 @@ def _settled_prob_rows() -> list[dict] | None:
     None on any read failure.
     """
     try:
-        rows = _picks_ws().get_all_values()
+        rows = ws_getter().get_all_values()
     except Exception as exc:
         log.warning("calibration: Sheets read failed: %s", exc)
         return None
@@ -87,7 +87,7 @@ def _settled_prob_rows() -> list[dict] | None:
     return out
 
 
-def calibration_report() -> dict | None:
+def calibration_report(ws_getter=_picks_ws) -> dict | None:
     """
     Bucket settled picks by Claude's stated probability and compare the
     average stated probability against the actual win rate per bucket.
@@ -99,7 +99,7 @@ def calibration_report() -> dict | None:
     Returns {"buckets": [...], "brier_score": float | None,
              "sample_size": int, "meaningful": bool} or None on failure.
     """
-    rows = _settled_prob_rows()
+    rows = _settled_prob_rows(ws_getter)
     if rows is None:
         return None
 
@@ -130,7 +130,7 @@ def calibration_report() -> dict | None:
     }
 
 
-def edge_report() -> dict | None:
+def edge_report(ws_getter=_picks_ws) -> dict | None:
     """
     For settled picks with both Claude Prob and Market Prob:
       - average edge (Claude Prob − Market Prob) for winning vs losing picks
@@ -140,7 +140,7 @@ def edge_report() -> dict | None:
 
     Returns None on failure.
     """
-    rows = _settled_prob_rows()
+    rows = _settled_prob_rows(ws_getter)
     if rows is None:
         return None
 
@@ -179,7 +179,7 @@ _EMPTY_CLV_REPORT: dict = {
 }
 
 
-def clv_report() -> dict | None:
+def clv_report(ws_getter=_picks_ws) -> dict | None:
     """
     Closing Line Value (CLV) — the gold-standard measure of genuine edge,
     independent of whether a pick actually won. For every settled pick with
@@ -198,7 +198,7 @@ def clv_report() -> dict | None:
     so callers can distinguish "nothing to report yet" from "read failed".
     """
     try:
-        rows = _picks_ws().get_all_values()
+        rows = ws_getter().get_all_values()
     except Exception as exc:
         log.warning("clv_report: Sheets read failed: %s", exc)
         return None

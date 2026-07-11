@@ -844,6 +844,16 @@ async def daily_picks_job():
     except Exception as exc:
         log.warning("Instagram picks card failed (non-fatal): %s", exc)
 
+    # Fable 5 shadow — side-by-side model comparison EXPERIMENT on the exact
+    # same enriched fixture pool. Fully non-fatal: a Fable failure can never
+    # affect the production Sonnet picks above. Lazy import avoids a circular
+    # import (fable_shadow imports SYSTEM_PROMPT/claude back from this module).
+    try:
+        from fable_shadow import run_fable_shadow
+        await asyncio.to_thread(run_fable_shadow, fixtures_by_league, kickoff_lookup)
+    except Exception as exc:
+        log.warning("Fable 5 shadow pipeline failed (non-fatal): %s", exc)
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 import gspread
@@ -535,6 +536,146 @@ def _col_letter(col: int) -> str:
     return letters
 
 
+# ── Tennis Summary tab (mirrors football's _refresh_summary) ─────────────────
+
+TENNIS_SUMMARY_SHEET_NAME = "Tennis Summary"
+
+
+def _refresh_tennis_summary() -> None:
+    """Rebuild the 'Tennis Summary' tab from the Tennis Picks rows: overall
+    record, win rate, units P&L, simulated bankroll/ROI, best bet type and
+    confidence level, a per-bet-type breakdown (win-rate-desc, same as
+    football's), plus a tennis-only Rank Tier breakdown."""
+    ss   = _get_spreadsheet()
+    rows = [r for r in ss.worksheet(TENNIS_SHEET_NAME).get_all_values()[1:] if r and r[0]]
+
+    res_col  = TENNIS_HEADERS.index("Result")
+    pnl_col  = TENNIS_HEADERS.index("P&L")
+    bt_col   = TENNIS_HEADERS.index("Bet Type")
+    conf_col = TENNIS_HEADERS.index("Confidence")
+    tier_col = TENNIS_HEADERS.index("Rank Tier")
+    bank_col = TENNIS_HEADERS.index("Bankroll € (SIM)")
+
+    def _cell(row: list, col: int) -> str:
+        return row[col].strip() if len(row) > col else ""
+
+    def _pnl(row: list) -> float:
+        try:
+            return float(row[pnl_col]) if _cell(row, pnl_col) else 0.0
+        except ValueError:
+            return 0.0
+
+    settled = [r for r in rows if _cell(r, res_col) in TENNIS_SETTLED_RESULTS]
+    wins    = [r for r in settled if _cell(r, res_col) == "WIN"]
+    losses  = [r for r in settled if _cell(r, res_col) == "LOSS"]
+    voids   = [r for r in settled if _cell(r, res_col) == "VOID"]
+    pending = [r for r in rows if not _cell(r, res_col)]
+
+    total_pnl_units = round(sum(_pnl(r) for r in settled), 2)
+    full_wr_settled = [r for r in settled if _cell(r, res_col) in ("WIN", "LOSS")]
+    win_rate        = round(len(wins) / len(full_wr_settled) * 100, 1) if full_wr_settled else 0.0
+
+    # Current simulated bankroll = last non-empty 'Bankroll € (SIM)' value
+    current_bankroll = TENNIS_STARTING_BANKROLL
+    for r in reversed(rows):
+        if _cell(r, bank_col):
+            try:
+                current_bankroll = float(r[bank_col])
+                break
+            except ValueError:
+                pass
+    roi = round((current_bankroll - TENNIS_STARTING_BANKROLL) / TENNIS_STARTING_BANKROLL * 100, 1)
+
+    total_pnl_euros = round(total_pnl_units * TENNIS_UNIT_STAKE, 2)
+    pnl_str = f"+EUR {total_pnl_euros:.2f}" if total_pnl_euros >= 0 else f"-EUR {abs(total_pnl_euros):.2f}"
+    roi_str = f"+{roi:.1f}%" if roi >= 0 else f"{roi:.1f}%"
+
+    bt_pnl: dict[str, float] = defaultdict(float)
+    conf_pnl: dict[str, float] = defaultdict(float)
+    for r in settled:
+        bt_pnl[_cell(r, bt_col)] += _pnl(r)
+        conf_pnl[_cell(r, conf_col)] += _pnl(r)
+    best_bt       = max(bt_pnl, key=bt_pnl.get) if bt_pnl else "N/A"
+    best_bt_pnl   = round(bt_pnl.get(best_bt, 0), 2)
+    best_conf     = max(conf_pnl, key=conf_pnl.get) if conf_pnl else "N/A"
+    best_conf_pnl = round(conf_pnl.get(best_conf, 0), 2)
+
+    def _breakdown(col: int, empty_label: str) -> list[list]:
+        """[label, wins, losses, win rate %, P&L, total] rows, win-rate-desc."""
+        groups: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+        for r in settled:
+            if _cell(r, res_col) == "VOID":
+                continue
+            label = _cell(r, col) or empty_label
+            groups[label]["pnl"] += _pnl(r)
+            groups[label]["wins" if _cell(r, res_col) == "WIN" else "losses"] += 1
+        out = []
+        for label, g in groups.items():
+            total = g["wins"] + g["losses"]
+            wr = round(g["wins"] / total * 100, 1) if total else 0.0
+            out.append([label, g["wins"], g["losses"], f"{wr:.1f}%", round(g["pnl"], 2), total])
+        out.sort(key=lambda x: float(x[3].rstrip("%")), reverse=True)
+        return out
+
+    bt_rows   = _breakdown(bt_col, "(unknown)")
+    tier_rows = _breakdown(tier_col, "(untracked)")  # pre-10-Jul rows have no tier
+
+    data = [
+        ["TENNIS PERFORMANCE SUMMARY", ""],
+        ["  (staking SIMULATED — no real money)", ""],
+        ["", ""],
+        ["Total picks",           len(rows)],
+        ["  Wins",                len(wins)],
+        ["  Losses",              len(losses)],
+        ["  Voids",               len(voids)],
+        ["  Pending",             len(pending)],
+        ["", ""],
+        ["Win rate",              f"{win_rate:.1f}%"],
+        ["Total P&L (units)",     total_pnl_units],
+        ["", ""],
+        ["BANKROLL (SIM)", ""],
+        ["  Starting bankroll",   f"EUR {TENNIS_STARTING_BANKROLL:.2f}"],
+        ["  Current bankroll",    f"EUR {current_bankroll:.2f}"],
+        ["  Total profit/loss",   pnl_str],
+        ["  ROI",                 roi_str],
+        ["", ""],
+        ["Best bet type",         best_bt],
+        ["  P&L from this type",  best_bt_pnl],
+        ["", ""],
+        ["Best confidence level", best_conf],
+        ["  P&L from this level", best_conf_pnl],
+        ["", ""],
+        ["BET TYPE BREAKDOWN", "", "", "", "", ""],
+        ["Bet Type", "Wins", "Losses", "Win Rate %", "Total P&L", "Total Picks"],
+    ] + bt_rows + [
+        ["", ""],
+        ["RANK TIER BREAKDOWN", "", "", "", "", ""],
+        ["Rank Tier", "Wins", "Losses", "Win Rate %", "Total P&L", "Total Picks"],
+    ] + tier_rows
+
+    try:
+        ws_sum = ss.worksheet(TENNIS_SUMMARY_SHEET_NAME)
+    except gspread.WorksheetNotFound:
+        ws_sum = ss.add_worksheet(TENNIS_SUMMARY_SHEET_NAME, rows=60, cols=6)
+        log.info("Created '%s' sheet", TENNIS_SUMMARY_SHEET_NAME)
+    ws_sum.clear()
+    ws_sum.update("A1", data, value_input_option="RAW")
+
+
+def finalize_tennis_workbook() -> None:
+    """Recalculate running totals and refresh the Tennis Summary tab —
+    the tennis mirror of football's finalize_workbook(). Call after any
+    result settles (auto or manual); each step is independently guarded."""
+    try:
+        recalculate_tennis_running_totals()
+    except Exception as exc:
+        log.warning("Tennis running totals recalc failed (non-fatal): %s", exc)
+    try:
+        _refresh_tennis_summary()
+    except Exception as exc:
+        log.warning("Tennis Summary refresh failed (non-fatal): %s", exc)
+
+
 # ── Manual result update ──────────────────────────────────────────────────────
 
 def update_tennis_result(match_query: str, pick_query: str, result: str,
@@ -586,10 +727,7 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
             pnl = 0.0
 
     update_tennis_row_result(target_row, result, pnl)
-    try:
-        recalculate_tennis_running_totals()
-    except Exception as exc:
-        log.warning("Tennis running totals recalc failed (non-fatal): %s", exc)
+    finalize_tennis_workbook()
 
     match_name = rows[target_row - 1][1] if len(rows[target_row - 1]) > 1 else "?"
     sign = "+" if pnl >= 0 else ""

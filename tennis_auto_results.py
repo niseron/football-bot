@@ -38,7 +38,7 @@ from tennis_excel_tracker import (
     recalculate_tennis_running_totals,
     update_tennis_row_result,
 )
-from tennis_main import TOURS, _data_list, _tennis_get, player_match
+from tennis_main import TOURS, _data_list, _tennis_get, _tennis_get_paged, player_match
 
 log = logging.getLogger(__name__)
 
@@ -66,18 +66,86 @@ def _format_tennis_result_notification(r: dict) -> str:
 # ── Tennis API fetch ─────────────────────────────────────────────────────────
 
 def _fetch_day_fixtures(tour: str, dt: date) -> list[dict]:
-    """Cached fixtures-by-date for one tour/day (includes finished matches with a result)."""
+    """
+    Cached, PAGINATED fixtures-by-date for one tour/day — the full slate
+    (~130 fixtures / 13 pages on a busy day), used to locate a pick's fixture
+    and its player IDs. This endpoint is schedule-only: it never carries a
+    result field, so settling happens via _find_past_match() below.
+    A finished day's fixture list never changes, so past dates are cached for
+    the process lifetime; only today/future entries expire on the 30-min TTL.
+    """
     key = (tour, dt)
     now = datetime.now()
     if key in _fixtures_cache:
         fetched_at, fixtures = _fixtures_cache[key]
-        if now - fetched_at < _CACHE_TTL:
+        if dt < date.today() or now - fetched_at < _CACHE_TTL:
             return fixtures
     time.sleep(1)
-    fixtures = _data_list(_tennis_get(f"/tennis/v2/{tour}/fixtures/{dt.strftime('%Y-%m-%d')}"))
+    fixtures = _tennis_get_paged(f"/tennis/v2/{tour}/fixtures/{dt.strftime('%Y-%m-%d')}")
     _fixtures_cache[key] = (now, fixtures)
     log.info("  Tennis API: fetched %d %s fixtures for %s", len(fixtures), tour.upper(), dt)
     return fixtures
+
+
+# ── Finished-match record (past-matches endpoint) ────────────────────────────
+
+# Per-run cache — cleared at the start of every run_tennis_auto_results so a
+# long-lived process never serves stale feeds (players add matches daily)
+_past_matches_cache: dict[tuple[str, int], list[dict]] = {}
+
+
+def _fetch_past_matches(tour: str, player_id: int) -> list[dict]:
+    key = (tour, player_id)
+    if key not in _past_matches_cache:
+        time.sleep(1)
+        _past_matches_cache[key] = _data_list(
+            _tennis_get(f"/tennis/v2/{tour}/player/past-matches/{player_id}")
+        )
+    return _past_matches_cache[key]
+
+
+def _find_past_match_by_ids(
+    tour: str, p1_id: int, p2_id: int, date_strs: set[str]
+) -> dict | None:
+    """
+    The finished-match record for a player pair, from either player's
+    past-matches feed. Unlike fixtures-by-date, these entries DO carry
+    'result' ("6-1 6-0", from the entry's own player1 perspective),
+    'match_winner' (winner's player id) and 'result_type' ("completed" /
+    retirement-style values). Matched by both player ids plus the UTC
+    calendar day (date_strs, ISO 'YYYY-MM-DD'), so an earlier meeting
+    between the same players can't be mistaken for this one. Checks the
+    second player's feed as a fallback in case one feed is short or stale.
+    """
+    for pid, opponent in ((p1_id, p2_id), (p2_id, p1_id)):
+        for m in _fetch_past_matches(tour, pid):
+            ids = {m.get("player1Id"), m.get("player2Id")}
+            if pid in ids and opponent in ids and str(m.get("date", ""))[:10] in date_strs:
+                return m
+    return None
+
+
+def _find_past_match(tour: str, fixture: dict) -> dict | None:
+    """Finished-match record for a fixture located in the day's slate."""
+    p1_id  = (fixture.get("player1") or {}).get("id") or fixture.get("player1Id")
+    p2_id  = (fixture.get("player2") or {}).get("id") or fixture.get("player2Id")
+    f_date = str(fixture.get("date", ""))[:10]
+    if not p1_id or not p2_id or not f_date:
+        return None
+    return _find_past_match_by_ids(tour, p1_id, p2_id, {f_date})
+
+
+def _parse_player_ids(ids_str: str) -> tuple[str, int, int] | None:
+    """'atp:4110|32633' -> ('atp', 4110, 32633); None when absent/malformed."""
+    try:
+        tour_part, ids_part = ids_str.split(":", 1)
+        p1_s, p2_s = ids_part.split("|", 1)
+        tour = tour_part.strip().lower()
+        if tour not in TOURS:
+            return None
+        return tour, int(p1_s), int(p2_s)
+    except (ValueError, AttributeError):
+        return None
 
 
 def _candidate_dates(p: dict) -> list[date]:
@@ -242,6 +310,7 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
         return stats, resolved
 
     log.info("Found %d pending tennis pick(s) to check.", len(pending))
+    _past_matches_cache.clear()   # players add matches daily — never serve a stale feed
     now = datetime.now(timezone.utc)
 
     for p in pending:
@@ -267,36 +336,67 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
             except (ValueError, TypeError):
                 pass
 
-        fixture = None
-        for dt in _candidate_dates(p):
-            if dt > date.today() + timedelta(days=1):
+        # Primary path: player ids logged at pick time ('tour:p1|p2') settle
+        # with a single past-matches call per pick — no slate scanning
+        past = None
+        parsed_ids = _parse_player_ids(p.get("player_ids") or "")
+        if parsed_ids is not None:
+            id_tour, pid1, pid2 = parsed_ids
+            date_strs = {d.isoformat() for d in _candidate_dates(p)}
+            past = _find_past_match_by_ids(id_tour, pid1, pid2, date_strs)
+            if past is None:
+                log.info("'%s' — match not finished yet", match)
+                stats["not_finished"] += 1
                 continue
-            for tour in TOURS:
-                try:
-                    fixture = _find_fixture(_fetch_day_fixtures(tour, dt), p1_q, p2_q)
-                except Exception as exc:
-                    log.error("  Tennis API fetch failed for %s/%s: %s", tour, dt, exc)
+        else:
+            # Fallback for rows logged before the 'Player IDs' column existed:
+            # locate the fixture in the day's full paginated slate to recover
+            # the player ids, then resolve via past-matches. (The slate is
+            # schedule-only — it never carries results.)
+            fixture    = None
+            found_tour = None
+            for dt in _candidate_dates(p):
+                if dt > date.today() + timedelta(days=1):
                     continue
+                for tour in TOURS:
+                    try:
+                        fixture = _find_fixture(_fetch_day_fixtures(tour, dt), p1_q, p2_q)
+                    except Exception as exc:
+                        log.error("  Tennis API fetch failed for %s/%s: %s", tour, dt, exc)
+                        continue
+                    if fixture:
+                        found_tour = tour
+                        break
                 if fixture:
                     break
-            if fixture:
-                break
 
-        if fixture is None:
-            log.info("'%s' — not found in Tennis API yet", match)
-            stats["no_match"] += 1
-            continue
+            if fixture is None:
+                log.info("'%s' — not found in Tennis API yet", match)
+                stats["no_match"] += 1
+                continue
 
-        result_str = (fixture.get("result") or "").strip()
-        if not result_str:
+            past = _find_past_match(found_tour, fixture)
+            if past is None:
+                log.info("'%s' — match not finished yet", match)
+                stats["not_finished"] += 1
+                continue
+
+        result_str  = (past.get("result") or "").strip()
+        result_type = str(past.get("result_type") or "").strip().lower()
+        # Names from the past-match entry itself — its result string is from
+        # the ENTRY's player1 perspective, which may be flipped vs the fixture
+        p1_name = (past.get("player1") or {}).get("name", p1_q)
+        p2_name = (past.get("player2") or {}).get("name", p2_q)
+
+        if result_type and result_type != "completed":
+            # Retirement / walkover / abandoned — settles VOID by design
+            result = "VOID"
+        elif not result_str:
             log.info("'%s' — match not finished yet", match)
             stats["not_finished"] += 1
             continue
-
-        p1_name = (fixture.get("player1") or {}).get("name", p1_q)
-        p2_name = (fixture.get("player2") or {}).get("name", p2_q)
-
-        result = evaluate_tennis_pick(p["bet_type"], p["pick"], p1_name, p2_name, result_str)
+        else:
+            result = evaluate_tennis_pick(p["bet_type"], p["pick"], p1_name, p2_name, result_str)
 
         if result == "PENDING":
             log.warning("Could not evaluate tennis bet_type='%s' pick='%s' result='%s'",
@@ -315,7 +415,10 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
         update_tennis_row_result(p["sheet_row"], result, pnl)
         stats["updated"] += 1
 
-        score_desc = _score_description(p1_name, p2_name, result_str)
+        if result_type and result_type != "completed":
+            score_desc = f"{result_str or '(no score)'} ({result_type} — settled VOID)"
+        else:
+            score_desc = _score_description(p1_name, p2_name, result_str)
         log.info("%s [%s→%s]  %s  P&L %+.2f", match, p["pick"], result, result_str, pnl)
 
         resolved.append({

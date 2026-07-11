@@ -31,6 +31,8 @@ TENNIS_HEADERS = [
     "Stake € (SIM)",     # simulated half-Kelly stake — no real money on tennis yet
     "Running P&L (u)",   # cumulative settled P&L in units, mirrors football col I
     "Bankroll € (SIM)",  # simulated running bankroll, mirrors football col J
+    "Player IDs",        # internal: 'tour:p1Id|p2Id' — lets auto-results settle via
+                         # one past-matches call instead of scanning the day's slate
 ]
 
 # ── Simulated bankroll & staking (STAGED: no real money on tennis yet) ────────
@@ -204,6 +206,7 @@ def log_tennis_pick(
     start_time_utc: str | None = None,
     rank_tier: str | None = None,
     stake_eur: float | None = None,
+    player_ids: str | None = None,
 ) -> None:
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
     date_str = dt.strftime("%d-%b-%Y")
@@ -245,6 +248,7 @@ def log_tennis_pick(
         f"{stake_eur:.2f} SIM" if stake_eur is not None else "",
         "",  # Running P&L (u) — recalculated when results settle
         "",  # Bankroll € (SIM) — recalculated when results settle
+        player_ids or "",  # 'tour:p1Id|p2Id' for direct past-matches settling
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
@@ -290,6 +294,7 @@ def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
     cutoff = date.today() - timedelta(days=lookback_days)
     result_col = TENNIS_HEADERS.index("Result")
     start_col  = TENNIS_HEADERS.index("Kickoff/Start Time")
+    ids_col    = TENNIS_HEADERS.index("Player IDs")
     pending = []
     for i, row in enumerate(rows[1:], start=2):
         if not row or not row[0]:
@@ -303,13 +308,14 @@ def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
         if pick_date < cutoff:
             continue
         pending.append({
-            "sheet_row": i,
-            "date":      pick_date,
-            "match":     row[1] if len(row) > 1 else "",
-            "bet_type":  row[2] if len(row) > 2 else "",
-            "pick":      row[3] if len(row) > 3 else "",
-            "odds":      float(row[4]) if len(row) > 4 and row[4] else 1.0,
-            "start_utc": row[start_col] if len(row) > start_col else "",
+            "sheet_row":  i,
+            "date":       pick_date,
+            "match":      row[1] if len(row) > 1 else "",
+            "bet_type":   row[2] if len(row) > 2 else "",
+            "pick":       row[3] if len(row) > 3 else "",
+            "odds":       float(row[4]) if len(row) > 4 and row[4] else 1.0,
+            "start_utc":  row[start_col] if len(row) > start_col else "",
+            "player_ids": row[ids_col] if len(row) > ids_col else "",
         })
     return pending
 

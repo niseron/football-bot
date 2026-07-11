@@ -112,6 +112,37 @@ def _data_list(js: dict | list | None) -> list:
     return js
 
 
+def _tennis_get_paged(path: str, max_pages: int = 30) -> list:
+    """
+    All items from a paginated tennis endpoint. The fixtures-by-date endpoint
+    returns {"data": [10 items], "hasNextPage": true} — a busy day runs to
+    25+ pages (250+ fixtures incl. qualifying/juniors), so reading only
+    page 1 silently drops >90% of the slate (the bug that hid most picks
+    from the results checker until 11 Jul 2026). Follows pages until
+    hasNextPage is falsy or max_pages. A failed page gets one retry after a
+    short pause (transient RapidAPI throttling was observed truncating a
+    whole day to zero mid-run); a second failure stops with a warning so a
+    partial slate is still returned.
+    """
+    items: list = []
+    page = 1
+    while page <= max_pages:
+        js = _tennis_get(path, params={"page": page})
+        if js is None:
+            time.sleep(2)
+            js = _tennis_get(path, params={"page": page})
+            if js is None:
+                log.warning("tennis API page fetch failed twice — %s page %d "
+                            "(returning %d items so far)", path, page, len(items))
+                break
+        items.extend(_data_list(js))
+        if not (isinstance(js, dict) and js.get("hasNextPage")):
+            break
+        page += 1
+        time.sleep(0.5)
+    return items
+
+
 def _is_singles(fixture: dict) -> bool:
     """Doubles fixtures carry paired names ('A. Krajicek/H. Patten') — skip them."""
     p1 = (fixture.get("player1") or {}).get("name", "")
@@ -160,10 +191,33 @@ def _fixture_tier(r1: int | None, r2: int | None) -> str:
     return TENNIS_TOP_TIER_LABEL if both_top else TENNIS_LOWER_TIER_LABEL
 
 
+def _tier_priority(tier: str) -> int:
+    """Sort key for tournament importance — lower is better. Real tier strings
+    from the API: 'Grand Slam', 'ATP 250', 'WTA 1000', 'Challenger 125',
+    'Challenger 75', 'WTA 125', 'ITF Event', 'Future'."""
+    t = (tier or "").strip().lower()
+    if "grand slam" in t:
+        return 0
+    if "1000" in t or "masters" in t or "finals" in t:
+        return 1
+    if "500" in t:
+        return 2
+    if "250" in t:
+        return 3
+    if "125" in t:
+        return 4
+    if "challenger" in t:
+        return 5
+    if "itf" in t or "future" in t:
+        return 7
+    return 6  # unknown — above ITF, below anything recognised
+
+
 def fetch_upcoming_tennis_matches() -> dict[str, list[dict]]:
     """
     Fetch upcoming ATP and WTA singles fixtures for the next 48 hours
     (today + tomorrow UTC). Returns {"ATP": [fixtures], "WTA": [fixtures]}.
+    The full paginated slate is fetched, then capped tier-first (see below).
     """
     now = datetime.now(timezone.utc)
     result: dict[str, list[dict]] = {}
@@ -174,7 +228,8 @@ def fetch_upcoming_tennis_matches() -> dict[str, list[dict]]:
             if offset > 0 or tour != TOURS[0]:
                 time.sleep(1)
             date_str = (now + timedelta(days=offset)).strftime("%Y-%m-%d")
-            day = _data_list(_tennis_get(f"/tennis/v2/{tour}/fixtures/{date_str}"))
+            # Paginated: the full day's slate, not just the first 10 fixtures
+            day = _tennis_get_paged(f"/tennis/v2/{tour}/fixtures/{date_str}")
             log.info("Tennis API: fetched %d %s fixtures for %s", len(day), tour.upper(), date_str)
             fixtures.extend(day)
 
@@ -189,9 +244,18 @@ def fetch_upcoming_tennis_matches() -> dict[str, list[dict]]:
                 continue
             upcoming.append(f)
 
-        upcoming.sort(key=lambda f: f.get("date", ""))
+        # Tier-aware cap: the paginated slate is ~200+ fixtures/day, and a
+        # plain soonest-first cap fills every slot with early-starting ITF
+        # Futures matches while Grand Slam / tour-level fixtures drop out
+        # (observed 11 Jul 2026: 20/25 slots went to M15/W15 Rancho Santa Fe
+        # and Wimbledon vanished). Sort by tournament tier, then start time.
+        for f in upcoming:
+            info = _fetch_tournament_info(tour, f.get("tournamentId"))
+            f["_tier_prio"] = _tier_priority(info.get("tier", ""))
+        upcoming.sort(key=lambda f: (f["_tier_prio"], f.get("date", "")))
         if len(upcoming) > MAX_FIXTURES_PER_TOUR:
-            log.info("Capping %s fixtures %d → %d", tour.upper(), len(upcoming), MAX_FIXTURES_PER_TOUR)
+            log.info("Capping %s fixtures %d → %d (tier-first)",
+                     tour.upper(), len(upcoming), MAX_FIXTURES_PER_TOUR)
             upcoming = upcoming[:MAX_FIXTURES_PER_TOUR]
 
         # Rankings live on the player profile endpoint, not in fixture data
@@ -772,6 +836,20 @@ def _tier_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
     return lookup
 
 
+def _ids_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
+    """Map '<Player 1> vs <Player 2>' -> 'tour:p1Id|p2Id' for the Sheet's
+    'Player IDs' column. Auto-results uses it to settle each pick with a
+    single past-matches call instead of re-scanning the day's full slate."""
+    lookup: dict[str, str] = {}
+    for tour_label, fixtures in fixtures_by_tour.items():
+        tour = tour_label.lower()
+        for f in fixtures:
+            p1_id, p2_id = f.get("player1_id"), f.get("player2_id")
+            if p1_id and p2_id:
+                lookup[f"{f['player1']} vs {f['player2']}"] = f"{tour}:{p1_id}|{p2_id}"
+    return lookup
+
+
 async def daily_tennis_picks_job():
     log.info("Starting daily tennis picks job")
 
@@ -819,11 +897,13 @@ async def daily_tennis_picks_job():
     try:
         rank_lookup = _rank_lookup(fixtures_by_tour)
         tier_lookup = _tier_lookup(fixtures_by_tour)
+        ids_lookup  = _ids_lookup(fixtures_by_tour)
         for pick in picks:
             match = pick.get("match", "")
             pick["ranks"] = rank_lookup.get(match, "")
             # Unmatched picks default to the lower tier — never dropped
-            pick["rank_tier"] = tier_lookup.get(match, TENNIS_LOWER_TIER_LABEL)
+            pick["rank_tier"]  = tier_lookup.get(match, TENNIS_LOWER_TIER_LABEL)
+            pick["player_ids"] = ids_lookup.get(match, "")
     except Exception as exc:
         log.warning("Tennis rank/tier lookup build failed (non-fatal): %s", exc)
 
@@ -863,6 +943,7 @@ async def daily_tennis_picks_job():
                 start_time_utc=start_lookup.get(pick["match"], ""),
                 rank_tier=pick.get("rank_tier", TENNIS_LOWER_TIER_LABEL),
                 stake_eur=kelly.get("stake"),
+                player_ids=pick.get("player_ids") or None,
             )
         except Exception as exc:
             log.warning("Failed to log tennis pick: %s", exc)

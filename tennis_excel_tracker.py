@@ -28,7 +28,20 @@ TENNIS_HEADERS = [
     "Claude Prob %", "Market Prob %",
     "Kickoff/Start Time", "Closing Odds",
     "Rank Tier",  # 'Top 150' / 'Lower Ranked' — for per-tier calibration later
+    "Stake € (SIM)",     # simulated half-Kelly stake — no real money on tennis yet
+    "Running P&L (u)",   # cumulative settled P&L in units, mirrors football col I
+    "Bankroll € (SIM)",  # simulated running bankroll, mirrors football col J
 ]
+
+# ── Simulated bankroll & staking (STAGED: no real money on tennis yet) ────────
+# Tennis stakes are sized and tracked exactly like football's real-money Kelly
+# flow, but SIMULATED — every stake is tagged 'SIM' in the sheet and the
+# Discord embeds until the pipeline is trusted enough to go live. This is a
+# fresh, fully independent bankroll: football's REAL_BANKROLL (€1500) is never
+# touched by tennis, and vice versa.
+TENNIS_REAL_BANKROLL     = 100.0  # € simulated bankroll used for Kelly sizing
+TENNIS_STARTING_BANKROLL = 100.0  # € start of the running bankroll column
+TENNIS_UNIT_STAKE        = 2.0    # € per unit — flat fallback stake (2% of bankroll)
 
 # Tennis results have no half outcomes (no quarter-line handicaps in games)
 TENNIS_SETTLED_RESULTS: frozenset[str] = frozenset(["WIN", "LOSS", "VOID"])
@@ -190,6 +203,7 @@ def log_tennis_pick(
     market_prob: float | None = None,
     start_time_utc: str | None = None,
     rank_tier: str | None = None,
+    stake_eur: float | None = None,
 ) -> None:
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
     date_str = dt.strftime("%d-%b-%Y")
@@ -227,6 +241,10 @@ def log_tennis_pick(
         start_time_utc or "",
         "",  # Closing Odds — populated later by the tennis closing-odds job, if at all
         rank_tier or "",
+        # 'SIM' tag on the stake marks it as simulated — no real money on tennis yet
+        f"{stake_eur:.2f} SIM" if stake_eur is not None else "",
+        "",  # Running P&L (u) — recalculated when results settle
+        "",  # Bankroll € (SIM) — recalculated when results settle
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
@@ -367,6 +385,150 @@ def update_tennis_closing_odds(sheet_row: int, closing_odds: float) -> None:
         log.error("Tennis Sheets update_tennis_closing_odds failed (row %d): %s", sheet_row, exc)
 
 
+# ── Simulated Kelly staking (mirrors football's calculate_kelly_stake) ────────
+
+def get_tennis_bet_type_breakdown() -> list[dict]:
+    """Per-bet-type record from settled Tennis Picks rows:
+    [{"bet_type", "wins", "losses", "win_rate", "total"}, ...]."""
+    try:
+        rows = _tennis_ws().get_all_values()
+    except Exception as exc:
+        log.error("Tennis Sheets read failed: %s", exc)
+        return []
+
+    result_col = TENNIS_HEADERS.index("Result")
+    bt_col     = TENNIS_HEADERS.index("Bet Type")
+    groups: dict[str, dict] = {}
+    for row in rows[1:]:
+        if len(row) <= result_col or row[result_col] not in ("WIN", "LOSS"):
+            continue
+        bt = row[bt_col].strip()
+        g  = groups.setdefault(bt, {"wins": 0, "losses": 0})
+        g["wins" if row[result_col] == "WIN" else "losses"] += 1
+
+    breakdown = []
+    for bt, g in groups.items():
+        total = g["wins"] + g["losses"]
+        breakdown.append({
+            "bet_type": bt,
+            "wins":     g["wins"],
+            "losses":   g["losses"],
+            "win_rate": round(g["wins"] / total * 100, 1) if total else 0.0,
+            "total":    total,
+        })
+    return breakdown
+
+
+def calculate_tennis_kelly_stake(bet_type: str, odds: float, confidence: str) -> dict:
+    """
+    Return {"stake": euros, "note": str} — same half-Kelly / 5%-cap logic as
+    football's calculate_kelly_stake, sized against TENNIS_REAL_BANKROLL
+    (€100, independent of football's €1500). Stakes are SIMULATED for now:
+    tennis hasn't been validated with real bets, so every stake carries a
+    'SIM' tag downstream (sheet + embeds) until the pipeline goes live.
+    Flat TENNIS_UNIT_STAKE with note="insufficient data" below 10 settled
+    picks for the bet type.
+    """
+    breakdown = get_tennis_bet_type_breakdown()
+    record = next(
+        (b for b in breakdown if b["bet_type"].strip().lower() == bet_type.strip().lower()),
+        None,
+    )
+
+    if record is None or record["total"] < 10:
+        count = record["total"] if record else 0
+        return {"stake": TENNIS_UNIT_STAKE, "note": f"insufficient data ({count} settled picks)"}
+
+    win_rate = record["win_rate"] / 100.0
+    kelly = (win_rate * (odds - 1) - (1 - win_rate)) / (odds - 1)
+
+    if kelly <= 0:
+        return {"stake": 0.0, "note": "negative edge"}
+
+    fraction = min(kelly * 0.5, 0.05)  # half-Kelly, capped at 5% of bankroll
+    stake = round(fraction * TENNIS_REAL_BANKROLL, 2)
+    return {"stake": stake, "note": ""}
+
+
+# ── Recalculate running P&L + simulated bankroll ──────────────────────────────
+
+_LIGHT_GREEN = _rgb("#e8f5e9")
+_LIGHT_RED   = _rgb("#ffebee")
+
+
+def recalculate_tennis_running_totals() -> None:
+    """Rebuild the 'Running P&L (u)' and 'Bankroll € (SIM)' columns from the
+    settled rows, top to bottom — the same way football's
+    _recalculate_running_total maintains its cols I/J. Bankroll is the
+    simulated €100 start plus settled units × TENNIS_UNIT_STAKE."""
+    try:
+        ws = _tennis_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Tennis running totals: Sheets read failed: %s", exc)
+        return
+
+    result_col = TENNIS_HEADERS.index("Result")
+    pnl_col    = TENNIS_HEADERS.index("P&L")
+    run_col    = TENNIS_HEADERS.index("Running P&L (u)") + 1   # 1-based
+    bank_col   = TENNIS_HEADERS.index("Bankroll € (SIM)") + 1
+    run_a1, bank_a1 = _col_letter(run_col), _col_letter(bank_col)
+
+    running_units = 0.0
+    bankroll      = TENNIS_STARTING_BANKROLL
+    updates  = []
+    fmt_reqs = []
+    ws_id    = ws.id
+    for i, row in enumerate(rows[1:], start=2):
+        result  = row[result_col] if len(row) > result_col else ""
+        pnl_str = row[pnl_col] if len(row) > pnl_col else ""
+        if result in TENNIS_SETTLED_RESULTS and pnl_str:
+            try:
+                pnl_units      = float(pnl_str)
+                running_units += pnl_units
+                bankroll      += pnl_units * TENNIS_UNIT_STAKE
+                updates.append({"range": f"{run_a1}{i}", "values": [[round(running_units, 2)]]})
+                updates.append({"range": f"{bank_a1}{i}", "values": [[round(bankroll, 2)]]})
+                fmt_reqs.append({
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": ws_id,
+                            "startRowIndex": i - 1, "endRowIndex": i,
+                            "startColumnIndex": bank_col - 1, "endColumnIndex": bank_col,
+                        },
+                        "cell": {"userEnteredFormat": {
+                            "backgroundColor": _LIGHT_GREEN if bankroll >= TENNIS_STARTING_BANKROLL else _LIGHT_RED,
+                        }},
+                        "fields": "userEnteredFormat(backgroundColor)",
+                    }
+                })
+                continue
+            except ValueError:
+                pass
+        updates.append({"range": f"{run_a1}{i}", "values": [[""]]})
+        updates.append({"range": f"{bank_a1}{i}", "values": [[""]]})
+    if updates:
+        try:
+            ws.batch_update(updates)
+        except Exception as exc:
+            log.error("Tennis running totals: batch update failed: %s", exc)
+            return
+    if fmt_reqs:
+        try:
+            ws.spreadsheet.batch_update({"requests": fmt_reqs})
+        except Exception as exc:
+            log.warning("Tennis bankroll formatting failed (non-fatal): %s", exc)
+
+
+def _col_letter(col: int) -> str:
+    """1-based column number -> A1 letter(s)."""
+    letters = ""
+    while col:
+        col, rem = divmod(col - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
 # ── Manual result update ──────────────────────────────────────────────────────
 
 def update_tennis_result(match_query: str, pick_query: str, result: str,
@@ -418,6 +580,10 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
             pnl = 0.0
 
     update_tennis_row_result(target_row, result, pnl)
+    try:
+        recalculate_tennis_running_totals()
+    except Exception as exc:
+        log.warning("Tennis running totals recalc failed (non-fatal): %s", exc)
 
     match_name = rows[target_row - 1][1] if len(rows[target_row - 1]) > 1 else "?"
     sign = "+" if pnl >= 0 else ""

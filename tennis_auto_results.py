@@ -33,7 +33,11 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 
-from tennis_excel_tracker import get_pending_tennis_picks, update_tennis_row_result
+from tennis_excel_tracker import (
+    get_pending_tennis_picks,
+    recalculate_tennis_running_totals,
+    update_tennis_row_result,
+)
 from tennis_main import TOURS, _data_list, _tennis_get, player_match
 
 log = logging.getLogger(__name__)
@@ -326,6 +330,12 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
 
     if stats["updated"]:
         log.info("Tennis Picks sheet updated — %d row(s) written.", stats["updated"])
+        # Rebuild the running P&L / simulated bankroll columns once per run —
+        # mirrors football's finalize_workbook() call after settling
+        try:
+            recalculate_tennis_running_totals()
+        except Exception as exc:
+            log.warning("Tennis running totals recalc failed (non-fatal): %s", exc)
     else:
         log.info("No tennis changes.")
 

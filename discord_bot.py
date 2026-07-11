@@ -107,6 +107,12 @@ def build_pick_embed(pick: dict, context: str | None = None) -> dict:
             {"name": "Confidence", "value": confidence, "inline": True},
         ],
     }
+    # Optional pre-formatted stake line (tennis sets 'stake_display' with its
+    # SIM tag — simulated Kelly stakes; football embeds carry no stake field)
+    if pick.get("stake_display"):
+        embed["fields"].append(
+            {"name": "Stake", "value": str(pick["stake_display"]), "inline": True}
+        )
     if context:
         embed["author"] = {"name": context[:256]}
     if pick.get("value"):

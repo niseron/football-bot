@@ -39,7 +39,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from card_generator import generate_tennis_picks_card
 from discord_bot import build_pick_embed, send_to_discord
 from env_loader import load_env
-from tennis_excel_tracker import log_tennis_pick, tennis_picks_exist_for_today
+from tennis_excel_tracker import (
+    calculate_tennis_kelly_stake,
+    log_tennis_pick,
+    tennis_picks_exist_for_today,
+)
 
 load_env()
 
@@ -828,9 +832,26 @@ async def daily_tennis_picks_job():
     except Exception as exc:
         log.warning("Tennis real odds enrichment failed — Claude odds only: %s", exc)
 
+    # SIMULATED Kelly staking — same half-Kelly/5%-cap logic as football, but
+    # sized against the independent €100 TENNIS_REAL_BANKROLL and tagged SIM
+    # everywhere (no real money on tennis until the pipeline is trusted)
+    try:
+        for pick in picks:
+            kelly = calculate_tennis_kelly_stake(
+                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+            )
+            pick["kelly"] = kelly
+            stake = float(kelly.get("stake") or 0)
+            pick["stake_display"] = (
+                f"€{stake:.2f} · SIM" if stake > 0 else "€0 — negative edge · SIM"
+            )
+    except Exception as exc:
+        log.warning("Tennis Kelly stake calculation failed (picks send without it): %s", exc)
+
     for pick in picks:
         try:
             claude_prob = pick.get("probability")
+            kelly = pick.get("kelly") or {}
             log_tennis_pick(
                 match=pick["match"],
                 bet_type=pick["bet_type"],
@@ -841,6 +862,7 @@ async def daily_tennis_picks_job():
                 market_prob=pick.get("market_prob"),
                 start_time_utc=start_lookup.get(pick["match"], ""),
                 rank_tier=pick.get("rank_tier", TENNIS_LOWER_TIER_LABEL),
+                stake_eur=kelly.get("stake"),
             )
         except Exception as exc:
             log.warning("Failed to log tennis pick: %s", exc)

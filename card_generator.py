@@ -299,6 +299,17 @@ def _ig_pick_priority(p: dict) -> int:
     return 3
 
 
+def _ig_conf_tag(p: dict) -> str:
+    """Top-right tag text for an IG pick. A value-flagged Low pick says so:
+    the VALUE flag is the only reason a Low pick can outrank HIGH ones (see
+    _ig_pick_priority), and the IG card shows no other value indicator, so a
+    bare [LOW] above a HIGH pick would look like a mistake."""
+    conf = (p.get("confidence") or "").strip()
+    if conf.lower() == "low" and p.get("value"):
+        return "[LOW · VALUE]"
+    return f"[{conf.upper()}]"
+
+
 def generate_picks_card_ig(
     picks: list[dict],
     card_date: date | None = None,
@@ -309,8 +320,10 @@ def generate_picks_card_ig(
     confidence, then MEDIUM (a stable sort — ties keep their original order,
     and lower-priority picks still fill remaining slots if fewer than 3
     VALUE/HIGH/MEDIUM picks exist). Rendering matches generate_picks_card()
-    (confidence tag top-right, "[VALUE]" suffix on the odds line) so the two
-    variants look like the same brand.
+    (confidence tag top-right) so the two variants look like the same brand,
+    except the odds line stays plain (no Claude/Mkt comparison) and a
+    value-flagged Low pick is tagged "[LOW · VALUE]" so viewers can see why
+    it outranks HIGH picks.
 
     Font sizes shrink in small steps (never below 70% of the base size) if 3
     picks would overflow 1350px — e.g. long match names or bet descriptions
@@ -323,7 +336,6 @@ def generate_picks_card_ig(
 
     shown  = sorted(picks, key=_ig_pick_priority)[:3]
     text_w = IW - 90
-    tag_w  = 240
 
     base_sizes = {"num": 56, "match": 80, "sub": 60, "stat": 64, "conf": 44}
     header_h   = PAD + 14 + _th(_font(52)) + 22 + _th(_font(36)) + 32 + 32
@@ -336,13 +348,21 @@ def generate_picks_card_ig(
         f_stat  = _font(sz["stat"])
         f_conf  = _font(sz["conf"], bold=True)
 
-        def _match_lines(name: str) -> list[str]:
-            if _tw(name, f_match) <= text_w - tag_w:
+        def _match_lines(p: dict) -> list[str]:
+            # Only the first line shares its row with the top-right tag, so the
+            # reserve is the tag's measured width (tags vary: "[HIGH]" vs
+            # "[LOW · VALUE]") plus a gap — not a fixed constant.
+            name  = p.get("match", "")
+            avail = text_w - (_tw(_ig_conf_tag(p), f_conf) + 24)
+            if _tw(name, f_match) <= avail:
                 return [name]
             if " vs " in name:
                 home, away = name.split(" vs ", 1)
-                return [_clip(f"{home} vs", f_match, text_w - tag_w), _clip(away, f_match, text_w)]
-            return [_clip(name, f_match, text_w - tag_w)]
+                first = f"{home} vs"
+                if _tw(first, f_match) <= avail:
+                    return [first, _clip(away, f_match, text_w)]
+                return [_clip(home, f_match, avail), _clip(f"vs {away}", f_match, text_w)]
+            return [_clip(name, f_match, avail)]
 
         def _bet_lines(p: dict) -> list[str]:
             bet = f"{p.get('bet_type', '')} · {p.get('pick', '')}"
@@ -352,7 +372,7 @@ def generate_picks_card_ig(
                     _clip(str(p.get("pick", "")), f_sub, text_w)]
 
         def _block_h(p: dict) -> int:
-            nm = len(_match_lines(p.get("match", "")))
+            nm = len(_match_lines(p))
             nb = len(_bet_lines(p))
             return (nm * _th(f_match) + (nm - 1) * 6 + 7
                     + nb * _th(f_sub) + (nb - 1) * 6 + 5 + _th(f_stat) + 18)
@@ -377,16 +397,15 @@ def generate_picks_card_ig(
     y = _draw_header(d, datstr)
 
     for i, p in enumerate(shown, 1):
-        conf     = p.get("confidence", "")
-        conf_tag = f"[{conf.upper()}]"
-        conf_col = _conf_color(conf)
+        conf_tag = _ig_conf_tag(p)
+        conf_col = _conf_color(p.get("confidence", ""))
 
         d.text((PAD, y + 6), str(i), font=f_num, fill=_NEON)
         x0 = PAD + 90
 
         d.text((SIZE - PAD - _tw(conf_tag, f_conf), y + 16),
                conf_tag, font=f_conf, fill=conf_col)
-        for line in _match_lines(p.get("match", "")):
+        for line in _match_lines(p):
             d.text((x0, y), line, font=f_match, fill=_WHITE)
             y += _th(f_match) + 6
         y += 1

@@ -165,6 +165,25 @@ def _pnl_str(v: float) -> str:
     return f"+{v:.2f}u" if v >= 0 else f"{v:.2f}u"
 
 
+def _stat_line(p: dict, max_w: int) -> tuple[str, ImageFont.FreeTypeFont]:
+    """Odds-line text plus a font stepped down until the whole line fits
+    max_w. 'Claude 1.85 · Mkt 1.93 [VALUE]' is wider than the column at the
+    base 64px, and clipping used to eat the market digits and the [VALUE]
+    flag — the one thing the line exists to show."""
+    market_odds = p.get("market_odds")
+    if market_odds is not None:
+        stat = f"Claude {p.get('odds', '')} · Mkt {market_odds}"
+        if p.get("value"):
+            stat += " [VALUE]"
+    else:
+        stat = f"Odds {p.get('odds', '')}"
+    for sz in (64, 58, 52, 48, 44):
+        f = _font(sz)
+        if _tw(stat, f) <= max_w:
+            return stat, f
+    return _clip(stat, f, max_w), f
+
+
 def _conf_color(conf: str) -> tuple:
     # Low matches the Discord embed stripe orange (0xFF6F00) — before this it
     # fell through to _LOSS red, which reads as "pick already lost". Unknown
@@ -196,7 +215,6 @@ def generate_picks_card(
     f_num   = _font(56, bold=True)
     f_match = _font(80, bold=True)
     f_sub   = _font(60)
-    f_stat  = _font(64)
     f_conf  = _font(44, bold=True)
 
     shown  = picks[:5]
@@ -226,7 +244,8 @@ def generate_picks_card(
         nm = len(_match_lines(p.get("match", "")))
         nb = len(_bet_lines(p))
         return (nm * _th(f_match) + (nm - 1) * 6 + 10
-                + nb * _th(f_sub) + (nb - 1) * 6 + 8 + _th(f_stat) + 30)
+                + nb * _th(f_sub) + (nb - 1) * 6 + 8
+                + _th(_stat_line(p, text_w)[1]) + 30)
     canvas_h = header_h + sum(_block_h(p) for p in shown) + max(len(shown) - 1, 0) * 22 + PAD
 
     img, d = _canvas(canvas_h)
@@ -260,16 +279,9 @@ def generate_picks_card(
         y += 8
 
         # Odds — Claude estimate, plus real market odds/value tag when available
-        market_odds = p.get("market_odds")
-        if market_odds is not None:
-            stat = f"Claude {p.get('odds', '')} · Mkt {market_odds}"
-            if p.get("value"):
-                stat += " [VALUE]"
-        else:
-            stat = f"Odds {p.get('odds', '')}"
-        stat = _clip(stat, f_stat, text_w)
-        d.text((x0, y), stat, font=f_stat, fill=_NEON)
-        y += _th(f_stat) + 30
+        stat, f_stat_fit = _stat_line(p, text_w)
+        d.text((x0, y), stat, font=f_stat_fit, fill=_NEON)
+        y += _th(f_stat_fit) + 30
 
         if i < len(shown):
             _sep(d, y, x0=x0)
@@ -429,6 +441,137 @@ def generate_picks_card_ig(
             y += 16
 
     out = CARDS_DIR / f"picks_ig_{today.strftime('%Y-%m-%d')}.png"
+    img.save(out, "PNG")
+    return out
+
+
+# ── Card 1c: Tennis daily picks (Discord 'tennis-picks' channel) ──────────────
+
+def generate_tennis_picks_card(
+    picks: list[dict],
+    card_date: date | None = None,
+) -> Path:
+    """
+    Tennis variant of generate_picks_card: same brand (dark neon grid, corner
+    brackets, THEPICKSAI header, confidence tag colours incl. Low orange,
+    Claude/Mkt odds line with the [VALUE] suffix), but each pick carries a
+    tennis context line — tour · tournament · surface · ranks ('#1 vs #3') —
+    instead of a league. Up to 5 picks; the canvas height fits the content.
+    Fonts come from _font(), which tries the bundled fonts/ TTFs first, so
+    Railway (Linux) renders identically to local Windows.
+    """
+    CARDS_DIR.mkdir(parents=True, exist_ok=True)
+    today  = card_date or date.today()
+    datstr = today.strftime("%d %b %Y").upper()
+
+    f_num   = _font(56, bold=True)
+    f_match = _font(64, bold=True)   # smaller than football's 80: player names run long
+    f_ctx   = _font(40)
+    f_sub   = _font(60)
+    f_conf  = _font(44, bold=True)
+
+    shown  = picks[:5]
+    text_w = IW - 90
+
+    def _match_lines(p: dict) -> list[str]:
+        # Word-wrap rather than ellipsis-clip: tennis names ('Federico
+        # Agustin Gomez') are far longer than football team names, and
+        # clipping loses whole surnames. Only the first line shares its row
+        # with the top-right tag, so it alone reserves the tag's width.
+        # Max 3 lines; only a pathological name gets clipped on the last.
+        name  = p.get("match", "")
+        avail = text_w - (_tw(f"[{(p.get('confidence') or '').upper()}]", f_conf) + 24)
+        lines: list[str] = []
+        cur = ""
+        for w in name.split():
+            trial = f"{cur} {w}".strip()
+            if _tw(trial, f_match) <= (avail if not lines else text_w):
+                cur = trial
+            else:
+                if cur:
+                    lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        if len(lines) > 3:
+            lines = lines[:2] + [" ".join(lines[2:])]
+        return [_clip(l, f_match, avail if i == 0 else text_w)
+                for i, l in enumerate(lines)] or [""]
+
+    def _ctx_lines(p: dict) -> list[str]:
+        # 'ATP · Wimbledon - London · Grass · #1 vs #3'; when too long the
+        # ranks drop to their own line rather than being clipped away.
+        main  = " · ".join(str(p[k]) for k in ("tour", "tournament", "surface") if p.get(k))
+        ranks = str(p.get("ranks") or "")
+        joined = f"{main} · {ranks}" if main and ranks else (main or ranks)
+        if not joined:
+            return []
+        if _tw(joined, f_ctx) <= text_w:
+            return [joined]
+        if main and ranks:
+            return [_clip(main, f_ctx, text_w), ranks]
+        return [_clip(joined, f_ctx, text_w)]
+
+    def _bet_lines(p: dict) -> list[str]:
+        bet = f"{p.get('bet_type', '')} · {p.get('pick', '')}"
+        if _tw(bet, f_sub) <= text_w:
+            return [bet]
+        return [_clip(f"{p.get('bet_type', '')} ·", f_sub, text_w),
+                _clip(str(p.get("pick", "")), f_sub, text_w)]
+
+    # Size the canvas to the content — mirrors the draw loop increments below
+    header_h = PAD + 14 + _th(_font(52)) + 22 + _th(_font(36)) + 32 + 32
+    def _block_h(p: dict) -> int:
+        nm = len(_match_lines(p))
+        nc = len(_ctx_lines(p))
+        nb = len(_bet_lines(p))
+        return (nm * _th(f_match) + (nm - 1) * 6 + 10
+                + (nc * _th(f_ctx) + (nc - 1) * 6 + 10 if nc else 0)
+                + nb * _th(f_sub) + (nb - 1) * 6 + 8
+                + _th(_stat_line(p, text_w)[1]) + 30)
+    canvas_h = header_h + sum(_block_h(p) for p in shown) + max(len(shown) - 1, 0) * 22 + PAD
+
+    img, d = _canvas(canvas_h)
+    _bracket(d, canvas_h)
+
+    y = _draw_header(d, f"TENNIS PICKS  ·  {datstr}")
+
+    for i, p in enumerate(shown, 1):
+        conf_tag = f"[{(p.get('confidence') or '').upper()}]"
+        conf_col = _conf_color(p.get("confidence", ""))
+
+        d.text((PAD, y + 6), str(i), font=f_num, fill=_NEON)
+        x0 = PAD + 90
+
+        d.text((SIZE - PAD - _tw(conf_tag, f_conf), y + 16),
+               conf_tag, font=f_conf, fill=conf_col)
+        for line in _match_lines(p):
+            d.text((x0, y), line, font=f_match, fill=_WHITE)
+            y += _th(f_match) + 6
+        y += 4
+
+        ctx_lines = _ctx_lines(p)
+        for j, line in enumerate(ctx_lines):
+            d.text((x0, y), line, font=f_ctx, fill=_N_DIM)
+            y += _th(f_ctx) + (6 if j < len(ctx_lines) - 1 else 0)
+        if ctx_lines:
+            y += 10
+
+        bet_lines = _bet_lines(p)
+        for j, line in enumerate(bet_lines):
+            d.text((x0, y), line, font=f_sub, fill=_DIM)
+            y += _th(f_sub) + (6 if j < len(bet_lines) - 1 else 0)
+        y += 8
+
+        stat, f_stat_fit = _stat_line(p, text_w)
+        d.text((x0, y), stat, font=f_stat_fit, fill=_NEON)
+        y += _th(f_stat_fit) + 30
+
+        if i < len(shown):
+            _sep(d, y, x0=x0)
+            y += 22
+
+    out = CARDS_DIR / f"tennis_picks_{today.strftime('%Y-%m-%d')}.png"
     img.save(out, "PNG")
     return out
 

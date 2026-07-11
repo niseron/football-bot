@@ -36,6 +36,7 @@ import anthropic
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from card_generator import generate_tennis_picks_card
 from discord_bot import build_pick_embed, send_to_discord
 from env_loader import load_env
 from tennis_excel_tracker import log_tennis_pick, tennis_picks_exist_for_today
@@ -852,6 +853,15 @@ async def daily_tennis_picks_job():
             "No tennis picks reached Discord — check DISCORD_BOT_TOKEN / "
             "DISCORD_CHANNELS_JSON ('tennis-picks' key)"
         )
+
+    # Branded PNG card with all of today's picks (both tiers) — additive to
+    # the per-pick embeds above; send_to_discord never raises
+    try:
+        card = generate_tennis_picks_card(picks)
+        log.info("Tennis picks card saved: %s", card.name)
+        send_to_discord("tennis-picks", image_path=card)
+    except Exception as exc:
+        log.warning("Tennis picks card failed (non-fatal): %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

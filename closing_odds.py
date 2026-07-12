@@ -40,16 +40,20 @@ MAX_DAILY_REQUESTS = 12
 _WINDOW_MIN_MINUTES = 5
 _WINDOW_MAX_MINUTES = 65
 
-_request_count = 0
+# Per-pipeline request counters ("football", "fable", ...) sharing one daily
+# reset. Separate budgets on purpose: the Fable 5 experiment gets its own
+# small cap (passed by its caller) so it can never crowd out the production
+# football CLV coverage that the calibration verdict depends on.
+_request_counts: dict[str, int] = {}
 _request_count_date: date | None = None
 
 
 def _reset_counter_if_new_day() -> None:
-    global _request_count, _request_count_date
+    global _request_count_date
     today = date.today()
     if _request_count_date != today:
         _request_count_date = today
-        _request_count = 0
+        _request_counts.clear()
 
 
 def _in_kickoff_window(kickoff_utc: str, now: datetime) -> bool:
@@ -66,17 +70,23 @@ def _in_kickoff_window(kickoff_utc: str, now: datetime) -> bool:
     return _WINDOW_MIN_MINUTES <= minutes_away <= _WINDOW_MAX_MINUTES
 
 
-def run_closing_odds_check(*, picks_source=None, odds_writer=None) -> None:
+def run_closing_odds_check(
+    *,
+    picks_source=None,
+    odds_writer=None,
+    budget_key: str = "football",
+    max_daily: int = MAX_DAILY_REQUESTS,
+) -> None:
     """
     One poll cycle: find due picks, fetch odds once per competition
     represented among them (batched, not one request per match), write
     Closing Odds for every due pick that finds a market match.
 
-    The hooks default to the production football tab; the Fable 5 shadow
-    experiment passes its own reader/writer so the identical polling logic
-    (incl. the shared daily Odds API request cap) covers 'Fable Picks' rows.
+    The hooks default to the production football tab. The Fable 5 shadow
+    experiment passes its own reader/writer AND its own budget_key/max_daily,
+    so its polling can never consume the production football request budget —
+    football's CLV coverage (the calibration verdict input) stays protected.
     """
-    global _request_count
     _reset_counter_if_new_day()
 
     picks_source = picks_source or get_unsettled_picks_with_kickoff
@@ -101,14 +111,14 @@ def run_closing_odds_check(*, picks_source=None, odds_writer=None) -> None:
     if not due:
         return
 
-    if _request_count >= MAX_DAILY_REQUESTS:
+    if _request_counts.get(budget_key, 0) >= max_daily:
         log.warning(
-            "closing_odds: daily Odds API request cap (%d) already reached — skipping this poll",
-            MAX_DAILY_REQUESTS,
+            "closing_odds: daily Odds API request cap (%d) for '%s' already reached — skipping this poll",
+            max_daily, budget_key,
         )
         return
 
-    log.info("closing_odds: %d pick(s) due for a closing-odds check", len(due))
+    log.info("closing_odds: %d pick(s) due for a closing-odds check (%s)", len(due), budget_key)
 
     # Batch: one Odds API call per competition represented among the due
     # picks this cycle, instead of one call per match.
@@ -121,10 +131,10 @@ def run_closing_odds_check(*, picks_source=None, odds_writer=None) -> None:
         if not sport_key:
             continue  # competition not mapped to an Odds API sport — skip silently
 
-        if _request_count >= MAX_DAILY_REQUESTS:
+        if _request_counts.get(budget_key, 0) >= max_daily:
             log.warning(
-                "closing_odds: daily Odds API request cap (%d) reached mid-poll — stopping",
-                MAX_DAILY_REQUESTS,
+                "closing_odds: daily Odds API request cap (%d) for '%s' reached mid-poll — stopping",
+                max_daily, budget_key,
             )
             break
 
@@ -133,7 +143,7 @@ def run_closing_odds_check(*, picks_source=None, odds_writer=None) -> None:
         except Exception as exc:
             log.warning("closing_odds: odds fetch failed for '%s' (non-fatal): %s", league, exc)
             continue
-        _request_count += 1
+        _request_counts[budget_key] = _request_counts.get(budget_key, 0) + 1
 
         if not events:
             continue

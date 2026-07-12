@@ -2,13 +2,18 @@
 fable_shadow.py — Fable 5 shadow pipeline (football only).
 
 A side-by-side MODEL COMPARISON EXPERIMENT, not production:
+  - MASTER GATE: the whole pipeline is dormant until the 'fable-picks'
+    Discord channel key exists in DISCORD_CHANNELS_JSON (fable_enabled()) —
+    no model calls, no sheet activity, no Odds API usage until then.
   - Runs immediately after the Sonnet 4.6 picks each day, on the exact same
     enriched fixture pool (form, H2H, real odds) — no separate fixture fetch.
   - Same SYSTEM_PROMPT, model swapped to claude-fable-5.
   - Picks go to the 'Fable Picks' sheet tab and the 'fable-picks' Discord
-    channel key (fail-silent until the channel ID is configured).
+    channel.
   - Settlement and closing odds reuse the production football logic through
-    the source/writer hooks on run_auto_results / run_closing_odds_check.
+    the source/writer hooks on run_auto_results / run_closing_odds_check;
+    closing odds run on Fable's OWN small daily request budget
+    (FABLE_MAX_DAILY_ODDS_REQUESTS), never football's.
   - Calibration (Brier / buckets / CLV) is fully separate: fable_calibration.py.
 
 Cost control: Fable 5 is ~$10/$50 per million tokens (5-10x Sonnet 4.6), so
@@ -26,6 +31,23 @@ log = logging.getLogger(__name__)
 FABLE_MODEL = "claude-fable-5"
 _INPUT_COST_PER_MTOK  = 10.0   # USD per 1M input tokens
 _OUTPUT_COST_PER_MTOK = 50.0   # USD per 1M output tokens
+
+# Fable's OWN closing-odds request budget — deliberately separate from (and
+# much smaller than) football's MAX_DAILY_REQUESTS, so the experiment can
+# never crowd out production CLV coverage. ~1 pick-day of leagues fits easily.
+FABLE_MAX_DAILY_ODDS_REQUESTS = 6
+
+
+def fable_enabled() -> bool:
+    """
+    Master gate for the whole experiment: armed only once the 'fable-picks'
+    Discord channel key exists in DISCORD_CHANNELS_JSON. While absent,
+    NOTHING runs — no model calls (no cost), no sheet reads/writes, no
+    Odds API usage. Flipping the experiment on is therefore a pure config
+    change: add the channel key locally and on Railway.
+    """
+    from discord_bot import DISCORD_CHANNELS
+    return bool(DISCORD_CHANNELS.get("fable-picks"))
 
 
 def analyse_with_fable(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
@@ -90,6 +112,10 @@ def run_fable_shadow(
     """Generate, enrich, log, and post Fable 5's picks. Called by
     daily_picks_job right after the Sonnet flow, on the same fixtures.
     Raises nothing fatal upward beyond what the caller's guard catches."""
+    if not fable_enabled():
+        log.info("Fable shadow disabled — 'fable-picks' channel key not configured; skipping (no cost)")
+        return
+
     from main import enrich_picks_with_real_odds
     from discord_bot import build_pick_embed, send_to_discord
     from fable_tracker import log_fable_pick
@@ -136,6 +162,9 @@ def run_fable_auto_results(lookback_days: int = 2) -> tuple[dict, list[dict]]:
     """Settle Fable Picks rows with the exact same evaluation logic as the
     production football pipeline — only the tab differs. No notifications,
     no bankroll finalize (the experiment tracks units P&L only)."""
+    if not fable_enabled():
+        return {}, []
+
     from auto_results import run_auto_results
     from fable_tracker import get_pending_fable_rows, update_fable_row_result
 
@@ -148,12 +177,18 @@ def run_fable_auto_results(lookback_days: int = 2) -> tuple[dict, list[dict]]:
 
 
 def run_fable_closing_odds_check() -> None:
-    """Closing-odds poll for Fable rows — same window/batching/daily request
-    cap as production (the Odds API budget is shared deliberately)."""
+    """Closing-odds poll for Fable rows — same window/batching logic as
+    production, but on Fable's OWN small daily request budget so the
+    experiment can never eat into football's CLV coverage."""
+    if not fable_enabled():
+        return
+
     from closing_odds import run_closing_odds_check
     from fable_tracker import get_unsettled_fable_with_kickoff, update_fable_closing_odds
 
     run_closing_odds_check(
         picks_source=get_unsettled_fable_with_kickoff,
         odds_writer=update_fable_closing_odds,
+        budget_key="fable",
+        max_daily=FABLE_MAX_DAILY_ODDS_REQUESTS,
     )

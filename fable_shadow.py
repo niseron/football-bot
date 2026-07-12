@@ -63,10 +63,16 @@ def analyse_with_fable(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
         for league, fixtures in fixtures_by_league.items()
     }
     payload = json.dumps(clean, indent=2, default=str)
+    # Two Fable-5-specific deviations from the Sonnet call, both discovered
+    # against the live API on 12 Jul 2026:
+    #   - no temperature: the model rejects the param outright
+    #     ("`temperature` is deprecated for this model", HTTP 400);
+    #   - max_tokens is higher because Fable emits thinking blocks by default
+    #     and they consume the same output budget as the JSON answer — 2048
+    #     risks truncating the picks on a busy fixture day.
     message = claude.messages.create(
         model=FABLE_MODEL,
-        max_tokens=2048,
-        temperature=0,
+        max_tokens=8000,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Upcoming fixtures (next 48 hours):\n\n{payload}"}],
     )
@@ -81,7 +87,13 @@ def analyse_with_fable(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
         _INPUT_COST_PER_MTOK, _OUTPUT_COST_PER_MTOK,
     )
 
-    raw = message.content[0].text.strip()
+    # Fable 5 responds with thinking block(s) before the text block — take the
+    # first text block, not content[0] (which is a ThinkingBlock here)
+    raw = next(
+        (b.text for b in message.content if getattr(b, "type", "") == "text"), ""
+    ).strip()
+    if not raw:
+        raise ValueError(f"Fable 5 returned no text block (stop_reason={message.stop_reason})")
     log.info("Fable 5 raw response (%d chars):\n%s", len(raw), raw)
 
     try:
@@ -114,6 +126,9 @@ def run_fable_shadow(
     Raises nothing fatal upward beyond what the caller's guard catches."""
     if not fable_enabled():
         log.info("Fable shadow disabled — 'fable-picks' channel key not configured; skipping (no cost)")
+        return
+    if not fixtures_by_league or not any(fixtures_by_league.values()):
+        log.info("Fable shadow: empty fixture pool — nothing to analyse (no cost)")
         return
 
     from main import enrich_picks_with_real_odds

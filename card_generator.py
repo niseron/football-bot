@@ -133,6 +133,24 @@ def _clip(s: str, f: ImageFont.FreeTypeFont, max_w: int) -> str:
     return (s + "…") if s else "…"
 
 
+def _wrap(s: str, f: ImageFont.FreeTypeFont, max_w: int) -> list[str]:
+    """Greedy word-wrap into lines that each fit max_w; only a single word
+    wider than the column is ever clipped. Never returns an empty list."""
+    lines: list[str] = []
+    cur = ""
+    for w in s.split():
+        cand = f"{cur} {w}".strip()
+        if _tw(cand, f) <= max_w:
+            cur = cand
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w if _tw(w, f) <= max_w else _clip(w, f, max_w)
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
 def _canvas(canvas_h: int = CANVAS_H) -> tuple[Image.Image, ImageDraw.ImageDraw]:
     img = Image.new("RGB", (SIZE, canvas_h), _BG)
     d   = ImageDraw.Draw(img)
@@ -231,12 +249,14 @@ def generate_picks_card(
         return [_clip(name, f_match, text_w - tag_w)]
 
     def _bet_lines(p: dict) -> list[str]:
-        """Bet type · pick on one line when it fits, else the pick wraps below."""
+        """Bet type · pick on one line when it fits, else the pick word-wraps
+        below — never clipped, so the knockout time-scope suffix
+        ('(Full-Time incl. ET/Pens)') stays visible."""
         bet = f"{p.get('bet_type', '')} · {p.get('pick', '')}"
         if _tw(bet, f_sub) <= text_w:
             return [bet]
         return [_clip(f"{p.get('bet_type', '')} ·", f_sub, text_w),
-                _clip(str(p.get("pick", "")), f_sub, text_w)]
+                *_wrap(str(p.get("pick", "")), f_sub, text_w)]
 
     # Size the canvas to the content so there is no dead space at the bottom
     header_h = PAD + 14 + _th(_font(52)) + 22 + _th(_font(36)) + 32 + 32
@@ -377,11 +397,13 @@ def generate_picks_card_ig(
             return [_clip(name, f_match, avail)]
 
         def _bet_lines(p: dict) -> list[str]:
+            # Pick text word-wraps rather than clipping so the knockout
+            # time-scope suffix stays visible (same as the Telegram card).
             bet = f"{p.get('bet_type', '')} · {p.get('pick', '')}"
             if _tw(bet, f_sub) <= text_w:
                 return [bet]
             return [_clip(f"{p.get('bet_type', '')} ·", f_sub, text_w),
-                    _clip(str(p.get("pick", "")), f_sub, text_w)]
+                    *_wrap(str(p.get("pick", "")), f_sub, text_w)]
 
         def _block_h(p: dict) -> int:
             nm = len(_match_lines(p))

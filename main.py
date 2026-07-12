@@ -195,7 +195,16 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
                 new_ids = {m["leagueId"] for m in knockout_new}
                 log.info("Knockout detection found %d matches on new leagueId(s): %s",
                          len(knockout_new), new_ids)
-            result["FIFA World Cup 2026"] = [build_fixture_summary(m) for m in wc]
+            # WC_2026_IDS holds only group-stage leagueIds, so any other WC
+            # leagueId is a knockout round — flag it so Claude scopes Match
+            # Winner picks to 90 min vs full-time incl. ET/pens (SYSTEM_PROMPT).
+            summaries = []
+            for m in wc:
+                f = build_fixture_summary(m)
+                if m.get("leagueId") not in WC_2026_IDS:
+                    f["knockout"] = True
+                summaries.append(f)
+            result["FIFA World Cup 2026"] = summaries
 
     return result
 
@@ -533,6 +542,8 @@ Each fixture may include the following enriched context — use it to sharpen yo
 - home_form / away_form: last 5 results for each team as W/D/L (oldest → newest). venue field: H=home, A=away.
 - home_recent / away_recent: score details for those last 5 matches.
 - h2h: last 5 head-to-head meetings between the two teams with scores.
+- knockout: true — an elimination match (e.g. World Cup knockout rounds) that goes to extra time
+  and penalties if level after 90 minutes.
 When this data is present, weight recent form and H2H trends heavily in your reasoning.
 
 Your knowledge of player rosters, retirements, transfers, injuries, and international squad selections
@@ -571,6 +582,16 @@ IMPORTANT — pick field naming rules:
 - NEVER use "Home Win" or "Away Win" — always use the actual team name, e.g. "Sweden Win", "Morocco Win"
 - NEVER use "Home or Draw" or "Away or Draw" — use e.g. "Ivory Coast or Draw", "Japan or Draw"
 - For Over/Under, BTTS, and Asian Handicap keep the standard format: "Over 2.5 Goals", "Yes", "No", "Argentina -1.5"
+
+IMPORTANT — Match Winner picks on knockout fixtures (those marked "knockout": true):
+The 90-minute market and the tie-winner market are DIFFERENT bets with different odds, so you MUST
+append the time scope to the pick text — never output a bare "<Team> Win" for a knockout fixture:
+- "<Team> Win (90 min)" — regulation time only. If the match is level after 90 minutes this bet
+  LOSES. A 3-way market (win/draw/lose), so odds are higher. "Draw (90 min)" is also valid here.
+- "<Team> Win (Full-Time incl. ET/Pens)" — the team to advance, counting extra time and penalty
+  shootouts. A 2-way market, so odds are lower.
+Pick whichever market offers better value, and make sure your odds and probability refer to that
+same market. Non-knockout fixtures cannot go to extra time — keep the plain format ("Sweden Win").
 
 Return ONLY the JSON block, no other text."""
 

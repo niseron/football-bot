@@ -202,7 +202,13 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
   `knockout: true`; `auto_results.py` settles each scope from the API's status.reason (FT/AET/Pen) —
   a match reaching extra time was by definition level at 90, and a shootout winner can't be read
   from the score, so full-time picks decided on penalties stay PENDING for manual settlement via
-  `update_result.py`. Unscoped Match Winner follows the bookmaker default: 90 minutes only.
+  `update_result.py`. Unscoped picks follow the bookmaker default: 90 minutes only — for EVERY bet
+  type, not just Match Winner (since 12 Jul 2026). The API only returns the final (incl.-ET) score,
+  so when a match goes past 90 each bet type derives what the guaranteed 90-minute draw implies:
+  Asian Handicap settles on a goal difference of 0, Double Chance 'or draw' wins / '12' loses,
+  Over/Under settles when the max possible regulation total (2 × the lower final score) is below
+  the line, BTTS 'No' wins when either side finished scoreless; anything still ambiguous (e.g.
+  Over 2.5 with a 3-2 AET score) stays PENDING for manual settlement via `update_result.py`.
 - Estimated decimal odds from Claude's market knowledge
 - Confidence rating per pick (High / Medium / Low)
 - 2–3 sentence reasoning per pick citing form, head-to-head, and value
@@ -314,7 +320,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Area | Done | Status |
 |---|---|---|
 | Bot core | 95% | Live — picks, results, sheets, cards, Telegram all automated on Railway |
-| Data quality | 78% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout Match Winner picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement since 12 Jul 2026; no injuries/lineups |
+| Data quality | 80% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |

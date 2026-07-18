@@ -13,7 +13,7 @@ An automated football betting analysis bot that:
 - Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
 - Tracks all picks and P&L in a Google Sheet with conditional formatting, a Picks tab and a Summary tab
 
-Covered competitions: Premier League, Belgian Jupiler Pro League, FIFA World Cup 2026.
+Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), and FIFA World Cup 2026 (ended 19 Jul 2026).
 
 Since 9 Jul 2026 the repo also hosts a **fully separate tennis picks system** (ATP/WTA) — see the "Tennis System — SEPARATE from football" section below. The two systems share the Railway process and API keys but no data paths, tabs, or calibration samples.
 
@@ -81,7 +81,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
 | `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated, saved to `/cards`, and sent to Discord's `picks-cards` channel — only the Telegram send is skipped. |
 | `DISCORD_BOT_TOKEN` | *Optional for football, required for tennis delivery.* Discord bot token (Developer Portal → Bot → Reset Token). If unset, all Discord delivery is skipped silently — football's Telegram is unaffected, but tennis (Discord-only) posts nowhere. |
-| `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-picks-lower` / `tennis-results` keys carry ALL tennis delivery (tennis is Discord-only — no Telegram). |
+| `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","bundesliga":"999...","la-liga":"aaa...","serie-a":"bbb...","ligue-1":"ccc...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-picks-lower` / `tennis-results` keys carry ALL tennis delivery (tennis is Discord-only — no Telegram). |
 | `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
 | `TENNIS_RANK_THRESHOLD` | *Optional (tennis system).* Rank tier cutoff, default `150`. No fixtures are excluded by rank — picks where BOTH players rank inside the top N go to the `tennis-picks` Discord channel; all others (either player outside, or unranked) go to `tennis-picks-lower`. The tier ('Top 150' / 'Lower Ranked') is also logged to the Sheet's 'Rank Tier' column. Per-tier pick counts are logged every run. |
 
@@ -138,6 +138,10 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `premier-league` | Each Premier League pick as an embed | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as an embed | `main.py` |
 | `world-cup` | Each World Cup 2026 pick as an embed | `main.py` |
+| `bundesliga` | Each Bundesliga pick as an embed (league tracked since 19 Jul 2026; first fixtures ~28 Aug 2026) | `main.py` |
+| `la-liga` | Each La Liga pick as an embed (league tracked since 19 Jul 2026; first fixtures ~15 Aug 2026) | `main.py` |
+| `serie-a` | Each Serie A pick as an embed (league tracked since 19 Jul 2026; first fixtures ~22 Aug 2026) | `main.py` |
+| `ligue-1` | Each Ligue 1 pick as an embed (league tracked since 19 Jul 2026; first fixtures ~21 Aug 2026) | `main.py` |
 | `fable-picks` | **EXPERIMENT** — Fable 5 shadow picks (dated header + embeds, author line 'Fable 5 experiment'), posted right after the production picks each day. *Awaiting a Discord channel ID; until the key is added to `DISCORD_CHANNELS_JSON`, sends skip silently while picks still log to the Fable Picks tab.* | `fable_shadow.py` |
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |

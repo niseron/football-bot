@@ -30,9 +30,15 @@ TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 TELEGRAM_IG_CHANNEL_ID = os.environ.get("TELEGRAM_IG_CHANNEL_ID")
 
 # Single-ID domestic leagues (fotmob-based IDs)
+# Bundesliga/La Liga/Serie A/Ligue 1 IDs verified 19 Jul 2026 against the live
+# API's 2026-27 opening matchdays (team rosters checked, not just ID reuse).
 LEAGUES = {
     "Premier League": 47,
     "Jupiler Pro League": 900433,
+    "Bundesliga": 54,
+    "La Liga": 87,
+    "Serie A": 55,
+    "Ligue 1": 53,
 }
 
 # 2026 FIFA World Cup — group-stage leagueIds confirmed via live API scan Jun 11-28.
@@ -94,6 +100,10 @@ ODDS_API_SPORT_KEYS: dict[str, str] = {
     "Premier League": "soccer_epl",
     "Jupiler Pro League": "soccer_belgium_first_div",
     "FIFA World Cup 2026": "soccer_fifa_world_cup",
+    "Bundesliga": "soccer_germany_bundesliga",
+    "La Liga": "soccer_spain_la_liga",
+    "Serie A": "soccer_italy_serie_a",
+    "Ligue 1": "soccer_france_ligue_one",
 }
 
 # Maps competition names to Discord channel-mapping keys (discord_bot.py).
@@ -103,6 +113,10 @@ DISCORD_LEAGUE_CHANNEL_KEYS: dict[str, str] = {
     "Premier League": "premier-league",
     "Jupiler Pro League": "jupiler-pro-league",
     "FIFA World Cup 2026": "world-cup",
+    "Bundesliga": "bundesliga",
+    "La Liga": "la-liga",
+    "Serie A": "serie-a",
+    "Ligue 1": "ligue-1",
 }
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -535,7 +549,8 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a professional football betting analyst with deep expertise in the Premier League,
-Belgian Jupiler Pro League, and international tournament football including the FIFA World Cup.
+Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, and international tournament football
+including the FIFA World Cup.
 You receive upcoming fixtures for the next 48 hours and must identify the top 5 value bets across all competitions.
 
 Each fixture may include the following enriched context — use it to sharpen your analysis:

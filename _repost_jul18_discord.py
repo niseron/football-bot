@@ -7,9 +7,9 @@ bot's Send/Embed/Attach permissions. It only re-sends the missed Discord
 pieces — it does not touch the Sheet, Telegram, or picks.db.
 
 Sources: pick fields from the Picks sheet rows for 18-Jul-2026; reasoning
-recovered from the Railway deploy log of the 12:00 run. Fable picks come from
-the 'Fable Picks' sheet (reasoning is not stored there, so those embeds go
-out without it).
+recovered from the Railway deploy log of the 12:00 run. The Fable shadow
+picks are deliberately NOT reposted — the Fable experiment is being shut
+down (user decision, 18 Jul 2026).
 
 Usage:  python _repost_jul18_discord.py
 """
@@ -25,7 +25,6 @@ log = logging.getLogger(__name__)
 from auto_results import _format_result_notification
 from card_generator import generate_picks_card
 from discord_bot import build_pick_embed, send_to_discord
-from fable_tracker import FABLE_HEADERS, _fable_ws
 
 PICKS = [
     {
@@ -134,30 +133,6 @@ def main() -> None:
     for r in RESULTS:
         send_to_discord("results-cards", message=_format_result_notification(r))
     log.info("Posted %d result notifications to 'results-cards'", len(RESULTS))
-
-    # Fable shadow picks — from the Fable sheet; no reasoning column there
-    try:
-        rows = _fable_ws().get_all_values()
-        idx = {h: i for i, h in enumerate(FABLE_HEADERS)}
-        fable_today = [r for r in rows[1:] if r and r[idx["Date"]] == "18-Jul-2026"]
-        if fable_today:
-            send_to_discord(
-                "fable-picks",
-                message="🧪 **Fable 5 Shadow Picks — 2026-07-18** (experiment — not the production picks) — reposted after the Discord permission outage",
-            )
-            for r in fable_today:
-                pick = {
-                    "match": r[idx["Match"]], "league": r[idx["League"]],
-                    "bet_type": r[idx["Bet Type"]], "pick": r[idx["Pick"]],
-                    "odds": r[idx["Odds"]], "confidence": r[idx["Confidence"]],
-                    "reasoning": "(reasoning not re-shown — repost from the Fable sheet)",
-                }
-                send_to_discord("fable-picks", embed=build_pick_embed(pick, context=pick["league"]))
-            log.info("Posted %d Fable shadow embeds to 'fable-picks'", len(fable_today))
-        else:
-            log.info("No Fable rows found for 18-Jul-2026 — skipping fable repost")
-    except Exception as exc:
-        log.warning("Fable repost failed (non-fatal): %s", exc)
 
     log.info("Repost complete.")
 

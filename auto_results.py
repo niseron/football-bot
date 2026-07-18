@@ -393,10 +393,9 @@ def run_auto_results(
     Returns (stats_dict, list_of_newly_resolved_picks).
 
     The three hooks default to the production football tab
-    (get_pending_picks_rows / update_row_result / finalize_workbook); the
-    Fable 5 shadow experiment passes its own tab's reader/writer plus a
-    no-op finalizer, so the identical evaluation logic settles the
-    'Fable Picks' rows instead.
+    (get_pending_picks_rows / update_row_result / finalize_workbook); a
+    caller may pass its own tab's reader/writer plus a different finalizer
+    to settle another tab with the identical evaluation logic.
     """
     pending_source = pending_source or get_pending_picks_rows
     row_writer     = row_writer or update_row_result

@@ -40,9 +40,9 @@ MAX_DAILY_REQUESTS = 12
 _WINDOW_MIN_MINUTES = 5
 _WINDOW_MAX_MINUTES = 65
 
-# Per-pipeline request counters ("football", "fable", ...) sharing one daily
-# reset. Separate budgets on purpose: the Fable 5 experiment gets its own
-# small cap (passed by its caller) so it can never crowd out the production
+# Per-pipeline request counters (keyed by budget_key, e.g. "football")
+# sharing one daily reset. Separate budgets on purpose: an alternative
+# caller can pass its own small cap so it can never crowd out the production
 # football CLV coverage that the calibration verdict depends on.
 _request_counts: dict[str, int] = {}
 _request_count_date: date | None = None
@@ -82,9 +82,9 @@ def run_closing_odds_check(
     represented among them (batched, not one request per match), write
     Closing Odds for every due pick that finds a market match.
 
-    The hooks default to the production football tab. The Fable 5 shadow
-    experiment passes its own reader/writer AND its own budget_key/max_daily,
-    so its polling can never consume the production football request budget —
+    The hooks default to the production football tab. A caller may pass its
+    own reader/writer AND its own budget_key/max_daily, so alternative
+    polling can never consume the production football request budget —
     football's CLV coverage (the calibration verdict input) stays protected.
     """
     _reset_counter_if_new_day()

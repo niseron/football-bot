@@ -22,7 +22,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from auto_results import _format_result_notification, _telegram_send, run_auto_results
 from closing_odds import run_closing_odds_check
 from discord_bot import send_to_discord
-from fable_shadow import run_fable_auto_results, run_fable_closing_odds_check
 from main import daily_picks_job
 from tennis_auto_results import (
     _format_tennis_result_notification,
@@ -55,24 +54,12 @@ async def live_results_check() -> None:
         await asyncio.to_thread(send_to_discord, "results-cards", msg)
         _notified.add(key)
 
-    # Fable 5 shadow experiment — settle its tab with the same logic; no
-    # notifications (experiment data only), never affects the flow above
-    try:
-        await asyncio.to_thread(run_fable_auto_results, 2)
-    except Exception as exc:
-        log.error("Fable results check failed (non-fatal): %s", exc)
-
 
 async def closing_odds_job() -> None:
     try:
         await asyncio.to_thread(run_closing_odds_check)
     except Exception as exc:
         log.error("Closing odds check failed (non-fatal): %s", exc)
-    # Fable 5 shadow experiment — same poll for its tab (shared daily cap)
-    try:
-        await asyncio.to_thread(run_fable_closing_odds_check)
-    except Exception as exc:
-        log.error("Fable closing odds check failed (non-fatal): %s", exc)
 
 
 async def tennis_closing_odds_job() -> None:

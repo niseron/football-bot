@@ -37,7 +37,11 @@ it or add any Telegram send to the tennis pipeline.
 
 - Load `.env` via `from env_loader import load_env; load_env()` — never call
   `dotenv.load_dotenv()` directly. `load_env()` guards against the UTF-8 BOM
-  issue that silently broke the first .env variable on 10 Jul 2026.
+  issue that silently broke the first .env variable on 10 Jul 2026, and since
+  19 Jul 2026 it also silently rewrites `.env` without the BOM when one is
+  found (VS Code kept re-adding it on save). Claude Code hooks in the
+  workspace `.claude/settings.json` do the same fix at session start and
+  after every Edit/Write, so a BOM in `.env` never needs manual attention.
 
 - Always commit and push after completing any code change — never leave changes uncommitted at the end of a task.
 - When a shipped change affects a Roadmap area in `PROJECT_SUMMARY.md`, update that area's completion percentage in the same commit.

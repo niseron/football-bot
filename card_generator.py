@@ -185,16 +185,18 @@ def _pnl_str(v: float) -> str:
 
 def _stat_line(p: dict, max_w: int) -> tuple[str, ImageFont.FreeTypeFont]:
     """Odds-line text plus a font stepped down until the whole line fits
-    max_w. 'Claude 1.85 · Mkt 1.93 [VALUE]' is wider than the column at the
-    base 64px, and clipping used to eat the market digits and the [VALUE]
-    flag — the one thing the line exists to show."""
+    max_w. The line is short now that it carries a single figure, but
+    'Odds 1.93 [VALUE]' can still overrun at the base 64px on a narrow
+    column, and clipping would eat the [VALUE] flag — the one thing the
+    line exists to show.
+
+    ONE figure, never two: the real market price when we matched one,
+    otherwise the estimate. Both are still stored in the sheet for
+    calibration/CLV — this is display only."""
     market_odds = p.get("market_odds")
-    if market_odds is not None:
-        stat = f"Claude {p.get('odds', '')} · Mkt {market_odds}"
-        if p.get("value"):
-            stat += " [VALUE]"
-    else:
-        stat = f"Odds {p.get('odds', '')}"
+    stat = f"Odds {market_odds if market_odds is not None else p.get('odds', '')}"
+    if market_odds is not None and p.get("value"):
+        stat += " [VALUE]"
     for sz in (64, 58, 52, 48, 44):
         f = _font(sz)
         if _tw(stat, f) <= max_w:
@@ -353,9 +355,9 @@ def generate_picks_card_ig(
     and lower-priority picks still fill remaining slots if fewer than 3
     VALUE/HIGH/MEDIUM picks exist). Rendering matches generate_picks_card()
     (confidence tag top-right) so the two variants look like the same brand,
-    except the odds line stays plain (no Claude/Mkt comparison) and a
-    value-flagged Low pick is tagged "[LOW · VALUE]" so viewers can see why
-    it outranks HIGH picks.
+    except the odds line never carries the "[VALUE]" suffix (the tag shows it
+    instead) and a value-flagged Low pick is tagged "[LOW · VALUE]" so viewers
+    can see why it outranks HIGH picks.
 
     Font sizes shrink in small steps (never below 70% of the base size) if 3
     picks would overflow 1350px — e.g. long match names or bet descriptions
@@ -450,10 +452,11 @@ def generate_picks_card_ig(
             y += _th(f_sub) + (6 if j < len(bet_lines) - 1 else 0)
         y += 5
 
-        # IG card always shows the plain odds line — never the Claude/Mkt
-        # comparison — regardless of whether market_odds/value are present
-        # on the pick dict. That data still drives the Telegram card above.
-        stat = f"Odds {p.get('odds', '')}"
+        # Same one-figure rule as the Telegram card (market price when we have
+        # one, else the estimate), but the IG card never appends [VALUE] here —
+        # _ig_conf_tag() already carries it in the top-right tag.
+        market_odds = p.get("market_odds")
+        stat = f"Odds {market_odds if market_odds is not None else p.get('odds', '')}"
         stat = _clip(stat, f_stat, text_w)
         d.text((x0, y), stat, font=f_stat, fill=_NEON)
         y += _th(f_stat) + 18
@@ -476,7 +479,7 @@ def generate_tennis_picks_card(
     """
     Tennis variant of generate_picks_card: same brand (dark neon grid, corner
     brackets, THEPICKSAI header, confidence tag colours incl. Low orange,
-    Claude/Mkt odds line with the [VALUE] suffix), but each pick carries a
+    single-figure odds line with the [VALUE] suffix), but each pick carries a
     tennis context line — tour · tournament · surface · ranks ('#1 vs #3') —
     instead of a league. Up to 5 picks; the canvas height fits the content.
     Fonts come from _font(), which tries the bundled fonts/ TTFs first, so

@@ -81,6 +81,26 @@ _BLACK_TEXT  = {"red": 0.0, "green": 0.0, "blue": 0.0}
 # All result values that count as settled (not pending)
 _SETTLED_RESULTS: frozenset[str] = frozenset(["WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"])
 
+# Competitions always shown in the Summary tab's LEAGUE BREAKDOWN, even at zero
+# picks. These strings must match what main.py writes to the 'League' column
+# exactly — note "FIFA World Cup 2026", not "World Cup". Leagues found in the
+# sheet but absent here (e.g. Conference League) are appended automatically, so
+# this list is a display floor, not a filter.
+TRACKED_LEAGUES: list[str] = [
+    "FIFA World Cup 2026",
+    "Premier League",
+    "Jupiler Pro League",
+    "Champions League",
+    "La Liga",
+    "Bundesliga",
+    "Serie A",
+    "Ligue 1",
+]
+
+# Bucket for picks logged before the 'League' column was added to PICKS_HEADERS.
+# Keeps the league breakdown's P&L reconcilable with the headline total.
+_NO_LEAGUE = "(no league recorded)"
+
 
 def _apply_formatting(ss: gspread.Spreadsheet) -> None:
     try:
@@ -610,6 +630,42 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         bt_rows.append([bt, g["wins"], g["losses"], f"{win_rate_bt:.1f}%", round(g["pnl"], 2), total])
     bt_rows.sort(key=lambda x: float(x[3].rstrip("%")), reverse=True)
 
+    # ── League breakdown (uses the League column, index 12) ──────────────────
+    # Every tracked competition gets a row even with no picks yet: several open
+    # their 2026-27 season mid-to-late August, so zeros are the expected state
+    # for now, and an absent row would be indistinguishable from a routing bug.
+    # Any league present in the sheet but not listed here is appended rather
+    # than dropped, and picks logged before the League column existed group
+    # under _NO_LEAGUE — without that bucket this section's P&L would silently
+    # fail to reconcile with 'Total P&L (units)' above.
+    lg_groups: dict[str, dict] = {
+        name: {"wins": 0, "losses": 0, "pnl": 0.0, "picks": 0}
+        for name in TRACKED_LEAGUES
+    }
+    for r in rows:
+        name = r[12].strip() if len(r) > 12 and r[12].strip() else _NO_LEAGUE
+        g = lg_groups.setdefault(name, {"wins": 0, "losses": 0, "pnl": 0.0, "picks": 0})
+        g["picks"] += 1                      # every logged pick, settled or not
+        result = r[6] if len(r) > 6 else ""
+        if result not in _SETTLED_RESULTS or result == "VOID":
+            continue
+        g["pnl"] += _pnl(r)                  # half wins/losses count here...
+        if result == "WIN":
+            g["wins"] += 1                   # ...but not in the W/L win rate,
+        elif result == "LOSS":
+            g["losses"] += 1                 # matching the bet-type section
+
+    lg_rows = []
+    for name, g in lg_groups.items():
+        decided = g["wins"] + g["losses"]
+        wr = round(g["wins"] / decided * 100, 1) if decided else 0.0
+        lg_rows.append([name, g["wins"], g["losses"], f"{wr:.1f}%",
+                        round(g["pnl"], 2), g["picks"]])
+    # P&L descending, as asked. Ties break on pick count then name so the
+    # not-yet-in-season leagues — all identically zero — hold a stable order
+    # instead of shuffling between refreshes.
+    lg_rows.sort(key=lambda x: (-x[4], -x[5], x[0]))
+
     data = [
         ["PERFORMANCE SUMMARY", ""],
         ["", ""],
@@ -638,7 +694,14 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         ["", ""],
         ["BET TYPE BREAKDOWN", "", "", "", "", ""],
         ["Bet Type", "Wins", "Losses", "Win Rate %", "Total P&L", "Total Picks"],
-    ] + bt_rows
+    ] + bt_rows + [
+        ["", ""],
+        ["LEAGUE BREAKDOWN", "", "", "", "", ""],
+        # 'Picks' counts every logged pick incl. pending and void, unlike the
+        # bet-type table's 'Total Picks' (settled wins + losses only) — it is
+        # what shows a competition is tracked but not yet in season.
+        ["League", "Wins", "Losses", "Win Rate %", "Total P&L", "Picks"],
+    ] + lg_rows
 
     ws_sum = ss.worksheet("Summary")
     ws_sum.clear()

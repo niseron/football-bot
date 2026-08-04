@@ -836,7 +836,9 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
                 "Full raw response:\n%s",
                 raw,
             )
-            _notify_picks_failed("Claude returned an unparseable response")
+            # Reason text is relayed verbatim into a Telegram alert — keep it
+            # free of model names (the log line above keeps the detail).
+            _notify_picks_failed("the analysis returned an unparseable response")
             raise ValueError(f"Could not parse Claude response as JSON: {exc}") from exc
 
     picks = data.get("picks", [])
@@ -874,18 +876,17 @@ def format_telegram_message(picks: list[dict], header: str = "Football Picks") -
         else:
             kelly_line = ""
 
+        # ONE odds figure, never two: the real market price when we matched
+        # one, otherwise the estimate. Both are still logged to the sheet
+        # ('Claude Prob %' / 'Market Prob %') for calibration and CLV — this is
+        # display only, and nothing user-facing names the model.
         market_odds = p.get("market_odds")
-        if market_odds is not None:
-            value_tag = " 🔥 *VALUE*" if p.get("value") else ""
-            odds_line = (
-                f"  Odds: Claude `{_escape_md(str(p['odds']))}` "
-                f"\\| Market `{_escape_md(str(market_odds))}`{value_tag} "
-                f"\\| Confidence: {_escape_md(p['confidence'])}\n"
-            )
-        else:
-            odds_line = (
-                f"  Odds: `{_escape_md(str(p['odds']))}` \\| Confidence: {_escape_md(p['confidence'])}\n"
-            )
+        shown_odds  = market_odds if market_odds is not None else p["odds"]
+        value_tag   = " 🔥 *VALUE*" if (market_odds is not None and p.get("value")) else ""
+        odds_line = (
+            f"  Odds: `{_escape_md(str(shown_odds))}`{value_tag} "
+            f"\\| Confidence: {_escape_md(p['confidence'])}\n"
+        )
 
         lines.append(
             f"*{i}\\. {_escape_md(p['match'])}* \\({_escape_md(p['league'])}\\)\n"

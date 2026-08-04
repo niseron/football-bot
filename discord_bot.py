@@ -95,11 +95,12 @@ def build_pick_embed(pick: dict, context: str | None = None) -> dict:
     'ATP | Wimbledon | Grass') renders as the small author line on top.
     """
     confidence = str(pick.get("confidence", "N/A"))
+    # ONE odds figure, never two: the real market price when we matched one,
+    # otherwise the estimate. Both values are still written to the sheet
+    # ('Claude Prob %' / 'Market Prob %') — calibration and CLV need them; this
+    # is display only. Nothing user-facing names the model.
     market_odds = pick.get("market_odds")
-    if market_odds is not None:
-        odds_value = f"Claude {pick.get('odds', '?')} | Market {market_odds}"
-    else:
-        odds_value = str(pick.get("odds", "?"))
+    odds_value = str(market_odds if market_odds is not None else pick.get("odds", "?"))
 
     embed: dict = {
         "title": str(pick.get("match", "?"))[:256],

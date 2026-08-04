@@ -159,7 +159,24 @@ dedicated `champions-league` channel and is in `DISCORD_LEAGUE_CHANNEL_KEYS`, so
 picks get per-pick embeds *and* appear on the card. The two UEFA competitions share
 all their fixture-matching machinery and differ only in this routing choice.
 
-**Pick embed format** (built by `discord_bot.py`'s `build_pick_embed()`, since 10 Jul 2026 — previously plain text): title = match name; stripe colour by confidence (High = green `#00c853`, Medium = blue `#2196f3`, Low = orange `#ff6f00`); a full-width **Pick** field with the selection; inline **Bet Type** / **Odds** / **Confidence** fields side by side (Odds shows `Claude X | Market Y` when real odds were matched); the full reasoning as the description; a `🔥 VALUE` footer only when the pick beat the market by ≥5pp. Context renders as the small author line — the league for football, `Tour | Tournament | Surface` for tennis. Card/result sends (`picks-cards`, `results-cards`, `weekly-cards`, `tennis-results`) are unchanged plain text/images.
+**Pick embed format** (built by `discord_bot.py`'s `build_pick_embed()`, since 10 Jul 2026 — previously plain text): title = match name; stripe colour by confidence (High = green `#00c853`, Medium = blue `#2196f3`, Low = orange `#ff6f00`); a full-width **Pick** field with the selection; inline **Bet Type** / **Odds** / **Confidence** fields side by side (Odds shows a SINGLE figure — the real market price when one was matched, otherwise the estimate; see "Model-name-free output" below); the full reasoning as the description; a `🔥 VALUE` footer only when the pick beat the market by ≥5pp. Context renders as the small author line — the league for football, `Tour | Tournament | Surface` for tennis. Card/result sends (`picks-cards`, `results-cards`, `weekly-cards`, `tennis-results`) are unchanged plain text/images.
+
+**Model-name-free output (4 Aug 2026).** No user-facing string names the model. Two rules:
+
+1. **One odds figure, never two.** Every surface shows the real market price when
+   one was matched, and falls back to the estimate when it wasn't — labelled just
+   `Odds`. The old `Claude 1.85 · Mkt 1.93` / `Claude X | Market Y` comparison is
+   gone from Discord embeds, both picks cards (Telegram + IG) and the Telegram
+   message. The `🔥 VALUE` / `[VALUE]` flag survives unchanged — it is the useful
+   half of the comparison and names nothing.
+2. **This is display-only.** `Claude Prob %` and `Market Prob %` are still written
+   to the sheet exactly as before, because `calibration.py` (Brier/edge) and the
+   CLV job read them. Do not "tidy" those columns away.
+
+Internal logs, docstrings, exception text and column headers may still say Claude.
+The one trap: `_notify_picks_failed(reason)` / `_notify_tennis_picks_failed(reason)`
+relay `reason` verbatim into a Telegram/Discord alert, so reason strings passed to
+them are user-facing — keep model names in the adjacent `log.error` instead.
 
 **Fail-silent guarantee:** `send_to_discord(channel_key, message=None, image_path=None)` never raises. Missing `DISCORD_BOT_TOKEN`, missing/malformed `DISCORD_CHANNELS_JSON`, an unmapped key, a bad image path, or a Discord API error each log one line and return `False` — the Telegram flow can never be affected. Rate limits (HTTP 429) get one retry after Discord's `retry_after`.
 
@@ -186,7 +203,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 | Tab | Columns |
 |---|---|
 | Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds |
-| Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, bet type breakdown table |
+| Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, Bet Type Breakdown table, and (4 Aug 2026) a **League Breakdown** table — wins / losses / win rate / total P&L / picks per competition, sorted by P&L descending. Built from the Picks tab's League column; deliberately one section in this tab, never per-league tabs, so calibration data stays unified. Every tracked competition gets a row even at zero picks (most open their 2026-27 season mid-to-late August — zeros are expected, not a bug), leagues found in the sheet but not in `TRACKED_LEAGUES` are appended rather than dropped, and the 119 picks logged before the League column existed group under `(no league recorded)` so the section's P&L reconciles exactly with the headline total. Note `Picks` here counts every logged pick incl. pending/void, unlike Bet Type Breakdown's `Total Picks` (settled wins + losses only). |
 | Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier ('Top 150' / 'Lower Ranked', for future per-tier calibration), Stake € (SIM), Running P&L (u), Bankroll € (SIM), Player IDs. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 | Tennis Summary | **Tennis system only** — mirror of football's Summary tab, rebuilt by `_refresh_tennis_summary()` whenever a tennis result settles (`finalize_tennis_workbook()`, called from auto-results and the manual override): overall record, win rate, units P&L, simulated bankroll + ROI, best bet type / confidence level, Bet Type Breakdown (win-rate-desc), plus a tennis-only Rank Tier Breakdown (Top 150 vs Lower Ranked; pre-10-Jul rows show as '(untracked)'). Header labels the staking as SIMULATED. |
 | Fable Picks | **HISTORICAL — discontinued experiment data, kept for reference.** Rows logged by the Fable 5 shadow experiment (12-18 Jul 2026) with the football Picks structure minus staking/bankroll columns (units P&L only). Nothing reads or writes this tab anymore — the Fable pipeline was removed on 19 Jul 2026 (see the discontinued-experiment note in section on the Fable 5 shadow pipeline). |
@@ -380,7 +397,7 @@ Completion estimates per area — update these percentages whenever a related ch
 
 | Area | Done | Status |
 |---|---|---|
-| Bot core | 95% | Live — picks, results, sheets, cards, Telegram all automated on Railway |
+| Bot core | 96% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026) |
 | Data quality | 84% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |

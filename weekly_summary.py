@@ -124,7 +124,7 @@ def build_calibration_message() -> str | None:
 
     lines = [
         "*\U0001f4d0 Monthly Calibration Report*",
-        "_How well Claude's stated probabilities match reality_\n",
+        "_How well our stated probabilities match reality_\n",
         "`{:<9} {:>5}  {:>7}  {:>7}`".format("Range", "Picks", "Stated", "Actual"),
     ]
     for b in cal["buckets"]:
@@ -149,10 +149,10 @@ def build_calibration_message() -> str | None:
         )
         if pos["roi"] is not None:
             pos_roi = _esc(f"{pos['roi']:+.1f}%")
-            lines.append(f"  ROI when Claude \\> market: *{pos_roi}* \\({pos['picks']} picks\\)")
+            lines.append(f"  ROI when our prob \\> market: *{pos_roi}* \\({pos['picks']} picks\\)")
         if neg["roi"] is not None:
             neg_roi = _esc(f"{neg['roi']:+.1f}%")
-            lines.append(f"  ROI when Claude \\<\\= market: *{neg_roi}* \\({neg['picks']} picks\\)")
+            lines.append(f"  ROI when our prob \\<\\= market: *{neg_roi}* \\({neg['picks']} picks\\)")
 
     n = cal["sample_size"]
     lines.append(f"\n\U0001f4e6 Sample size: *{n}* settled picks with probability data")

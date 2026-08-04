@@ -747,7 +747,9 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
             data = json.loads(_strip_code_fences(raw))
         except json.JSONDecodeError as exc:
             log.error("Claude tennis response is not valid JSON. Full raw response:\n%s", raw)
-            _notify_tennis_picks_failed("Claude returned an unparseable response")
+            # Reason text is relayed verbatim into a Discord alert — keep it
+            # free of model names (the log line above keeps the detail).
+            _notify_tennis_picks_failed("the analysis returned an unparseable response")
             raise ValueError(f"Could not parse Claude tennis response as JSON: {exc}") from exc
 
     picks = data.get("picks", [])

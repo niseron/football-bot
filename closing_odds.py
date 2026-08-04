@@ -111,6 +111,19 @@ def run_closing_odds_check(
     if not due:
         return
 
+    # Monthly reserve hard stop, checked before the daily cap. The daily cap
+    # bounds a single day; this bounds the month. Without it a busy stretch
+    # can drain the quota to zero and take the picks-run odds enrichment down
+    # with it — enrichment produces live value flags, so polling yields first.
+    # The check itself is free (see usage_tracker.fetch_odds_quota).
+    from usage_tracker import odds_budget_exhausted
+    if odds_budget_exhausted():
+        log.warning(
+            "closing_odds: monthly Odds API reserve reached — polling halted for '%s'",
+            budget_key,
+        )
+        return
+
     if _request_counts.get(budget_key, 0) >= max_daily:
         log.warning(
             "closing_odds: daily Odds API request cap (%d) for '%s' already reached — skipping this poll",

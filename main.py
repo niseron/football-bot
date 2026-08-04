@@ -841,6 +841,14 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Upcoming fixtures (next 48 hours):\n\n{payload}"}],
     )
+    # Record token usage before anything can raise on the parse below —
+    # the call is billed whether or not we manage to read the JSON.
+    try:
+        from usage_tracker import record_anthropic_usage
+        record_anthropic_usage("football-picks", message.model, message.usage)
+    except Exception as exc:
+        log.debug("usage recording skipped: %s", exc)
+
     raw = message.content[0].text.strip()
     log.info("Claude raw response (%d chars):\n%s", len(raw), raw)
 

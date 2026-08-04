@@ -12,7 +12,7 @@ current features, and known limitations.
 `picks-cards`, `results-cards`, `weekly-cards`, `premier-league`,
 `jupiler-pro-league`, `world-cup`, `bundesliga`, `la-liga`, `serie-a`,
 `ligue-1`, `champions-league`, `tennis-picks`, `tennis-picks-lower`,
-`tennis-results` to Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
+`tennis-results`, `usage` to Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
 missing token/key skips that piece without touching the rest of the flow.
 For football, Discord is purely additive (mirrors Telegram). Individual pick
 messages (league channels + `tennis-picks`) are Discord EMBEDS built by

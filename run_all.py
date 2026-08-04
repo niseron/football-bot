@@ -30,6 +30,7 @@ from tennis_auto_results import (
 from tennis_closing_odds import run_tennis_closing_odds_check
 from tennis_main import daily_tennis_picks_job
 from tracker import init_db
+from usage_tracker import post_daily_summary as post_usage_summary
 from weekly_summary import post_weekly_summary
 
 _notified: set[tuple] = set()
@@ -67,6 +68,14 @@ async def tennis_closing_odds_job() -> None:
         await asyncio.to_thread(run_tennis_closing_odds_check)
     except Exception as exc:
         log.error("Tennis closing odds check failed (non-fatal): %s", exc)
+
+
+async def usage_summary_job() -> None:
+    """Daily API usage + cost report to the 'usage' Discord channel."""
+    try:
+        await asyncio.to_thread(post_usage_summary)
+    except Exception as exc:
+        log.error("Usage summary failed (non-fatal): %s", exc)
 
 
 async def tennis_live_results_check() -> None:
@@ -117,6 +126,11 @@ async def main() -> None:
     )
     scheduler.add_job(
         tennis_live_results_check, "interval", minutes=30,
+    )
+    # Usage + cost report — 23:50 so it captures a full day of both pipelines
+    scheduler.add_job(
+        usage_summary_job, "cron",
+        hour=23, minute=50, timezone="Europe/Brussels",
     )
     scheduler.start()
 

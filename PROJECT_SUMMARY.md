@@ -143,6 +143,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
+| `usage` | Daily API usage + cost report at 23:50 Brussels — Anthropic tokens/cost per job, The Odds API units against the 500/month tier, RapidAPI football + tennis quotas (added 4 Aug 2026) | `run_all.py` `usage_summary_job` → `usage_tracker.py` |
 
 The league-name → key routing lives in `main.py`'s `DISCORD_LEAGUE_CHANNEL_KEYS`.
 
@@ -297,6 +298,40 @@ key answers HTTP 200 with `[]` and is **not billed** against the quota (only a k
 returning fixtures costs the 6 units of 2 regions × 3 markets), so the fallback is
 free and CL qualifying picks get real market odds today. `_fetch_odds_events()`
 accepts a plain string or a tuple, so every other competition is unchanged.
+
+### API usage & cost tracking (`usage_tracker.py`, added 4 Aug 2026)
+
+All four paid sources were verified **programmatically readable** on 4 Aug 2026 — nothing here is
+dashboard-only, estimated, or recalled:
+
+| Source | Mechanism | Verified reading |
+|---|---|---|
+| Anthropic | `message.usage` on every response | `input_tokens`, `output_tokens`, cache read/write, `service_tier` |
+| The Odds API | `x-requests-used` / `x-requests-remaining` headers | 360/500 used |
+| RapidAPI football | `X-RateLimit-Requests-*` headers | 407/20,000, resets ~11.7d |
+| RapidAPI tennis | same headers, **separate subscription** on the same key | 6,003/150,000, resets ~5.8d |
+
+**Anthropic is the only one that must be recorded rather than read.** Its usage is per-response and
+ephemeral, and there is no org-level usage/cost API — so `record_anthropic_usage()` appends a row to
+the **`API Usage` Sheets tab** on every Claude call, in both `main.py` and `tennis_main.py`, *before*
+the JSON parse can raise (the call is billed whether or not the parse succeeds). It never raises: a
+dropped row costs a line of reporting accuracy, an exception would cost the day's picks.
+
+**Storage is Sheets, not `picks.db`** — Railway's filesystem is ephemeral and SQLite would not
+survive a redeploy.
+
+**The monthly figure is labelled "since tracking started", not month-to-date.** Calls made before
+4 Aug 2026 cannot be recovered from any API, so presenting a true MTD number would be fiction. The
+report says so in the message itself.
+
+**Odds API units ≠ requests.** One call bills `regions × markets` = **6 units** (`eu,uk` ×
+`h2h,totals,spreads`) — measured, not assumed: one call moved `x-requests-used` 294 → 300. The
+500/month free tier is therefore ~83 calls, not 500. A **hard stop** (`odds_budget_exhausted()`)
+halts *all* closing-odds polling below `ODDS_API_RESERVE = 50` units so the quota can never hit zero
+mid-month and take the picks-run odds enrichment down with it — enrichment produces live value flags,
+so polling is what yields. The check uses `GET /v4/sports`, which is **free** (verified: it does not
+move `x-requests-used`), and it **fails open** — an unreadable quota must not silently disable
+polling for a month. The daily summary warns below 25% remaining.
 
 ### Form & H2H enrichment (added)
 - Before calling Claude, `enrich_with_context()` fetches from RapidAPI:

@@ -737,6 +737,14 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
         system=TENNIS_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Upcoming tennis fixtures (next 48 hours):\n\n{payload}"}],
     )
+    # Record token usage before the parse below can raise — the call is
+    # billed whether or not we manage to read the JSON.
+    try:
+        from usage_tracker import record_anthropic_usage
+        record_anthropic_usage("tennis-picks", message.model, message.usage)
+    except Exception as exc:
+        log.debug("usage recording skipped: %s", exc)
+
     raw = message.content[0].text.strip()
     log.info("Claude raw tennis response (%d chars):\n%s", len(raw), raw)
 

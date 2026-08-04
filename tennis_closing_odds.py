@@ -93,6 +93,15 @@ def run_tennis_closing_odds_check() -> None:
     if not due:
         return
 
+    # Monthly reserve hard stop, checked before the daily cap — see the twin
+    # in closing_odds.py. Tennis and football share ONE 500-unit monthly
+    # quota, so either pipeline draining it starves the other; the reserve is
+    # what stops that becoming a zero-quota outage mid-month.
+    from usage_tracker import odds_budget_exhausted
+    if odds_budget_exhausted():
+        log.warning("tennis_closing_odds: monthly Odds API reserve reached — polling halted")
+        return
+
     if _request_count >= MAX_DAILY_TENNIS_REQUESTS:
         log.warning(
             "tennis_closing_odds: daily Odds API request cap (%d) already reached — skipping",

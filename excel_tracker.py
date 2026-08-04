@@ -101,6 +101,13 @@ TRACKED_LEAGUES: list[str] = [
 # Keeps the league breakdown's P&L reconcilable with the headline total.
 _NO_LEAGUE = "(no league recorded)"
 
+# Minimum decided picks (wins + losses) before a Bet Type × League cell is
+# allowed to show a win rate. Below this it reads 'insufficient data' — a
+# 2-pick cell at 100% reads as a finding when it is noise. Slicing two ways at
+# once splits an already-small sample hard, so most cells sit under this for a
+# long time; that is the honest state, not a gap to be filled.
+_MIN_CELL_SAMPLE = 10
+
 
 def _apply_formatting(ss: gspread.Spreadsheet) -> None:
     try:
@@ -666,6 +673,63 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
     # instead of shuffling between refreshes.
     lg_rows.sort(key=lambda x: (-x[4], -x[5], x[0]))
 
+    # ── Bet type × league cross-breakdown ────────────────────────────────────
+    # Win rate is suppressed below _MIN_CELL_SAMPLE and replaced with
+    # 'insufficient data': a 2-pick cell reading 100% is worse than no number,
+    # because it invites exactly the conclusion the sample cannot support.
+    #
+    # The gate is on the rate's OWN denominator (wins + losses), not on the
+    # count of settled picks. A cell holding 10 settled picks that are 8 VOIDs
+    # and 2 decided would pass a settled>=10 test and then print the very
+    # 2-sample rate this rule exists to hide. P&L and pick count are always
+    # shown — only the rate is unsafe at low n.
+    #
+    # Only leagues with at least one settled pick get rows, so the seven
+    # competitions still waiting for their 2026-27 season open contribute
+    # nothing here (they remain visible, at zero, in the League Breakdown).
+    xl_cells: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"wins": 0, "losses": 0, "pnl": 0.0, "picks": 0}
+    )
+    league_settled: dict[str, int] = defaultdict(int)
+    for r in rows:
+        league = r[12].strip() if len(r) > 12 and r[12].strip() else _NO_LEAGUE
+        result = r[6] if len(r) > 6 else ""
+        if result in _SETTLED_RESULTS:
+            league_settled[league] += 1
+        bt = r[2].strip() if len(r) > 2 else ""
+        if not bt:
+            continue                         # no bet type = no cell to file it under
+        cell = xl_cells[(league, bt)]
+        cell["picks"] += 1                   # every logged pick, settled or not
+        if result not in _SETTLED_RESULTS or result == "VOID":
+            continue
+        cell["pnl"] += _pnl(r)
+        if result == "WIN":
+            cell["wins"] += 1
+        elif result == "LOSS":
+            cell["losses"] += 1
+
+    xl_by_league: dict[str, list] = defaultdict(list)
+    xl_league_pnl: dict[str, float] = defaultdict(float)
+    for (league, bt), g in xl_cells.items():
+        xl_by_league[league].append((bt, g))
+        xl_league_pnl[league] += g["pnl"]
+
+    xl_rows = []
+    # League order matches the League Breakdown above — P&L descending — so the
+    # two sections read in the same sequence.
+    for league in sorted(
+        (lg for lg in xl_by_league if league_settled.get(lg, 0) > 0),
+        key=lambda lg: (-xl_league_pnl[lg], lg),
+    ):
+        cells = sorted(xl_by_league[league],
+                       key=lambda c: (-c[1]["pnl"], -c[1]["picks"], c[0]))
+        for bt, g in cells:
+            decided = g["wins"] + g["losses"]
+            win_rate_cell = (f"{g['wins'] / decided * 100:.1f}%"
+                             if decided >= _MIN_CELL_SAMPLE else "insufficient data")
+            xl_rows.append([league, bt, win_rate_cell, round(g["pnl"], 2), g["picks"]])
+
     data = [
         ["PERFORMANCE SUMMARY", ""],
         ["", ""],
@@ -701,7 +765,15 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         # bet-type table's 'Total Picks' (settled wins + losses only) — it is
         # what shows a competition is tracked but not yet in season.
         ["League", "Wins", "Losses", "Win Rate %", "Total P&L", "Picks"],
-    ] + lg_rows
+    ] + lg_rows + [
+        ["", ""],
+        ["BET TYPE × LEAGUE BREAKDOWN", "", "", "", ""],
+        # Spelled out in the sheet so 'insufficient data' needs no explaining
+        # to whoever is reading it.
+        [f"Win rate shown only at {_MIN_CELL_SAMPLE}+ decided picks "
+         f"(wins + losses); smaller cells read 'insufficient data'", "", "", "", ""],
+        ["League", "Bet Type", "Win Rate %", "Total P&L", "Picks"],
+    ] + xl_rows
 
     ws_sum = ss.worksheet("Summary")
     ws_sum.clear()

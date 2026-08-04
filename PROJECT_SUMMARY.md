@@ -13,7 +13,7 @@ An automated football betting analysis bot that:
 - Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
 - Tracks all picks and P&L in a Google Sheet with conditional formatting, a Picks tab and a Summary tab
 
-Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), UEFA Conference League (added 30 Jul 2026 — qualifying rounds, league phase and knockouts; see "Conference League leagueId resolution" below), and FIFA World Cup 2026 (ended 19 Jul 2026).
+Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), UEFA Champions League (added 4 Aug 2026 — qualifying rounds, league phase and knockouts; **already producing fixtures**, Q3 is under way), UEFA Conference League (added 30 Jul 2026, same three stages), and FIFA World Cup 2026 (ended 19 Jul 2026). Both UEFA competitions are matched by stable parent id rather than a pinned feed id — see "UEFA leagueId resolution" below.
 
 Since 9 Jul 2026 the repo also hosts a **fully separate tennis picks system** (ATP/WTA) — see the "Tennis System — SEPARATE from football" section below. The two systems share the Railway process and API keys but no data paths, tabs, or calibration samples.
 
@@ -139,6 +139,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `la-liga` | Each La Liga pick as an embed (league tracked since 19 Jul 2026; first fixtures ~15 Aug 2026) | `main.py` |
 | `serie-a` | Each Serie A pick as an embed (league tracked since 19 Jul 2026; first fixtures ~22 Aug 2026) | `main.py` |
 | `ligue-1` | Each Ligue 1 pick as an embed (league tracked since 19 Jul 2026; first fixtures ~21 Aug 2026) | `main.py` |
+| `champions-league` | Each Champions League pick as an embed (tracked since 4 Aug 2026; live immediately — Q3 fixtures were already in the 48h window that day) | `main.py` |
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
@@ -152,6 +153,11 @@ league missing from that map is simply not routed to a per-league channel; nothi
 errors. To also get per-pick embeds later, add a `conference-league` channel id to
 `DISCORD_CHANNELS_JSON` and the matching `"Conference League": "conference-league"`
 entry to `DISCORD_LEAGUE_CHANNEL_KEYS`.
+
+**Champions League is the opposite case** (added 4 Aug 2026): it *does* have a
+dedicated `champions-league` channel and is in `DISCORD_LEAGUE_CHANNEL_KEYS`, so its
+picks get per-pick embeds *and* appear on the card. The two UEFA competitions share
+all their fixture-matching machinery and differ only in this routing choice.
 
 **Pick embed format** (built by `discord_bot.py`'s `build_pick_embed()`, since 10 Jul 2026 — previously plain text): title = match name; stripe colour by confidence (High = green `#00c853`, Medium = blue `#2196f3`, Low = orange `#ff6f00`); a full-width **Pick** field with the selection; inline **Bet Type** / **Odds** / **Confidence** fields side by side (Odds shows `Claude X | Market Y` when real odds were matched); the full reasoning as the description; a `🔥 VALUE` footer only when the pick beat the market by ≥5pp. Context renders as the small author line — the league for football, `Tour | Tournament | Surface` for tennis. Card/result sends (`picks-cards`, `results-cards`, `weekly-cards`, `tennis-results`) are unchanged plain text/images.
 
@@ -223,36 +229,57 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - Duplicate pick prevention (won't re-post same pick same day)
 - Single daily job at 12:00 Brussels — evening picks job removed
 
-### Conference League leagueId resolution (added 30 Jul 2026)
+### UEFA leagueId resolution (Conference League 30 Jul 2026; generalised for Champions League 4 Aug 2026)
 The by-date fixtures feed returns no competition name — only a `leagueId` that is
-**season- and stage-specific**. UEFA Conference League qualifying for 2026-27 is
-`937351`; that id rotates when qualifying ends and the league phase begins, and
-again every season, so pinning it would make the competition silently vanish from
-the picks mid-season.
+**season- and stage-specific**. That id rotates when qualifying ends and the league
+phase begins, and again every season, so pinning it would make the competition
+silently vanish from the picks mid-season. Champions League is the clearest proof:
+its feed id was `904988` in the 2025-26 league phase and is `937348` in 2026-27
+qualifying. **This is why Champions League is not in `LEAGUES`** — that dict is for
+domestic leagues whose single id is stable all season.
 
 Instead `partition_fixtures()` matches against the *stable* fotmob parent ids in
-`CONFERENCE_LEAGUE_PARENT_IDS` — `10615` (Conference League Qualification) and
-`10216` (Conference League):
+`UEFA_PARENT_IDS`:
 
-- Fast path: any match whose `leagueId` is in `CONFERENCE_LEAGUE_IDS` (seeded with
-  `937351`) is bucketed straight away — **zero extra API calls**.
-- Self-heal: only when that yields nothing does `_discover_conference_league_ids()`
-  run. It resolves unfamiliar `leagueId`s to their `parentLeagueId` via
-  `football-get-match-detail` (one lookup per distinct id, largest fixture lists
-  first, capped at `MAX_PARENT_LOOKUPS_PER_RUN = 12`) and adds any match to
-  `CONFERENCE_LEAGUE_IDS`.
+| Competition | Qualification parent | Main parent |
+|---|---|---|
+| Champions League | `10611` | `42` |
+| Conference League | `10615` | `10216` |
+
+- Fast path: any match whose `leagueId` is in `UEFA_FEED_IDS[competition]` (seeded
+  with `937348` / `937351`) is bucketed straight away — **zero extra API calls**.
+- Self-heal: only when some tracked competition yields nothing does
+  `_discover_uefa_feed_ids()` run. It resolves unfamiliar `leagueId`s to their
+  `parentLeagueId` via `football-get-match-detail` (one lookup per distinct id,
+  largest fixture lists first, capped at `MAX_PARENT_LOOKUPS_PER_RUN = 12`) and
+  files each hit under the competition that owns that parent.
+- **One shared sweep serves every UEFA competition, and it must.** `_parent_league_cache`
+  records each id exactly once, so a second per-competition sweep would skip every
+  id the first had already resolved — including its own, filed as cached misses.
+  Anything added here goes in `UEFA_PARENT_IDS`, never in a parallel sweep.
 - `_parent_league_cache` caches hits *and* misses for the process lifetime, so a
   rotated id costs one discovery sweep and never again. `main.py` runs as a
   long-lived scheduler, so the cache resets only on redeploy.
 
-Verified 30 Jul 2026 against live data: 19 Conference League Q2 fixtures bucketed,
-Europa League Qualification (`937349`, parent `10613`) correctly excluded, and a
-wiped seed rediscovered `937351` and produced an identical fixture set.
+Verified 30 Jul 2026: 19 Conference League Q2 fixtures bucketed, Europa League
+Qualification (`937349`, parent `10613`) correctly excluded, wiped seed rediscovered.
+Re-verified 4 Aug 2026 for Champions League: `937348` resolved live to parent `10611`
+("Champions League Qualification"), `904988` (17 Sep 2025) to parent `42`
+("Champions League"); 2 Q3 fixtures bucketed on the fast path with no extra calls; a
+wiped CL seed rediscovered `937348` and produced an identical fixture set with
+Conference League unaffected.
 
-**Odds caveat:** The Odds API has no key for Conference League *qualifying* — only
-`soccer_uefa_europa_conference_league` for the main competition, which is inactive
-until the league phase. Qualifying picks are therefore Claude-odds-only (no market
-odds, no value flag), degrading exactly like any unmapped competition.
+**Odds caveat (Conference League only):** The Odds API has no key for Conference
+League *qualifying* — only `soccer_uefa_europa_conference_league` for the main
+competition, which is inactive until the league phase. Qualifying picks are
+therefore Claude-odds-only (no market odds, no value flag).
+**Champions League does not have this problem:** it maps to a *tuple* of keys,
+`("soccer_uefa_champs_league", "soccer_uefa_champs_league_qualification")`, tried in
+order with the first non-empty result winning. Measured 4 Aug 2026: an out-of-season
+key answers HTTP 200 with `[]` and is **not billed** against the quota (only a key
+returning fixtures costs the 6 units of 2 regions × 3 markets), so the fallback is
+free and CL qualifying picks get real market odds today. `_fetch_odds_events()`
+accepts a plain string or a tuple, so every other competition is unchanged.
 
 ### Form & H2H enrichment (added)
 - Before calling Claude, `enrich_with_context()` fetches from RapidAPI:
@@ -312,7 +339,7 @@ odds, no value flag), degrading exactly like any unmapped competition.
 ### Discord delivery (added — `discord_bot.py`)
 - Every daily picks card and weekly card is mirrored to Discord right after its Telegram send
 - Live result notifications (the automatic 30-minute checker) mirror to Discord from the identical trigger as the Telegram notification; the results PNG card additionally mirrors when the manual `--results` path generates it
-- Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup`) — see section 5b for the embed format
+- Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup` / `bundesliga` / `la-liga` / `serie-a` / `ligue-1` / `champions-league`) — see section 5b for the embed format
 - Entirely fail-silent — see section 5b for the mapping structure and guarantees
 
 ### Tracking and reporting
@@ -354,7 +381,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Area | Done | Status |
 |---|---|---|
 | Bot core | 95% | Live — picks, results, sheets, cards, Telegram all automated on Railway |
-| Data quality | 82% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); no injuries/lineups |
+| Data quality | 84% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |

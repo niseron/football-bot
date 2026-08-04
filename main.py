@@ -88,21 +88,33 @@ WC_2026_PARTICIPANTS: set[str] = {
     "Vanuatu", "Solomon Islands", "Papua New Guinea",
 }
 
-# UEFA Conference League — the fixtures feed tags matches with a
-# season/stage-specific leagueId (937351 = "Conference League Qualification"
-# 2026-27, confirmed 30 Jul 2026 via football-get-match-detail), and that id
-# rotates when qualifying ends and the league phase starts. Pinning it would
-# silently stop matching mid-season, so unfamiliar leagueIds are resolved to
-# their stable fotmob parent competition id instead and matched against these.
-CONFERENCE_LEAGUE_PARENT_IDS: set[int] = {
-    10216,   # Conference League — league phase + knockout rounds
-    10615,   # Conference League Qualification
+# UEFA club competitions — the fixtures feed tags matches with a season- and
+# stage-specific leagueId that rotates when qualifying ends and the league phase
+# starts, and again every season. Pinning those ids would silently stop matching
+# mid-season, so unfamiliar leagueIds are resolved to their stable fotmob parent
+# competition id instead and matched against these. This is why Champions League
+# is NOT in LEAGUES above: its feed id was 904988 in the 2025-26 league phase and
+# is 937348 in 2026-27 qualifying, so a single pinned id cannot survive a season.
+# All four parent ids confirmed 4 Aug 2026 via football-get-match-detail against
+# live fixtures (see PROJECT_SUMMARY.md "UEFA leagueId resolution").
+UEFA_PARENT_IDS: dict[str, set[int]] = {
+    "Champions League": {
+        42,      # Champions League — league phase + knockout rounds
+        10611,   # Champions League Qualification
+    },
+    "Conference League": {
+        10216,   # Conference League — league phase + knockout rounds
+        10615,   # Conference League Qualification
+    },
 }
 
-# Feed leagueIds already known to be Conference League. Seeded with the current
-# qualifying id so the common case costs no lookups; the resolver adds rotated
-# ids as it discovers them.
-CONFERENCE_LEAGUE_IDS: set[int] = {937351}
+# Feed leagueIds already known, per competition. Seeded with the ids live on
+# 4 Aug 2026 so the common case costs no lookups; the resolver adds rotated ids
+# as it discovers them.
+UEFA_FEED_IDS: dict[str, set[int]] = {
+    "Champions League": {937348},    # Champions League Qualification 2026-27
+    "Conference League": {937351},   # Conference League Qualification 2026-27
+}
 
 # Feed leagueId -> stable parent leagueId, cached for the process lifetime
 # (main.py runs as a long-lived scheduler, so each id is resolved at most once
@@ -121,8 +133,9 @@ RAPIDAPI_HOST = "free-api-live-football-data.p.rapidapi.com"
 
 ODDS_API_HOST = "https://api.the-odds-api.com/v4"
 
-# Maps our internal competition names to The Odds API's sport keys.
-ODDS_API_SPORT_KEYS: dict[str, str] = {
+# Maps our internal competition names to The Odds API's sport keys. A value may
+# be a tuple when one competition spans several keys — see _fetch_odds_events.
+ODDS_API_SPORT_KEYS: dict[str, str | tuple[str, ...]] = {
     "Premier League": "soccer_epl",
     "Jupiler Pro League": "soccer_belgium_first_div",
     "FIFA World Cup 2026": "soccer_fifa_world_cup",
@@ -130,6 +143,14 @@ ODDS_API_SPORT_KEYS: dict[str, str] = {
     "La Liga": "soccer_spain_la_liga",
     "Serie A": "soccer_italy_serie_a",
     "Ligue 1": "soccer_france_ligue_one",
+    # Champions League splits its season across two keys: the main one is
+    # inactive until the league phase in September, while the qualification key
+    # is live now. Tried in order, first non-empty wins — an out-of-season key
+    # answers 200 with an empty list and is not billed, so this costs nothing.
+    "Champions League": (
+        "soccer_uefa_champs_league",
+        "soccer_uefa_champs_league_qualification",
+    ),
     # The Odds API has no separate key for Conference League qualifying, so
     # qualifying-round picks stay Claude-odds-only (fetch_real_odds returns
     # None and the caller falls back) until the league phase makes this live.
@@ -147,6 +168,7 @@ DISCORD_LEAGUE_CHANNEL_KEYS: dict[str, str] = {
     "La Liga": "la-liga",
     "Serie A": "serie-a",
     "Ligue 1": "ligue-1",
+    "Champions League": "champions-league",
 }
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -233,13 +255,18 @@ def _resolve_parent_league(match: dict) -> int | None:
         return None
 
 
-def _discover_conference_league_ids(upcoming: list[dict], known_ids: set[int]) -> set[int]:
+def _discover_uefa_feed_ids(upcoming: list[dict], known_ids: set[int]) -> dict[str, set[int]]:
     """
-    Find Conference League feed leagueIds we don't know yet, by resolving each
-    unfamiliar leagueId to its parent competition. One lookup per distinct
-    leagueId, cached process-wide (hits and misses both) and capped per run.
-    Largest fixture lists are checked first — a Conference League round is
-    always one of the bigger blocks of matches on its matchday.
+    Find UEFA feed leagueIds we don't know yet, by resolving each unfamiliar
+    leagueId to its parent competition. One lookup per distinct leagueId, cached
+    process-wide (hits and misses both) and capped per run. Largest fixture
+    lists are checked first — a UEFA round is always one of the bigger blocks of
+    matches on its matchday.
+
+    ONE shared sweep serves every tracked UEFA competition, and it has to be:
+    _parent_league_cache records each leagueId exactly once, so a second,
+    per-competition sweep would skip every id the first had already resolved —
+    including that competition's own ids, filed as cached misses.
     """
     by_league: dict[int, list[dict]] = {}
     for m in upcoming:
@@ -249,7 +276,7 @@ def _discover_conference_league_ids(upcoming: list[dict], known_ids: set[int]) -
         by_league.setdefault(lid, []).append(m)
 
     if not by_league:
-        return set()
+        return {}
 
     candidates = sorted(by_league.items(), key=lambda kv: -len(kv[1]))
     if len(candidates) > MAX_PARENT_LOOKUPS_PER_RUN:
@@ -258,17 +285,19 @@ def _discover_conference_league_ids(upcoming: list[dict], known_ids: set[int]) -
             len(candidates), MAX_PARENT_LOOKUPS_PER_RUN,
         )
 
-    found: set[int] = set()
+    found: dict[str, set[int]] = {}
     for lid, matches in candidates[:MAX_PARENT_LOOKUPS_PER_RUN]:
         time.sleep(1)
         parent = _resolve_parent_league(matches[0])
         _parent_league_cache[lid] = parent
-        if parent in CONFERENCE_LEAGUE_PARENT_IDS:
-            found.add(lid)
-            log.info(
-                "Discovered Conference League leagueId %s (parent %s, %d matches)",
-                lid, parent, len(matches),
-            )
+        for competition, parent_ids in UEFA_PARENT_IDS.items():
+            if parent in parent_ids:
+                found.setdefault(competition, set()).add(lid)
+                log.info(
+                    "Discovered %s leagueId %s (parent %s, %d matches)",
+                    competition, lid, parent, len(matches),
+                )
+                break
     return found
 
 
@@ -310,21 +339,28 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
                 summaries.append(f)
             result["FIFA World Cup 2026"] = summaries
 
-    # UEFA Conference League — qualifying ties plus league-phase/knockout games.
-    conference = [m for m in upcoming if m.get("leagueId") in CONFERENCE_LEAGUE_IDS]
-    if not conference:
-        # Nothing under a known id: either the competition simply isn't playing
-        # in this window, or its feed id rotated (qualifying -> league phase, or
-        # a new season). Only then is the sweep worth its lookups — and results
-        # are cached, so a rotated id costs one discovery and never again.
-        CONFERENCE_LEAGUE_IDS.update(
-            _discover_conference_league_ids(
-                upcoming, domestic_ids | WC_2026_IDS | CONFERENCE_LEAGUE_IDS
-            )
-        )
-        conference = [m for m in upcoming if m.get("leagueId") in CONFERENCE_LEAGUE_IDS]
-    if conference:
-        result["Conference League"] = [build_fixture_summary(m) for m in conference]
+    # UEFA club competitions — qualifying ties plus league-phase/knockout games.
+    uefa: dict[str, list[dict]] = {
+        competition: [m for m in upcoming if m.get("leagueId") in feed_ids]
+        for competition, feed_ids in UEFA_FEED_IDS.items()
+    }
+    if not all(uefa.values()):
+        # At least one competition has nothing under a known id: either it
+        # simply isn't playing in this window, or its feed id rotated
+        # (qualifying -> league phase, or a new season). Only then is the sweep
+        # worth its lookups — and results are cached, so a rotated id costs one
+        # discovery and never again.
+        known_ids = domestic_ids | WC_2026_IDS
+        for feed_ids in UEFA_FEED_IDS.values():
+            known_ids |= feed_ids
+        for competition, new_ids in _discover_uefa_feed_ids(upcoming, known_ids).items():
+            UEFA_FEED_IDS.setdefault(competition, set()).update(new_ids)
+            uefa[competition] = [
+                m for m in upcoming if m.get("leagueId") in UEFA_FEED_IDS[competition]
+            ]
+    for competition, matches in uefa.items():
+        if matches:
+            result[competition] = [build_fixture_summary(m) for m in matches]
 
     return result
 
@@ -467,33 +503,47 @@ def _team_match(a: str, b: str) -> bool:
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.72
 
 
-def _fetch_odds_events(sport_key: str | None) -> list[dict] | None:
+def _fetch_odds_events(sport_key: str | tuple[str, ...] | None) -> list[dict] | None:
     """
     Raw fetch of every event + bookmaker odds for one Odds API sport_key.
     None if the sport_key/API key is missing or the request fails. Split out
     from fetch_real_odds so callers that need odds for several matches in the
     same competition (e.g. the closing-odds job) can fetch once and filter
     client-side, instead of one request per match.
+
+    A competition may map to several keys (Champions League splits its season
+    across a qualifying key and a main key). They are tried in order and the
+    first non-empty result wins. Measured 4 Aug 2026: an out-of-season key
+    answers HTTP 200 with an empty list and is NOT billed against the quota,
+    so the extra key costs nothing — only a key that actually returns fixtures
+    is charged, and that ends the loop.
     """
     api_key = os.environ.get("ODDS_API_KEY")
     if not sport_key or not api_key:
         return None
-    try:
-        resp = requests.get(
-            f"{ODDS_API_HOST}/sports/{sport_key}/odds",
-            params={
-                "apiKey": api_key,
-                "regions": "eu,uk",
-                "markets": "h2h,totals,spreads",
-                "oddsFormat": "decimal",
-            },
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as exc:
-        log.debug("_fetch_odds_events(%s) failed: %s", sport_key, exc)
-        return None
+    keys = (sport_key,) if isinstance(sport_key, str) else tuple(sport_key)
+    reachable: list[dict] | None = None
+    for key in keys:
+        try:
+            resp = requests.get(
+                f"{ODDS_API_HOST}/sports/{key}/odds",
+                params={
+                    "apiKey": api_key,
+                    "regions": "eu,uk",
+                    "markets": "h2h,totals,spreads",
+                    "oddsFormat": "decimal",
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            events = resp.json()
+        except Exception as exc:
+            log.debug("_fetch_odds_events(%s) failed: %s", key, exc)
+            continue
+        if events:
+            return events
+        reachable = events   # in season but no fixtures listed — keep looking
+    return reachable
 
 
 def _parse_odds_event(event: dict) -> dict:
@@ -655,17 +705,20 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a professional football betting analyst with deep expertise in the Premier League,
-Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Conference League, and
-international tournament football including the FIFA World Cup.
+Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Champions League, the UEFA
+Conference League, and international tournament football including the FIFA World Cup.
 You receive upcoming fixtures for the next 48 hours and must identify the top 5 value bets across all competitions.
 
-Conference League fixtures are European club ties. Qualifying rounds and the knockout phase are played
-over two legs, so the h2h data for such a fixture often contains the first leg of the very same tie —
-when it does, treat it as the single most informative data point you have, and factor in that a team
-holding a comfortable aggregate lead may rotate or play conservatively. Ties also pair clubs from very
-different league strengths, so weight domestic-league quality alongside form. Unless a fixture is
-explicitly marked "knockout": true, bet on the 90 minutes of THIS leg only — a two-legged tie's
-individual leg is a normal 3-way match, not an elimination game.
+Champions League and Conference League fixtures are European club ties. Qualifying rounds and the
+knockout phase are played over two legs, so the h2h data for such a fixture often contains the first leg
+of the very same tie — when it does, treat it as the single most informative data point you have, and
+factor in that a team holding a comfortable aggregate lead may rotate or play conservatively. Ties also
+pair clubs from very different league strengths, so weight domestic-league quality alongside form. This
+is at its most extreme in Champions League qualifying, where a champion of a small association can draw
+a side from a major league: the gap in squad depth is usually wider than recent domestic form suggests,
+because those domestic results were earned against far weaker opposition. Unless a fixture is explicitly
+marked "knockout": true, bet on the 90 minutes of THIS leg only — a two-legged tie's individual leg is a
+normal 3-way match, not an elimination game.
 
 Each fixture may include the following enriched context — use it to sharpen your analysis:
 - home_form / away_form: last 5 results for each team as W/D/L (oldest → newest). venue field: H=home, A=away.

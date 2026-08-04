@@ -21,6 +21,11 @@ Channel keys used by the pipeline (any key may be omitted — it is skipped):
     premier-league      per-pick embed                  (main.py)
     jupiler-pro-league  per-pick embed                  (main.py)
     world-cup           per-pick embed                  (main.py)
+    bundesliga          per-pick embed                  (main.py)
+    la-liga             per-pick embed                  (main.py)
+    serie-a             per-pick embed                  (main.py)
+    ligue-1             per-pick embed                  (main.py)
+    champions-league    per-pick embed                  (main.py)
     tennis-picks        TENNIS top-tier per-pick embed (both players inside
                         TENNIS_RANK_THRESHOLD), Discord-only  (tennis_main.py)
     tennis-picks-lower  TENNIS lower-tier per-pick embed (either player

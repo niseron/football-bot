@@ -367,8 +367,23 @@ accepts a plain string or a tuple, so every other competition is unchanged.
 - Bet type breakdown also included in weekly Monday summary
 - Weekly summary date range shows the completed previous week (fixed from current week)
 - Win rate in `get_summary_win_rate()` scans by label (not hardcoded cell address) — robust to row additions
-- World Cup 2026 support: group-stage and knockout match detection via team name fallback
+- World Cup 2026 support: membership decided by `_is_wc_match()` — BOTH teams must be confirmed WC participants, checked on every fixture; the `leagueId` only disqualifies (domestic club competitions) and separates group stage from knockout
 - Youth team filtering (U19, U21, U23 matches excluded)
+
+**World Cup validation-ordering bug, fixed 4 Aug 2026.** The selection used to read
+`leagueId in WC_2026_IDS or _is_wc_knockout(...)`, and `_is_wc_knockout()` returned
+`False` as soon as it saw a known WC id — so any fixture on an id in `WC_2026_IDS`
+was accepted with **no participant validation at all**. One wrong id in that set
+therefore silently overrode a correct check. One was wrong: `914609`, seeded as the
+"opening batch (Jun 11)", is the international **`Friendlies`** id (parent 114), and
+it logged `Vietnam vs Myanmar` as a World Cup pick on 18 Jul 2026 even though Myanmar
+is not a participant. `914609` is removed and the participant check is now
+unconditional. Replayed over 40 cached days / ~3,100 fixtures the change flips
+exactly one selection (that match), and **zero** fixtures on a known WC group id are
+rejected by the stricter check — so it costs no genuine coverage. Residual risk worth
+knowing: a friendly between two *participant* nations would still pass the participant
+fallback; only an explicit non-WC id list would close that, and the WC block is
+date-gated shut (`WC_2026_END`, 19 Jul 2026) so it cannot fire again as written.
 
 ---
 

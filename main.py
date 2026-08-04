@@ -43,8 +43,14 @@ LEAGUES = {
 
 # 2026 FIFA World Cup — group-stage leagueIds confirmed via live API scan Jun 11-28.
 # One ID per group/batch; knockout IDs are unknown until draws happen post-group stage.
+#
+# 914609 was in this set, seeded as the "opening batch (Jun 11)". It is NOT a
+# World Cup id — football-get-match-detail resolves it to 'Friendlies', parent
+# 114 (checked 4 Aug 2026). It pulled international friendlies into the World
+# Cup bucket; Vietnam vs Myanmar on 18 Jul 2026 was logged as a World Cup pick
+# because of it. Removed. See _is_wc_match() for the ordering fix that stops a
+# bad id here from overriding participant validation ever again.
 WC_2026_IDS: set[int] = {
-    914609,                                    # opening batch  (Jun 11)
     894790, 894791, 894792, 894793,            # groups batch   (Jun 12-14)
     894794, 894795, 894796, 894797,            # groups batch   (Jun 14-15)
     894798, 894799, 894800, 894801,            # groups batch   (Jun 17-28)
@@ -220,15 +226,30 @@ def _is_wc_participant(name: str) -> bool:
     return name in WC_2026_PARTICIPANTS and not _YOUTH_RE.search(name)
 
 
-def _is_wc_knockout(match: dict, domestic_ids: set[int]) -> bool:
+def _is_wc_match(match: dict, domestic_ids: set[int]) -> bool:
     """
-    Detect a WC knockout match on a previously-unknown leagueId.
-    Fires when both teams are confirmed WC participants and the leagueId
-    is not a known domestic/club competition.
+    True if a fixture belongs to the World Cup.
+
+    BOTH teams must be confirmed senior WC participants, and that check runs
+    for EVERY fixture — it is never skipped because the leagueId looked right.
+
+    It used to be the other way round. The selection read
+
+        leagueId in WC_2026_IDS or _is_wc_knockout(match, domestic_ids)
+
+    and `_is_wc_knockout` returned False the moment it saw a known WC id, so a
+    match on any id in WC_2026_IDS was accepted with no participant validation
+    at all. One wrong id in that set therefore silently overrode a correct
+    check — and did: 914609 was seeded as a WC id but is the international
+    'Friendlies' id, which is how Vietnam vs Myanmar became a World Cup pick on
+    18 Jul 2026 even though Myanmar is not a WC participant.
+
+    The leagueId no longer decides membership. It survives only as a
+    disqualifier (a domestic club competition is never the World Cup) and, at
+    the call site, as the group-vs-knockout signal.
     """
-    lid = match.get("leagueId")
-    if lid in WC_2026_IDS or lid in domestic_ids:
-        return False  # already handled, or definitely not WC
+    if match.get("leagueId") in domestic_ids:
+        return False
     home = match["home"]["longName"]
     away = match["away"]["longName"]
     return _is_wc_participant(home) and _is_wc_participant(away)
@@ -314,14 +335,13 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
         if found:
             result[league_name] = [build_fixture_summary(m) for m in found]
 
-    # World Cup — active until July 19 2026
-    # Primary: known group-stage leagueIds
-    # Fallback: any match where both teams are confirmed WC participants (catches knockout IDs)
+    # World Cup — active until July 19 2026.
+    # Membership is decided by _is_wc_match(), which requires BOTH teams to be
+    # confirmed WC participants for every fixture. The leagueId is not an
+    # alternative route in (that was the bug — see _is_wc_match); below it only
+    # separates known group-stage ids from knockout ones.
     if date.today() <= WC_2026_END:
-        wc = [
-            m for m in upcoming
-            if m.get("leagueId") in WC_2026_IDS or _is_wc_knockout(m, domestic_ids)
-        ]
+        wc = [m for m in upcoming if _is_wc_match(m, domestic_ids)]
         if wc:
             knockout_new = [m for m in wc if m.get("leagueId") not in WC_2026_IDS]
             if knockout_new:

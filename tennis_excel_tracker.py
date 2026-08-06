@@ -243,7 +243,9 @@ def log_tennis_pick(
         round(float(claude_prob), 1) if claude_prob is not None else "",
         round(float(market_prob), 1) if market_prob is not None else "",
         start_time_utc or "",
-        "",  # Closing Odds — populated later by the tennis closing-odds job, if at all
+        "",  # Closing Odds — stays empty since 6 Aug 2026: the tennis closing-odds
+             # job is disabled (tennis_main.TENNIS_ODDS_API_ENABLED). Keep the column,
+             # it holds the frozen 9 Jul - 6 Aug sample the CLV report still reads.
         rank_tier or "",
         # 'SIM' tag on the stake marks it as simulated — no real money on tennis yet
         f"{stake_eur:.2f} SIM" if stake_eur is not None else "",

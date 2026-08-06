@@ -180,6 +180,12 @@ def tennis_clv_report() -> dict | None:
     no Closing Odds value are skipped, not counted as zero. An empty tab
     returns the zeroed report (not None) so callers can distinguish "nothing
     yet" from "read failed".
+
+    NOTE (6 Aug 2026): closing-odds collection is switched off for tennis
+    (tennis_main.TENNIS_ODDS_API_ENABLED), so this report is FROZEN at the
+    9 Jul – 6 Aug 2026 sample and no newer pick can enter it. Every pick still
+    counts in the calibration report — only picks with a closing price reach
+    this one, exactly as before.
     """
     try:
         rows = _tennis_ws().get_all_values()

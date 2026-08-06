@@ -1,6 +1,15 @@
 """
 tennis_closing_odds.py — closing line value (CLV) tracker for the TENNIS system.
 
+*** DISABLED 6 Aug 2026 — user decision: the tennis pipeline makes no Odds API
+calls at all, so every Odds API unit goes to football. This module is a no-op
+while `tennis_main.TENNIS_ODDS_API_ENABLED` is False: the run function returns
+before reading the Sheet or touching the network, and run_all.py no longer
+schedules it. The tennis 'Closing Odds' column therefore stops accruing and
+tennis CLV is frozen at its historical sample. Nothing else changes — picks,
+calibration, results and every report keep all their picks. Re-enable by
+flipping that flag and restoring the scheduler job. ***
+
 Runs every 15 minutes (scheduled from run_all.py). Scans unsettled tennis
 picks for any whose match start is 5-65 minutes away, fetches current market
 odds from The Odds API across the active tennis tournament sport keys, and
@@ -22,6 +31,7 @@ from datetime import date, datetime, timezone
 
 from tennis_excel_tracker import get_unsettled_tennis_picks_with_start, update_tennis_closing_odds
 from tennis_main import (
+    TENNIS_ODDS_API_ENABLED,
     fetch_active_tennis_sport_keys,
     fetch_tennis_odds_events,
     match_tennis_market_odds,
@@ -77,8 +87,20 @@ def run_tennis_closing_odds_check() -> None:
     One poll cycle: find due tennis picks, fetch odds once per active tennis
     sport key (batched, not per match), write Closing Odds for every due pick
     that finds a market match.
+
+    No-op while the tennis Odds API switch is off (see the module docstring).
+    The guard is first on purpose: it returns before the Sheets read, so a
+    manual run costs nothing at all.
     """
     global _request_count
+
+    if not TENNIS_ODDS_API_ENABLED:
+        log.info(
+            "tennis_closing_odds: disabled (TENNIS_ODDS_API_ENABLED=False) — "
+            "tennis makes no Odds API calls; nothing to do"
+        )
+        return
+
     _reset_counter_if_new_day()
 
     try:

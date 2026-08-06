@@ -411,20 +411,35 @@ def enrich_tennis_context(fixtures_by_tour: dict[str, list[dict]]) -> None:
 
 # ── Real odds (The Odds API — dynamic tennis sport keys) ─────────────────────
 
+# ── MASTER SWITCH: The Odds API is OFF for tennis (6 Aug 2026) ───────────────
+# User decision — the tennis pipeline makes NO Odds API calls of any kind:
+# no picks-run market enrichment, no closing-odds polling. Every Odds API unit
+# is reserved for football, which keeps full usage. This single flag gates all
+# three tennis entry points below, so no tennis code path can reach the API
+# even if a new caller is added.
+#
+# Consequences (documented in PROJECT_SUMMARY.md section 7):
+#   - Tennis picks carry Claude odds only — no 'market_odds', no 'Market Prob %',
+#     no 🔥 VALUE flag.
+#   - The 'Closing Odds' column stops accruing, so tennis CLV is frozen at its
+#     historical sample. Tennis calibration is unaffected.
+# Flip to True (and re-add the scheduler job in run_all.py) to restore it.
+TENNIS_ODDS_API_ENABLED = False
+
 # The Odds API lists each tennis tournament as its own sport key
 # (e.g. tennis_atp_wimbledon, tennis_wta_us_open) that only exists while the
 # tournament is in season, so keys are discovered at runtime instead of being
 # hardcoded like the football league map.
-# Raised 6 -> 12 on 6 Aug 2026 with the paid tier. This caps the PICKS-RUN
-# enrichment, which is the high-value consumer: it produces the live value
-# flags and the 'Market Prob %' the calibration engine reads. It was held at 6
-# only because units were scarce; at 3 units/call, 12 keys costs 36 units per
-# run (~1,100/month) and covers far more of the day's tournament spread.
+# INERT while TENNIS_ODDS_API_ENABLED is False. Kept at the value it reached on
+# 6 Aug 2026 (6 -> 12 with the paid tier) so re-enabling restores the same
+# coverage without re-deriving the sizing.
 MAX_TENNIS_ODDS_KEYS_PER_RUN = 12
 
 
 def fetch_active_tennis_sport_keys() -> list[str]:
     """Active tennis sport keys from The Odds API. The /sports call is quota-free."""
+    if not TENNIS_ODDS_API_ENABLED:
+        return []
     api_key = os.environ.get("ODDS_API_KEY")
     if not api_key:
         return []
@@ -442,6 +457,8 @@ def fetch_active_tennis_sport_keys() -> list[str]:
 
 def fetch_tennis_odds_events(sport_key: str) -> list[dict] | None:
     """Raw events + bookmaker odds for one tennis sport key. None on failure."""
+    if not TENNIS_ODDS_API_ENABLED:
+        return None
     api_key = os.environ.get("ODDS_API_KEY")
     if not sport_key or not api_key:
         return None
@@ -600,7 +617,17 @@ def enrich_tennis_picks_with_real_odds(picks: list[dict]) -> None:
     is flagged as value only when Claude's implied probability exceeds the
     market's by at least 5 percentage points. Any failure leaves that pick
     unchanged.
+
+    DISABLED 6 Aug 2026 (TENNIS_ODDS_API_ENABLED): returns immediately without
+    calling The Odds API, so every tennis pick keeps its Claude odds and no
+    pick is dropped — only the market fields are absent.
     """
+    if not TENNIS_ODDS_API_ENABLED:
+        log.info(
+            "Tennis Odds API enrichment is disabled (TENNIS_ODDS_API_ENABLED=False) "
+            "— %d pick(s) keep Claude odds only", len(picks),
+        )
+        return
     if not picks:
         return
     sport_keys = fetch_active_tennis_sport_keys()[:MAX_TENNIS_ODDS_KEYS_PER_RUN]

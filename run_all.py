@@ -1,7 +1,11 @@
 """Single entry point for Railway.
 
 Football jobs: daily picks, live result checks, closing odds, weekly summary.
-Tennis jobs:   daily tennis picks, tennis closing odds.
+Tennis jobs:   daily tennis picks, tennis live result checks.
+
+Tennis has NO closing-odds job: The Odds API was switched off for tennis on
+6 Aug 2026 (see tennis_main.TENNIS_ODDS_API_ENABLED) so all Odds API units go
+to football. Football keeps its closing-odds poller unchanged.
 
 The tennis jobs are a fully separate system (tennis_main / tennis_excel_tracker /
 tennis_closing_odds / tennis_calibration): they share this process and scheduler
@@ -27,7 +31,6 @@ from tennis_auto_results import (
     _format_tennis_result_notification,
     run_tennis_auto_results,
 )
-from tennis_closing_odds import run_tennis_closing_odds_check
 from tennis_main import daily_tennis_picks_job
 from tracker import init_db
 from usage_tracker import post_daily_summary as post_usage_summary
@@ -61,13 +64,6 @@ async def closing_odds_job() -> None:
         await asyncio.to_thread(run_closing_odds_check)
     except Exception as exc:
         log.error("Closing odds check failed (non-fatal): %s", exc)
-
-
-async def tennis_closing_odds_job() -> None:
-    try:
-        await asyncio.to_thread(run_tennis_closing_odds_check)
-    except Exception as exc:
-        log.error("Tennis closing odds check failed (non-fatal): %s", exc)
 
 
 async def usage_summary_job() -> None:
@@ -121,9 +117,7 @@ async def main() -> None:
         daily_tennis_picks_job, "cron",
         hour=12, minute=30, timezone="Europe/Brussels",
     )
-    scheduler.add_job(
-        tennis_closing_odds_job, "interval", minutes=15,
-    )
+    # No tennis closing-odds job — Odds API disabled for tennis 6 Aug 2026
     scheduler.add_job(
         tennis_live_results_check, "interval", minutes=30,
     )
@@ -138,7 +132,8 @@ async def main() -> None:
         "Scheduler running — football: daily picks 12:00, "
         "weekly summary Mon 09:05, live results every 30 min, "
         "closing odds every 15 min | tennis: picks 12:30, "
-        "live results every 30 min, closing odds every 15 min (Europe/Brussels)"
+        "live results every 30 min, NO closing odds (Odds API off for "
+        "tennis) (Europe/Brussels)"
     )
 
     try:

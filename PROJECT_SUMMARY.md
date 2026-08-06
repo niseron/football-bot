@@ -15,7 +15,7 @@ An automated football betting analysis bot that:
 
 Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), UEFA Champions League (added 4 Aug 2026 — qualifying rounds, league phase and knockouts; **already producing fixtures**, Q3 is under way), UEFA Conference League (added 30 Jul 2026, same three stages), and FIFA World Cup 2026 (ended 19 Jul 2026). Both UEFA competitions are matched by stable parent id rather than a pinned feed id — see "UEFA leagueId resolution" below.
 
-Since 9 Jul 2026 the repo also hosts a **fully separate tennis picks system** (ATP/WTA) — see the "Tennis System — SEPARATE from football" section below. The two systems share the Railway process and API keys but no data paths, tabs, or calibration samples.
+Since 9 Jul 2026 the repo also hosts a **fully separate tennis picks system** (ATP/WTA) — see the "Tennis System — SEPARATE from football" section below. The two systems share the Railway process and API keys but no data paths, tabs, or calibration samples. Since 6 Aug 2026 tennis no longer uses The Odds API at all (football-only) — tennis CLV is disabled by choice; see section 7.
 
 ---
 
@@ -43,7 +43,7 @@ football-bot/
 ├── tennis_main.py            TENNIS system (separate) — daily ATP/WTA picks pipeline
 ├── tennis_excel_tracker.py   TENNIS Sheets layer — reads/writes ONLY the 'Tennis Picks' tab
 ├── tennis_auto_results.py    TENNIS automatic result checker — polls every 30 min via run_all.py
-├── tennis_closing_odds.py    TENNIS closing line value (CLV) tracker
+├── tennis_closing_odds.py    TENNIS closing line value (CLV) tracker — **DISABLED 6 Aug 2026** (no-op; tennis makes no Odds API calls)
 ├── tennis_calibration.py     TENNIS calibration engine — independent reports & 300-pick threshold
 ├── tennis_update_result.py   CLI to manually settle/override a tennis pick WIN/LOSS/VOID
 │
@@ -93,14 +93,14 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 - **Entry point:** `python run_all.py`
 - **Python version:** 3.12 (runtime.txt)
 - **Font support:** DejaVu Sans Mono TTFs are bundled in `fonts/` and tried first by `card_generator._font()` — no system font package needed. (A `nixpacks.toml` installing `fonts-dejavu` was documented here before, but that file was never committed, and `_font()` only searched `C:\Windows\Fonts` paths — so every Railway render fell back to Pillow's ~11px bitmap font and cards collapsed, e.g. 1080×460 on 11 Jul 2026. Fixed 11 Jul 2026.)
-- **Process:** Single process running seven APScheduler jobs — four football, three tennis (the tennis jobs share the process but no data paths):
+- **Process:** Single process running six APScheduler jobs — four football, two tennis (the tennis jobs share the process but no data paths):
   - Daily picks (football) — cron, 12:00 Europe/Brussels
   - Weekly summary (football) — cron, Monday 09:05 Europe/Brussels
   - Live result checks (football) — interval, every 30 minutes
   - Closing odds check (football CLV) — interval, every 15 minutes
   - Daily tennis picks — cron, 12:30 Europe/Brussels (30 min after football's daily picks)
-  - Tennis closing odds check (tennis CLV) — interval, every 15 minutes
   - Tennis live result checks — interval, every 30 minutes
+  - _(A tennis closing-odds job ran every 15 min until 6 Aug 2026; removed when The Odds API was switched off for tennis — see section 7.)_
 
 **To deploy a change:**
 1. Edit code locally
@@ -143,7 +143,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
-| `usage` | Daily API usage + cost report at 23:50 Brussels — Anthropic tokens/cost per job, The Odds API units against the 500/month tier, RapidAPI football + tennis quotas (added 4 Aug 2026) | `run_all.py` `usage_summary_job` → `usage_tracker.py` |
+| `usage` | Daily API usage + cost report at 23:50 Brussels — Anthropic tokens/cost per job, The Odds API units against the 20,000/month tier (football-only spend since 6 Aug 2026), RapidAPI football + tennis quotas (added 4 Aug 2026) | `run_all.py` `usage_summary_job` → `usage_tracker.py` |
 
 The league-name → key routing lives in `main.py`'s `DISCORD_LEAGUE_CHANNEL_KEYS`.
 
@@ -329,7 +329,7 @@ dashboard-only, estimated, or recalled:
 | Source | Mechanism | Verified reading |
 |---|---|---|
 | Anthropic | `message.usage` on every response | `input_tokens`, `output_tokens`, cache read/write, `service_tier` |
-| The Odds API | `x-requests-used` / `x-requests-remaining` headers | 441/500 used (6 Aug 2026 — key still reporting the **free** tier, see below) |
+| The Odds API | `x-requests-used` / `x-requests-remaining` headers | 3/20,000 used (6 Aug 2026 — **paid tier live** on a regenerated key; the original key never picked the upgrade up, see below) |
 | RapidAPI football | `X-RateLimit-Requests-*` headers | 407/20,000, resets ~11.7d |
 | RapidAPI tennis | same headers, **separate subscription** on the same key | 6,003/150,000, resets ~5.8d |
 
@@ -353,7 +353,14 @@ loses 3 of 12 bookmakers per event — `betfair_ex_uk`, `betfair_sb_uk`, `boyles
 and **keeps `betfair_ex_eu`**, so the sharpest price source survives and the averaged consensus in
 `_parse_odds_event()` barely moves.
 
-**Paid tier since 6 Aug 2026: 20,000 units/month ($30/mo)**, up from the 500 free tier.
+**Paid tier since 6 Aug 2026: 20,000 units/month ($30/mo)**, up from the 500 free tier. The original
+key never picked the upgrade up (it kept reporting `used + remaining = 500`); the fix that worked was
+**regenerating the key** in The Odds API dashboard, not waiting for propagation. The replacement key
+(set in Railway and in local `.env` on 6 Aug 2026) reports the full 20,000 and bills normally.
+
+**Football-only since 6 Aug 2026.** The tennis pipeline no longer calls The Odds API at all — no
+picks-run enrichment, no closing-odds polling — so the entire allowance is football's. See section 7
+for the tennis consequences. Single switch: `tennis_main.TENNIS_ODDS_API_ENABLED = False`.
 
 A **hard stop** (`odds_budget_exhausted()`) halts *all* closing-odds polling below the reserve, so
 the quota can never hit zero mid-month and take the picks-run odds enrichment down with it —
@@ -368,9 +375,11 @@ The check uses `GET /v4/sports`, which is **free** (verified: it does not move `
 and it **fails open** — an unreadable quota must not silently disable polling for a month. The daily
 summary warns below 25% remaining.
 
-**Budget at the current caps** (3 units/call): football polling 60/day + tennis polling 40/day +
-football enrichment ~5/day + tennis enrichment 12/day = **351 units/day ≈ 10,900/month, ~54% of the
-tier**, leaving ~9,100 units for Historical Odds work and spikes.
+**Budget at the current caps** (3 units/call), tennis now contributing zero: football polling 60/day
++ football enrichment ~5/day = **195 units/day ≈ 6,000/month, ~30% of the tier**, leaving ~14,000
+units for Historical Odds work and spikes. (Before tennis was switched off on 6 Aug 2026 the same
+caps projected 351 units/day ≈ 10,900/month, ~54% — tennis polling 40/day + tennis enrichment 12/day
+were the difference.)
 
 > ⚠️ The 25% warning is a *fraction of the tier*, so it rescales automatically — but at 20,000 units
 > that is 5,000 remaining, which a healthy month reaches around day 17. Expect it to fire routinely;
@@ -556,7 +565,7 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 |---|---|---|
 | Picks pipeline | `tennis_main.py` | `main.py` |
 | Sheets layer | `tennis_excel_tracker.py` → 'Tennis Picks' tab only | `excel_tracker.py` → Picks/Summary tabs |
-| CLV tracker | `tennis_closing_odds.py` (own daily request cap) | `closing_odds.py` |
+| CLV tracker | `tennis_closing_odds.py` — **DISABLED 6 Aug 2026**, no-op, not scheduled | `closing_odds.py` (unchanged, still polling) |
 | Calibration | `tennis_calibration.py` (own Brier, edge, CLV reports, own 300-pick threshold) | `calibration.py` |
 | Auto results | `tennis_auto_results.py` + `run_all.py` `tennis_live_results_check` (every 30 min) | `auto_results.py` + `live_results_check` |
 | Manual settle/override | `tennis_update_result.py` | `update_result.py` |
@@ -569,30 +578,31 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 - **Rankings & rank tier split (10 Jul 2026):** fixture data carries no rankings, so each player's `currentRank` is fetched from the `player/profile/{id}` endpoint (cached per run; ~2 extra API calls per fixture, ≤100/day worst case). No fixtures are excluded by rank. Instead, picks are split into two Discord channels by tier: both players inside the top `TENNIS_RANK_THRESHOLD` (default 150) → `tennis-picks`; either player outside or unranked → `tennis-picks-lower`. Every pick goes to exactly one channel; per-tier counts are logged each run. The tier ('Top 150' / 'Lower Ranked') is logged to the Sheet's 'Rank Tier' column so `tennis_calibration.py` can eventually report calibration/CLV per tier. Ranks are sent to Claude (`player1_rank`/`player2_rank`) and shown in the pick embed's author line as `#54 vs #88` (`NR` = unranked).
 - **Enrichment:** per fixture — tournament name/surface/tier (`tournament/info`), last-5 form per player (`player/past-matches`), and head-to-head (`fixtures/h2h`); capped at 20 enriched fixtures per run. In this API's archive data the first-listed player is always the winner.
 - **Claude analysis:** separate `TENNIS_SYSTEM_PROMPT` (claude-sonnet-4-6) — weights player form, H2H, surface type (Hard/Clay/Grass), and tournament tier. Bet types: **Match Winner, Total Games Over/Under, Set Betting, Handicap (games)**. Outputs the same JSON shape as football, incl. the calibration `probability` field.
-- **Real odds:** The Odds API lists tennis tournaments as dynamic per-event sport keys (`tennis_atp_*` / `tennis_wta_*`), so active keys are discovered at runtime via the quota-free `/v4/sports` call (max 6 odds requests per picks run). Same ≥5pp value-flag rule as football. Set Betting has no Odds API market → those picks stay Claude-odds-only.
+- **Real odds — REMOVED 6 Aug 2026:** the tennis pipeline no longer calls The Odds API. Picks are posted and logged on Claude's own odds, with no `market_odds`, no 'Market Prob %', and no 🔥 VALUE flag. _(Previously: tournaments are dynamic per-event sport keys `tennis_atp_*` / `tennis_wta_*`, discovered at runtime via the quota-free `/v4/sports` call, max 12 odds requests per picks run, same ≥5pp value-flag rule as football; Set Betting never had an Odds API market anyway.)_
 - **Posting:** Discord-ONLY — a dated header (text) plus each pick as an embed (section 5b format, `Tour | Tournament | Surface` as the author line) to the `tennis-picks` Discord channel at **12:30 Europe/Brussels**, its own schedule slot 30 min after the football picks. After the embeds, a branded PNG picks card (`generate_tennis_picks_card` in `card_generator.py` — same THEPICKSAI style as football, with tour · tournament · surface · ranks context lines) is sent to `tennis-picks` with all of the day's picks regardless of tier (added 11 Jul 2026). No Telegram send exists in the tennis pipeline.
 - **Tracking:** 'Tennis Picks' tab — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier, Stake € (SIM), Running P&L (u), Bankroll € (SIM). Results are WIN/LOSS/VOID (units P&L: WIN = odds−1, LOSS = −1). No half results — tennis game handicaps and totals use half lines. The 'Rank Tier' column enables future per-tier calibration/CLV reports in `tennis_calibration.py` once each tier has enough settled picks.
 - **Tennis Summary tab (12 Jul 2026):** `_refresh_tennis_summary()` rebuilds a dedicated 'Tennis Summary' tab after every settle via `finalize_tennis_workbook()` (the tennis mirror of football's `finalize_workbook`) — record/win rate/units P&L, simulated bankroll + ROI, best bet type & confidence level, Bet Type Breakdown sorted by win rate, and a tennis-only Rank Tier Breakdown per tier.
-- **Staking — STAGED, currently SIMULATED (11 Jul 2026):** tennis stakes use the same half-Kelly / 5%-cap logic as football (`calculate_tennis_kelly_stake` in `tennis_excel_tracker.py`, per-bet-type historical win rate, flat `TENNIS_UNIT_STAKE` €2 below 10 settled picks, €0 on negative edge), sized against `TENNIS_REAL_BANKROLL` = **€100 — a fresh bankroll fully independent of football's €1500**. **No real money is on tennis yet**: every stake is tagged `SIM` in the sheet's 'Stake € (SIM)' column and in the Discord embed's Stake field, and the running 'Bankroll € (SIM)' column (start €100, ±units × €2, recalculated on every settle like football's col J) is paper-only. The plan is to switch to real money once the user decides the pipeline is trustworthy (results flowing correctly + enough settled picks to judge calibration); at that point the SIM tags come off and the constants get re-based to the real deposit.
-- **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of **40** tennis odds requests/day (raised from 12 on 6 Aug 2026), budgeted separately from the football cap. Set below football's 60 despite tennis batching *worse* — each tournament is its own sport key, so there is little to batch — because tennis produces fewer picks (~3-5/day). Picks-run enrichment (`MAX_TENNIS_ODDS_KEYS_PER_RUN`) also went 6 → 12: it is the higher-value consumer, feeding the value flags and 'Market Prob %'.
+- **Staking — STAGED, currently SIMULATED (11 Jul 2026):** tennis stakes use the same half-Kelly / 5%-cap logic as football (`calculate_tennis_kelly_stake` in `tennis_excel_tracker.py`, per-bet-type historical win rate, flat `TENNIS_UNIT_STAKE` €2 below 10 settled picks, €0 on negative edge), sized against `TENNIS_REAL_BANKROLL` = **€100 — a fresh bankroll fully independent of football's €1500**. **No real money is on tennis yet**: every stake is tagged `SIM` in the sheet's 'Stake € (SIM)' column and in the Discord embed's Stake field, and the running 'Bankroll € (SIM)' column (start €100, ±units × €2, recalculated on every settle like football's col J) is paper-only. The plan is to switch to real money once the user decides the pipeline is trustworthy (results flowing correctly + enough settled picks to judge calibration); at that point the SIM tags come off and the constants get re-based to the real deposit. **Since 6 Aug 2026 that decision has to be made on calibration alone** — with the Odds API off for tennis there is no forward CLV evidence, so the usual "positive CLV + good calibration" test is only half available (see the CLV bullet above).
+- **CLV — DISABLED BY CHOICE, 6 Aug 2026:** the tennis pipeline makes **no Odds API calls of any kind**. `tennis_closing_odds.py` returns immediately (before any Sheets read or network call) and `run_all.py` no longer schedules it; the picks-run enrichment is off by the same switch, `tennis_main.TENNIS_ODDS_API_ENABLED = False`. The whole Odds API allowance now goes to football, which keeps full usage. **What this costs:** the tennis 'Closing Odds' column stops accruing, so `tennis_calibration.py`'s `tennis_clv_report()` is frozen at the sample collected 9 Jul – 6 Aug 2026 and no new pick can ever have CLV. **Consequence for the real-money decision — the tennis criterion (positive CLV + good calibration) can now only be PARTIALLY evaluated: calibration yes, CLV no.** Calibration is unaffected because it reads Claude's `probability` and the settled Result, neither of which involves the Odds API — Brier score, per-confidence buckets and the 300-pick threshold all keep working normally. The edge report loses its market input in the same way CLV does. **No picks are excluded from any metric or report** — every pick still counts in calibration, results, P&L, the Tennis Summary tab and the bet-type/rank-tier breakdowns; only the market-derived columns are absent. To restore CLV, flip the flag, re-add the scheduler job, and the caps below apply again. _(Previous sizing, kept for re-enabling: own cap of 40 tennis odds requests/day budgeted separately from football's 60 — set lower despite tennis batching worse, since each tournament is its own sport key, because tennis produces fewer picks (~3-5/day); picks-run enrichment `MAX_TENNIS_ODDS_KEYS_PER_RUN` = 12.)_
 - **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick posts its result text to the `tennis-results` Discord channel — Discord-only, never Telegram and never the football `results-cards` channel.
 
 ### Tennis limitations (own list, separate from football's)
 
 - **Retirements/walkovers settle VOID for all bet types** — bookmaker rules differ (many settle Match Winner if a set was completed). Override a specific pick with `python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN` when your book settled differently.
 - **Auto-results FIXED 11 Jul 2026** (was broken since launch — the fixtures-by-date endpoint is paginated, schedule-only AND ephemeral: started/finished fixtures are *removed* from the slate, and it never carries a `result` field). Settling now works in two tiers: **primary** — the daily job logs `tour:p1Id|p2Id` to the Sheet's 'Player IDs' column at pick time, and the checker settles each pick with a single `/player/past-matches/{playerId}` call (`result` "6-1 6-0", `match_winner`, `result_type`; non-'completed' types settle VOID), matched by both player ids + UTC day; **fallback** — rows without stored ids scan the day's paginated slate (up to 30 pages) to recover ids, which only works while the fixture is still listed. Verified 11 Jul with 5 real settles (incl. Maria def. Stefanini 6-1 6-0 → LOSS, Mejia WIN +0.65u). Three pre-fix rows (Bernet/Bondioli, Johnson/Hohmann, Brancaccio/Gomez) left the slate before ids could be captured and must be settled manually via `tennis_update_result.py`.
-- **Set Betting picks have no market/closing odds**, so they contribute to the calibration report but never to the edge/CLV reports.
+- **No market data at all since 6 Aug 2026** — The Odds API is switched off for tennis by choice, so no pick made from that date carries market odds, 'Market Prob %', a value flag, or a closing price. The edge and CLV reports are frozen at their 9 Jul – 6 Aug sample; calibration and every other report continue with the full pick set. This is a deliberate budget decision, not a bug — do not "fix" it by re-adding Odds API calls to the tennis pipeline without the user asking.
+- **Set Betting picks have no market/closing odds**, so they contribute to the calibration report but never to the edge/CLV reports. (Moot while the switch above is off — that now applies to every bet type.)
 - **Calibration sample size** — all tennis reports are statistically meaningless below ~300 settled picks. Same rule as football, independent counter.
 
 ### Tennis roadmap (independent — do NOT merge into the football percentages)
 
 | Area | Done | Status |
 |---|---|---|
-| Tennis bot core | 95% | Picks, Sheets tab, Discord-only delivery (`tennis-picks`/`tennis-results`, 10 Jul 2026 — no Telegram), CLV polling, daily picks PNG card + simulated Kelly staking/bankroll + working auto-results via Player IDs → past-matches (11 Jul 2026) + Tennis Summary tab with bet-type & rank-tier breakdowns (12 Jul 2026) all live |
-| Tennis data quality | 65% | Form/H2H/surface enrichment + live rankings & two-tier channel split with Rank Tier tracking (10 Jul 2026) + dynamic Odds API keys; no injury/retirement data |
-| Tennis calibration engine | 10% | Infrastructure done, collecting from 9 Jul 2026; verdict ~Oct-Nov 2026 at 300 picks |
+| Tennis bot core | 95% | Picks, Sheets tab, Discord-only delivery (`tennis-picks`/`tennis-results`, 10 Jul 2026 — no Telegram), daily picks PNG card + simulated Kelly staking/bankroll + working auto-results via Player IDs → past-matches (11 Jul 2026) + Tennis Summary tab with bet-type & rank-tier breakdowns (12 Jul 2026) all live. CLV polling ran 9 Jul – 6 Aug 2026, then switched off by choice (Odds API is football-only) |
+| Tennis data quality | 55% | Form/H2H/surface enrichment + live rankings & two-tier channel split with Rank Tier tracking (10 Jul 2026); no injury/retirement data. **Down from 65% on 6 Aug 2026** — market odds removed with the Odds API switch-off, so picks carry no market comparison |
+| Tennis calibration engine | 10% | Infrastructure done, collecting from 9 Jul 2026; verdict ~Oct-Nov 2026 at 300 picks. Unaffected by the Odds API switch-off (reads Claude probability + Result only) |
 | Tennis auto-results | 90% | Live from 10 Jul 2026, all 4 bet types; retirements settle VOID (manual override available) |
-| Tennis proven edge | 0% | Blocked on tennis calibration data |
+| Tennis proven edge | 0% | Blocked on tennis calibration data — and now **only partially provable**: no forward CLV since 6 Aug 2026, so the verdict rests on calibration alone |
 
 ---
 
@@ -644,9 +654,9 @@ Supports: `WIN`, `LOSS`, `VOID`, `HALF WIN`, `HALF LOSS`
 python tennis_main.py --now                                            # one-shot: fetch + analyse + post tennis picks now
 python tennis_main.py                                                  # start the tennis scheduler (12:30 Brussels)
 python tennis_auto_results.py                                          # one-shot: check + settle tennis results now
-python tennis_closing_odds.py                                          # one closing-odds poll for tennis picks
+python tennis_closing_odds.py                                          # NO-OP since 6 Aug 2026 (Odds API off for tennis) — logs and exits
 python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN  # manually settle/override a tennis pick (WIN/LOSS/VOID)
-python tennis_calibration.py                                           # print tennis calibration / edge / CLV reports
+python tennis_calibration.py                                           # print tennis calibration / edge / CLV reports (CLV + edge frozen at the 9 Jul – 6 Aug sample)
 ```
 
 **To apply a manual fix with custom P&L:**

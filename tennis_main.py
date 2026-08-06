@@ -415,7 +415,12 @@ def enrich_tennis_context(fixtures_by_tour: dict[str, list[dict]]) -> None:
 # (e.g. tennis_atp_wimbledon, tennis_wta_us_open) that only exists while the
 # tournament is in season, so keys are discovered at runtime instead of being
 # hardcoded like the football league map.
-MAX_TENNIS_ODDS_KEYS_PER_RUN = 6
+# Raised 6 -> 12 on 6 Aug 2026 with the paid tier. This caps the PICKS-RUN
+# enrichment, which is the high-value consumer: it produces the live value
+# flags and the 'Market Prob %' the calibration engine reads. It was held at 6
+# only because units were scarce; at 3 units/call, 12 keys costs 36 units per
+# run (~1,100/month) and covers far more of the day's tournament spread.
+MAX_TENNIS_ODDS_KEYS_PER_RUN = 12
 
 
 def fetch_active_tennis_sport_keys() -> list[str]:
@@ -445,7 +450,9 @@ def fetch_tennis_odds_events(sport_key: str) -> list[dict] | None:
             f"{ODDS_API_HOST}/sports/{sport_key}/odds",
             params={
                 "apiKey": api_key,
-                "regions": "eu,uk",
+                # One region — see the twin comment in main.py. Cost is
+                # regions x markets, so "eu" alone bills 3 units, not 6.
+                "regions": "eu",
                 "markets": "h2h,totals,spreads",
                 "oddsFormat": "decimal",
             },

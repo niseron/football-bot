@@ -31,10 +31,16 @@ log = logging.getLogger(__name__)
 # Self-imposed daily cap so a scheduling bug (or an unexpectedly busy fixture
 # day) can't burn through The Odds API quota. Reset at midnight local process
 # time — "local counter" per the design brief, not persisted across restarts.
-# Kept low enough that this job's usage plus main.py's morning odds-enrichment
-# calls stay comfortably under the 500/month free-tier limit (12/day here is
-# ~360/month; enrichment adds a handful more per day on top of that).
-MAX_DAILY_REQUESTS = 12
+#
+# Sized for the 20,000-unit paid tier (6 Aug 2026) at the current 3 units/call.
+# A pick's closing window is 5-65 minutes before kickoff and the poller runs
+# every 15 min, so fully covering ONE competition's kickoff wave costs 4
+# requests. 60/day therefore buys ~15 competition-waves — every pick's closing
+# price captured across several staggered kickoff blocks, not a token single
+# poll. Budget: 60 x 3 = 180 units/day = ~5,600/month, ~28% of the tier.
+# Tennis budgets separately (see tennis_closing_odds.py) and the two together
+# are still under half the allowance, leaving room for Historical Odds work.
+MAX_DAILY_REQUESTS = 60
 
 # Only poll for matches whose kickoff falls in this window from "now".
 _WINDOW_MIN_MINUTES = 5

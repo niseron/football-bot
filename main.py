@@ -549,7 +549,12 @@ def _fetch_odds_events(sport_key: str | tuple[str, ...] | None) -> list[dict] | 
                 f"{ODDS_API_HOST}/sports/{key}/odds",
                 params={
                     "apiKey": api_key,
-                    "regions": "eu,uk",
+                    # ONE region on purpose: cost is regions x markets, so "eu"
+                    # halves the call to 3 units. Measured 6 Aug 2026 — dropping
+                    # "uk" loses 3 of 12 books per event (betfair_ex_uk,
+                    # betfair_sb_uk, boylesports, paddypower) and keeps the
+                    # Betfair EU exchange, so the averaged consensus barely moves.
+                    "regions": "eu",
                     "markets": "h2h,totals,spreads",
                     "oddsFormat": "decimal",
                 },

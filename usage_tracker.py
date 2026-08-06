@@ -55,20 +55,37 @@ _CACHE_WRITE_MULTIPLIER = 1.25
 TRACKING_START = date(2026, 8, 4)
 
 # ── The Odds API budget ──────────────────────────────────────────────────────
-# The free tier is 500 units/month. A unit is NOT a request: each call bills
-# regions x markets, so the bot's "eu,uk" x "h2h,totals,spreads" call costs
-# SIX units. Measured 4 Aug 2026: one call moved x-requests-used 294 -> 300.
-ODDS_API_MONTHLY_LIMIT = 500
-ODDS_API_UNITS_PER_CALL = 6
+# Paid tier from 6 Aug 2026: 20,000 units/month ($30/mo). A unit is NOT a
+# request: each call bills regions x markets. The bot now sends ONE region
+# ("eu") x "h2h,totals,spreads" = THREE units. Measured 6 Aug 2026: one such
+# call moved x-requests-used 432 -> 435, exactly half the previous "eu,uk"
+# cost of six. Dropping the uk region loses 3 of 12 bookmakers per event
+# (betfair_ex_uk, betfair_sb_uk, boylesports, paddypower) and KEEPS the
+# Betfair EU exchange, so the consensus average barely moves.
+ODDS_API_MONTHLY_LIMIT = 20_000
+ODDS_API_UNITS_PER_CALL = 3
 
 # Hard stop. Polling halts completely below this many remaining units, so the
 # quota can never reach zero mid-month and take the daily picks run's odds
 # enrichment down with it. Enrichment produces the value flags on live picks;
 # closing-odds polling only feeds CLV analysis, so when the two compete for a
 # nearly-empty quota, polling is what yields.
-ODDS_API_RESERVE = 50
+#
+# Derived from the limit the API actually REPORTS, never a hardcoded absolute:
+# the reserve has to track whichever tier is really in force. A plan change —
+# or a key that has not picked the new plan up yet — then needs no code edit,
+# and both the 500-unit and 20,000-unit cases get a sane stop instead of one
+# of them being wildly wrong in whichever direction.
+ODDS_API_RESERVE_FRACTION = 0.10
+ODDS_API_RESERVE_FLOOR = 50
 # Warn in the daily summary below this fraction of the monthly limit.
 ODDS_API_WARN_FRACTION = 0.25
+
+
+def odds_api_reserve(limit: int | None = None) -> int:
+    """Hard-stop threshold, in units, for the tier actually in force."""
+    limit = limit or ODDS_API_MONTHLY_LIMIT
+    return max(ODDS_API_RESERVE_FLOOR, int(limit * ODDS_API_RESERVE_FRACTION))
 
 RAPIDAPI_HOSTS = {
     "football": "free-api-live-football-data.p.rapidapi.com",
@@ -226,11 +243,13 @@ def odds_budget_exhausted() -> bool:
     quota = fetch_odds_quota()
     if quota is None:
         return False
-    if quota["remaining"] < ODDS_API_RESERVE:
+    reserve = odds_api_reserve(quota["limit"])
+    if quota["remaining"] < reserve:
         log.warning(
             "usage_tracker: Odds API HARD STOP — %d units remaining is below the "
-            "%d-unit reserve; polling halted so the daily picks enrichment keeps working",
-            quota["remaining"], ODDS_API_RESERVE,
+            "%d-unit reserve (%.0f%% of the %d-unit tier this key reports); polling "
+            "halted so the daily picks enrichment keeps working",
+            quota["remaining"], reserve, ODDS_API_RESERVE_FRACTION * 100, quota["limit"],
         )
         return True
     return False
@@ -316,13 +335,18 @@ def build_daily_summary() -> str:
         lines.append(f"  `{_bar(q['used'], q['limit'])}` {q['used']}/{q['limit']} units used")
         lines.append(f"  {q['remaining']} left ≈ **{q['calls_left']} calls** "
                      f"(1 call = {ODDS_API_UNITS_PER_CALL} units)")
-        if q["remaining"] < ODDS_API_RESERVE:
-            lines.append(f"  🛑 **HARD STOP ACTIVE** — below the {ODDS_API_RESERVE}-unit "
+        reserve = odds_api_reserve(q["limit"])
+        if q["remaining"] < reserve:
+            lines.append(f"  🛑 **HARD STOP ACTIVE** — below the {reserve:,}-unit "
                          f"reserve. Closing-odds polling is halted; picks enrichment continues.")
         elif pct_left < ODDS_API_WARN_FRACTION:
             lines.append(f"  ⚠️ **LOW — {pct_left:.0%} remaining** "
                          f"(warning threshold {ODDS_API_WARN_FRACTION:.0%}). "
-                         f"Hard stop trips at {ODDS_API_RESERVE} units.")
+                         f"Hard stop trips at {reserve:,} units.")
+        if q["limit"] < ODDS_API_MONTHLY_LIMIT:
+            lines.append(f"  ❗ This key reports a **{q['limit']:,}-unit** tier, but the bot is "
+                         f"configured for {ODDS_API_MONTHLY_LIMIT:,}. The paid plan has not "
+                         f"reached this key yet — daily caps are sized for the larger tier.")
     else:
         lines.append("  _quota unavailable_")
     lines.append("")

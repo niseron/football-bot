@@ -291,6 +291,28 @@ Conference League unaffected.
 League *qualifying* — only `soccer_uefa_europa_conference_league` for the main
 competition, which is inactive until the league phase. Qualifying picks are
 therefore Claude-odds-only (no market odds, no value flag).
+
+**Measured 6 Aug 2026 — this is a provider gap, NOT a quota or mapping problem,
+and upgrading the plan does not fix it.** Verified by sweeping the `/events`
+listing of **all 67 soccer keys** in the catalogue (that endpoint is quota-free —
+confirmed, it does not move `x-requests-used`) against the day's six
+Europa/Conference qualifying fixtures:
+
+- **Zero** of them appear under *any* sport key. The only hits for those clubs
+  were their own domestic fixtures days later (Ajax → Eredivisie, Braga →
+  Primeira Liga, Twente → Eredivisie, Lugano → Swiss Super League, Shelbourne
+  and Bohemians → League of Ireland, Rapid Wien → Austrian Bundesliga).
+- `soccer_uefa_europa_league` → **0 events**. `soccer_uefa_europa_conference_league`
+  → **0 events**. Neither has a qualifying key anywhere in the catalogue.
+- `soccer_uefa_champs_league_qualification` → **10 events** listed for 11 Aug.
+
+So UEFA qualifying is not categorically excluded by the provider: **Champions
+League qualifying is covered, Europa and Conference qualifying are not.** Any
+card built solely from Europa/Conference qualifiers will show estimated odds on
+every pick regardless of tier or quota. Do not re-diagnose this as a budget
+issue. Re-test with the free `/events` sweep before assuming the gap has closed —
+the league phase from September is the point at which the main-competition keys
+go active.
 **Champions League does not have this problem:** it maps to a *tuple* of keys,
 `("soccer_uefa_champs_league", "soccer_uefa_champs_league_qualification")`, tried in
 order with the first non-empty result winning. Measured 4 Aug 2026: an out-of-season
@@ -307,7 +329,7 @@ dashboard-only, estimated, or recalled:
 | Source | Mechanism | Verified reading |
 |---|---|---|
 | Anthropic | `message.usage` on every response | `input_tokens`, `output_tokens`, cache read/write, `service_tier` |
-| The Odds API | `x-requests-used` / `x-requests-remaining` headers | 360/500 used |
+| The Odds API | `x-requests-used` / `x-requests-remaining` headers | 441/500 used (6 Aug 2026 — key still reporting the **free** tier, see below) |
 | RapidAPI football | `X-RateLimit-Requests-*` headers | 407/20,000, resets ~11.7d |
 | RapidAPI tennis | same headers, **separate subscription** on the same key | 6,003/150,000, resets ~5.8d |
 
@@ -324,14 +346,36 @@ survive a redeploy.
 4 Aug 2026 cannot be recovered from any API, so presenting a true MTD number would be fiction. The
 report says so in the message itself.
 
-**Odds API units ≠ requests.** One call bills `regions × markets` = **6 units** (`eu,uk` ×
-`h2h,totals,spreads`) — measured, not assumed: one call moved `x-requests-used` 294 → 300. The
-500/month free tier is therefore ~83 calls, not 500. A **hard stop** (`odds_budget_exhausted()`)
-halts *all* closing-odds polling below `ODDS_API_RESERVE = 50` units so the quota can never hit zero
-mid-month and take the picks-run odds enrichment down with it — enrichment produces live value flags,
-so polling is what yields. The check uses `GET /v4/sports`, which is **free** (verified: it does not
-move `x-requests-used`), and it **fails open** — an unreadable quota must not silently disable
-polling for a month. The daily summary warns below 25% remaining.
+**Odds API units ≠ requests.** One call bills `regions × markets` — measured, not assumed. The bot
+sends **one** region since 6 Aug 2026: `eu` × `h2h,totals,spreads` = **3 units** (verified: one call
+moved `x-requests-used` 432 → 435, exactly half the old `eu,uk` cost of 6). Dropping the `uk` region
+loses 3 of 12 bookmakers per event — `betfair_ex_uk`, `betfair_sb_uk`, `boylesports`, `paddypower` —
+and **keeps `betfair_ex_eu`**, so the sharpest price source survives and the averaged consensus in
+`_parse_odds_event()` barely moves.
+
+**Paid tier since 6 Aug 2026: 20,000 units/month ($30/mo)**, up from the 500 free tier.
+
+A **hard stop** (`odds_budget_exhausted()`) halts *all* closing-odds polling below the reserve, so
+the quota can never hit zero mid-month and take the picks-run odds enrichment down with it —
+enrichment produces live value flags, so polling is what yields. The reserve is **derived from the
+limit the API reports**, not hardcoded: `odds_api_reserve()` returns
+`max(50, 0.10 × reported_limit)` → 2,000 units on the paid tier, 50 on the free one. That matters
+operationally: a key that has not yet picked up a plan change still gets a sane stop instead of
+either halting polling outright (hardcoded 2,000 against a 500 key) or failing to protect anything.
+The daily summary prints an explicit ❗ when the reported tier is smaller than `ODDS_API_MONTHLY_LIMIT`.
+
+The check uses `GET /v4/sports`, which is **free** (verified: it does not move `x-requests-used`),
+and it **fails open** — an unreadable quota must not silently disable polling for a month. The daily
+summary warns below 25% remaining.
+
+**Budget at the current caps** (3 units/call): football polling 60/day + tennis polling 40/day +
+football enrichment ~5/day + tennis enrichment 12/day = **351 units/day ≈ 10,900/month, ~54% of the
+tier**, leaving ~9,100 units for Historical Odds work and spikes.
+
+> ⚠️ The 25% warning is a *fraction of the tier*, so it rescales automatically — but at 20,000 units
+> that is 5,000 remaining, which a healthy month reaches around day 17. Expect it to fire routinely;
+> it is now a calendar artefact rather than a signal. Replacing it with a burn-rate projection
+> (warn when projected month-end usage exceeds the limit) is the real fix and is **not yet done**.
 
 ### Form & H2H enrichment (added)
 - Before calling Claude, `enrich_with_context()` fetches from RapidAPI:
@@ -404,7 +448,7 @@ If the direction holds there, it is a prompt/scoring issue rather than noise.
 - Each pick's kickoff time is captured from the RapidAPI fixture data at pick-log time and stored in the 'Kickoff UTC' column (plus 'League', for odds-batching)
 - `closing_odds_job` polls every 15 minutes; for any unsettled pick whose kickoff is 5-65 minutes away, it fetches current market odds from The Odds API and overwrites the 'Closing Odds' column — the last write before kickoff becomes the closing price
 - Odds API calls are batched per competition (one request covers every due match in that league that cycle), not one request per match
-- Self-imposed cap of 12 Odds API requests/day (keeps this job + main.py's morning odds enrichment comfortably under the 500/month free-tier limit); polling is skipped with a warning if exceeded
+- Self-imposed cap of **60** Odds API requests/day (raised from 12 on 6 Aug 2026 with the paid tier); polling is skipped with a warning if exceeded. Sizing: a pick's closing window is 5-65 min and the poller runs every 15 min, so covering one competition's kickoff wave costs 4 requests — 60/day buys ~15 competition-waves, i.e. real coverage across staggered kickoff blocks rather than a token single poll
 - `calibration.py`'s `clv_report()` computes CLV = (original odds / closing odds − 1) × 100 for every settled pick with both values — average CLV, % of picks with positive CLV, and ROI split between positive- and negative-CLV picks
 - Appended to the existing monthly calibration Telegram message, with the same below-300-picks sample size warning
 - Purely additive measurement: never touches pick generation, Kelly staking, or the calibration engine's existing reports; every step fails silently on error
@@ -473,6 +517,7 @@ date-gated shut (`WC_2026_END`, 19 Jul 2026) so it cannot fire again as written.
 - **Calibration sample size** — `calibration_report` and `edge_report` are statistically meaningless below ~300 settled picks with probability data. Data collection started 30 Jun 2026. Do not draw conclusions from early monthly reports.
 - **Win rate is the wrong success metric** — a high win rate at low average odds can still be break-even or negative ROI. The metric that matters is ROI vs market implied probability, which the `edge_report` now tracks.
 - **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap. *Note: the first spot check (6 Aug 2026, n=3 — see "Early calibration observation" above) pointed the **other** way, showing 11-19pp **under**confidence on short-priced favourites. Far too small a sample to overturn this expectation; recorded so the formal report is read against both hypotheses, not just this one.*
+- **No market data at all for Europa/Conference League qualifying** — *provider gap, not a budget or mapping problem; the 20,000-unit paid tier does not fix it.* Measured 6 Aug 2026 across all 67 soccer keys (see "Odds caveat" above): those fixtures exist under no sport key. Consequences while the bot picks these competitions: no value flags, no `Market Prob %` (so the picks contribute to `calibration_report` but never to `edge_report`/`clv_report`), and **P&L computed off Claude's estimated odds**, which the 6 Aug spot check showed run 11-19pp short of real market prices — i.e. tracked returns on these picks are inflated. Champions League qualifying is unaffected (covered, 10 events listed for 11 Aug).
 - **No injury/lineup data** — the bot has form and H2H context but no player availability, injury status, or individual player form. Napoleon Games odds are also not in The Odds API, so market comparison uses consensus European bookmaker odds instead.
 - **Kelly stakes based on thin data** — bet-type win rates driving Kelly calculations are based on small samples (10-30 picks per type) and may regress significantly.
 
@@ -485,7 +530,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Area | Done | Status |
 |---|---|---|
 | Bot core | 96% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026) |
-| Data quality | 84% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
+| Data quality | 86% | The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |
@@ -529,7 +574,7 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 - **Tracking:** 'Tennis Picks' tab — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier, Stake € (SIM), Running P&L (u), Bankroll € (SIM). Results are WIN/LOSS/VOID (units P&L: WIN = odds−1, LOSS = −1). No half results — tennis game handicaps and totals use half lines. The 'Rank Tier' column enables future per-tier calibration/CLV reports in `tennis_calibration.py` once each tier has enough settled picks.
 - **Tennis Summary tab (12 Jul 2026):** `_refresh_tennis_summary()` rebuilds a dedicated 'Tennis Summary' tab after every settle via `finalize_tennis_workbook()` (the tennis mirror of football's `finalize_workbook`) — record/win rate/units P&L, simulated bankroll + ROI, best bet type & confidence level, Bet Type Breakdown sorted by win rate, and a tennis-only Rank Tier Breakdown per tier.
 - **Staking — STAGED, currently SIMULATED (11 Jul 2026):** tennis stakes use the same half-Kelly / 5%-cap logic as football (`calculate_tennis_kelly_stake` in `tennis_excel_tracker.py`, per-bet-type historical win rate, flat `TENNIS_UNIT_STAKE` €2 below 10 settled picks, €0 on negative edge), sized against `TENNIS_REAL_BANKROLL` = **€100 — a fresh bankroll fully independent of football's €1500**. **No real money is on tennis yet**: every stake is tagged `SIM` in the sheet's 'Stake € (SIM)' column and in the Discord embed's Stake field, and the running 'Bankroll € (SIM)' column (start €100, ±units × €2, recalculated on every settle like football's col J) is paper-only. The plan is to switch to real money once the user decides the pipeline is trustworthy (results flowing correctly + enough settled picks to judge calibration); at that point the SIM tags come off and the constants get re-based to the real deposit.
-- **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of 12 tennis odds requests/day, budgeted separately from the football cap.
+- **CLV:** `tennis_closing_odds.py` polls every 15 min for picks starting in 5-65 min and overwrites the tennis 'Closing Odds' column; `tennis_calibration.py`'s `tennis_clv_report()` consumes it. Own self-imposed cap of **40** tennis odds requests/day (raised from 12 on 6 Aug 2026), budgeted separately from the football cap. Set below football's 60 despite tennis batching *worse* — each tournament is its own sport key, so there is little to batch — because tennis produces fewer picks (~3-5/day). Picks-run enrichment (`MAX_TENNIS_ODDS_KEYS_PER_RUN`) also went 6 → 12: it is the higher-value consumer, feeding the value flags and 'Market Prob %'.
 - **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick posts its result text to the `tennis-results` Discord channel — Discord-only, never Telegram and never the football `results-cards` channel.
 
 ### Tennis limitations (own list, separate from football's)

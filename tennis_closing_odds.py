@@ -34,7 +34,14 @@ log = logging.getLogger(__name__)
 # Self-imposed daily cap on tennis Odds API odds requests (the /sports key
 # discovery call is quota-free and not counted). Independent of the football
 # closing-odds cap — the two systems budget separately.
-MAX_DAILY_TENNIS_REQUESTS = 12
+#
+# Sized for the 20,000-unit paid tier (6 Aug 2026) at 3 units/call. Set below
+# football's 60 despite tennis batching WORSE, not better: The Odds API gives
+# each tournament its own sport key, so a day's picks scatter across many keys
+# with little to batch, but tennis also produces fewer picks (~3-5/day) and its
+# CLV sample is the younger of the two. 40/day = 120 units/day = ~3,700/month,
+# ~19% of the tier; football + tennis polling together stay under half of it.
+MAX_DAILY_TENNIS_REQUESTS = 40
 
 _WINDOW_MIN_MINUTES = 5
 _WINDOW_MAX_MINUTES = 65

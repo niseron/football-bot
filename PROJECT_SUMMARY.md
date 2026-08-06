@@ -363,6 +363,43 @@ polling for a month. The daily summary warns below 25% remaining.
 - No backfill: picks logged before the columns existed have no probability data and are skipped
 - Run manually: `python calibration.py`
 
+#### Early calibration observation — favourite *under*confidence (6 Aug 2026)
+
+**Logged before the formal report has a usable sample. This is an observation, not a finding:
+n=3, one competition, one day. Do not act on it or change the prompt because of it.**
+
+The 6 Aug card ran entirely on Conference League qualifying, which has no Odds API key (see the
+odds caveat above), so all five picks displayed Claude's estimated odds. Three of those estimates,
+compared against the real market prices available at the time:
+
+| Pick | Claude odds (implied) | Market odds (implied) | Gap | 'Claude Prob %' logged |
+|---|---|---|---|---|
+| FC Midtjylland Win | 1.60 (62.5%) | 1.36 (73.5%) | **11.0pp** | 67 (6.5pp low) |
+| Braga −1.5 AH | 1.80 (55.6%) | 1.43 (69.9%) | **14.4pp** | 65 (4.9pp low) |
+| FC Twente Win | 1.55 (64.5%) | 1.20 (83.3%) | **18.8pp** | 68 (15.3pp low) |
+
+The direction is consistent across all three: Claude's estimated odds are **longer** than the
+market's, i.e. it is **under**confident on short-priced favourites. That is the *opposite* of the
+overconfidence the "LLM overconfidence risk" limitation below anticipates. Note also that the
+`probability` field sits closer to the market than the quoted `odds` do — the two outputs of the
+same pick disagree with each other, by 4-9pp here.
+
+**Caveat that keeps this honest:** the market figures are raw single-price implied probabilities
+and still carry the bookmaker margin, so they overstate true probability by roughly 2-4pp on a
+3-way market. De-vigged, the gap narrows but does not reverse.
+
+**Two consequences worth watching — neither acted on:**
+1. *Value flags would suppress on favourites.* `enrich_picks_with_real_odds()` flags value only
+   when Claude's implied probability beats the market's by ≥5pp. Systematic underconfidence pushes
+   Claude below the market, so favourites would rarely flag even where coverage exists.
+2. *P&L is overstated on no-coverage picks.* `auto_results.py` computes `pnl = odds − 1` from the
+   stored 'Odds' column, which is the **estimate** whenever no market odds matched. A winning
+   Midtjylland pick logs +0.60u where the real price paid +0.36u. Every Conference League
+   qualifying pick since 30 Jul 2026 carries this inflation in the tracked P&L.
+
+Re-check against `calibration_report()` once the sample reaches ~300 settled picks (~Oct 2026).
+If the direction holds there, it is a prompt/scoring issue rather than noise.
+
 ### Closing Line Value (CLV) tracking (added — `closing_odds.py`)
 - Each pick's kickoff time is captured from the RapidAPI fixture data at pick-log time and stored in the 'Kickoff UTC' column (plus 'League', for odds-batching)
 - `closing_odds_job` polls every 15 minutes; for any unsettled pick whose kickoff is 5-65 minutes away, it fetches current market odds from The Odds API and overwrites the 'Closing Odds' column — the last write before kickoff becomes the closing price
@@ -435,7 +472,7 @@ date-gated shut (`WC_2026_END`, 19 Jul 2026) so it cannot fire again as written.
 - **Odds timing bias** — *In progress, CLV tracking live from 4 Jul 2026.* Market probabilities in column L are still captured at 9AM pick time, and `edge_report` is still flattering by an unknown amount for picks logged before the fix. `closing_odds_job` now polls The Odds API 5-65 minutes before each kickoff and logs the true closing price to a separate 'Closing Odds' column; `calibration.py`'s `clv_report()` measures closing line value on top of it. This resolves the bias for every pick logged from 4 Jul 2026 onward — historical picks before that date have no closing odds and are excluded from `clv_report()`. Sample size is still tiny; see the calibration sample size limitation below.
 - **Calibration sample size** — `calibration_report` and `edge_report` are statistically meaningless below ~300 settled picks with probability data. Data collection started 30 Jun 2026. Do not draw conclusions from early monthly reports.
 - **Win rate is the wrong success metric** — a high win rate at low average odds can still be break-even or negative ROI. The metric that matters is ROI vs market implied probability, which the `edge_report` now tracks.
-- **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap.
+- **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap. *Note: the first spot check (6 Aug 2026, n=3 — see "Early calibration observation" above) pointed the **other** way, showing 11-19pp **under**confidence on short-priced favourites. Far too small a sample to overturn this expectation; recorded so the formal report is read against both hypotheses, not just this one.*
 - **No injury/lineup data** — the bot has form and H2H context but no player availability, injury status, or individual player form. Napoleon Games odds are also not in The Odds API, so market comparison uses consensus European bookmaker odds instead.
 - **Kelly stakes based on thin data** — bet-type win rates driving Kelly calculations are based on small samples (10-30 picks per type) and may regress significantly.
 
@@ -449,7 +486,7 @@ Completion estimates per area — update these percentages whenever a related ch
 |---|---|---|
 | Bot core | 96% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026) |
 | Data quality | 84% | Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
-| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks |
+| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |

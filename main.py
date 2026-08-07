@@ -29,12 +29,21 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
 TELEGRAM_IG_CHANNEL_ID = os.environ.get("TELEGRAM_IG_CHANNEL_ID")
 
-# Single-ID domestic leagues (fotmob-based IDs)
-# Bundesliga/La Liga/Serie A/Ligue 1 IDs verified 19 Jul 2026 against the live
-# API's 2026-27 opening matchdays (team rosters checked, not just ID reuse).
+# Single-ID domestic leagues.
+#
+# Every id here is a *stable fotmob parent competition id*: the by-date feed tags
+# these leagues with the parent id itself, so it survives a season rollover.
+# Audited 8 Aug 2026 against live 2026-27 fixtures — each one resolves to itself
+# through football-get-match-detail's parentLeagueId (47->47, 54->54, 87->87,
+# 55->55, 53->53), so none of them can go stale the way Jupiler did.
+#
+# An id that does NOT resolve to itself is season-scoped and does not belong in
+# this dict — it belongs in PARENT_RESOLVED_IDS below. Jupiler Pro League was
+# exactly that case: pinned here as 900433 since the initial commit, matching
+# nothing on any date checked, and producing zero picks in the bot's entire
+# history (0 rows in the Sheet's Picks tab, verified 8 Aug 2026).
 LEAGUES = {
     "Premier League": 47,
-    "Jupiler Pro League": 900433,
     "Bundesliga": 54,
     "La Liga": 87,
     "Serie A": 55,
@@ -94,16 +103,25 @@ WC_2026_PARTICIPANTS: set[str] = {
     "Vanuatu", "Solomon Islands", "Papua New Guinea",
 }
 
-# UEFA club competitions — the fixtures feed tags matches with a season- and
-# stage-specific leagueId that rotates when qualifying ends and the league phase
-# starts, and again every season. Pinning those ids would silently stop matching
-# mid-season, so unfamiliar leagueIds are resolved to their stable fotmob parent
-# competition id instead and matched against these. This is why Champions League
-# is NOT in LEAGUES above: its feed id was 904988 in the 2025-26 league phase and
-# is 937348 in 2026-27 qualifying, so a single pinned id cannot survive a season.
-# All four parent ids confirmed 4 Aug 2026 via football-get-match-detail against
-# live fixtures (see PROJECT_SUMMARY.md "UEFA leagueId resolution").
-UEFA_PARENT_IDS: dict[str, set[int]] = {
+# Competitions whose feed leagueId is season-specific (and for UEFA, also
+# stage-specific). The by-date feed carries no competition name, only a leagueId,
+# and for these that id rotates — when UEFA qualifying gives way to the league
+# phase, and for all of them every new season. Pinning it makes the competition
+# silently vanish, so unfamiliar ids are resolved to their stable fotmob parent
+# competition id and matched against these instead.
+#
+# This is why Champions League is NOT in LEAGUES: its feed id was 904988 in the
+# 2025-26 league phase and is 937348 in 2026-27 qualifying. Jupiler Pro League
+# joined it on 8 Aug 2026 for exactly the same reason — its 2026-27 feed id is
+# 937988, while the 900433 pinned in LEAGUES since the initial commit matched
+# nothing on any date checked.
+#
+# Parent ids confirmed against live fixtures via football-get-match-detail:
+# UEFA 4 Aug 2026, Belgium 8 Aug 2026 (937988 -> parent 40 "Belgian Pro League").
+PARENT_RESOLVED_IDS: dict[str, set[int]] = {
+    "Jupiler Pro League": {
+        40,      # Belgian Pro League (fotmob "First Division A")
+    },
     "Champions League": {
         42,      # Champions League — league phase + knockout rounds
         10611,   # Champions League Qualification
@@ -115,11 +133,27 @@ UEFA_PARENT_IDS: dict[str, set[int]] = {
 }
 
 # Feed leagueIds already known, per competition. Seeded with the ids live on
-# 4 Aug 2026 so the common case costs no lookups; the resolver adds rotated ids
-# as it discovers them.
-UEFA_FEED_IDS: dict[str, set[int]] = {
+# 4 Aug 2026 (UEFA) and 8 Aug 2026 (Belgium) so the common case costs no lookups;
+# the resolver adds rotated ids as it discovers them. A stale seed is not a
+# failure mode — it costs one discovery sweep and is then replaced.
+FEED_LEAGUE_IDS: dict[str, set[int]] = {
+    "Jupiler Pro League": {937988},  # Belgian Pro League 2026-27
     "Champions League": {937348},    # Champions League Qualification 2026-27
     "Conference League": {937351},   # Conference League Qualification 2026-27
+}
+
+# Competitions identifiable by a stable club roster, mapped to the parent
+# leagueId whose team list defines it. Used ONLY to rank discovery candidates
+# (see _discover_feed_ids) — never to decide membership, because the roster comes
+# from the parent's last completed season and so misses promoted clubs: on
+# 8 Aug 2026 parent 40's roster covered 13 of the 16 clubs in the 2026-27 Belgian
+# slate (Kortrijk, Lommel and Beveren had just come up). Ranking tolerates that
+# happily; deciding membership on it would drop a third of the fixtures.
+#
+# UEFA competitions are deliberately absent — their entrants turn over every
+# season, and the fixture-count heuristic already surfaces them.
+ROSTER_PARENTS: dict[str, int] = {
+    "Jupiler Pro League": 40,
 }
 
 # Feed leagueId -> stable parent leagueId, cached for the process lifetime
@@ -127,6 +161,9 @@ UEFA_FEED_IDS: dict[str, set[int]] = {
 # per deploy). A cached None means "looked up, not a competition we track" and
 # is never looked up again.
 _parent_league_cache: dict[int, int | None] = {}
+
+# Parent leagueId -> its roster of team ids, same process-lifetime caching.
+_roster_cache: dict[int, set[int]] = {}
 
 # Cap on match-detail lookups per run, so a day full of unfamiliar competitions
 # can never blow out the RapidAPI budget.
@@ -226,7 +263,7 @@ def _is_wc_participant(name: str) -> bool:
     return name in WC_2026_PARTICIPANTS and not _YOUTH_RE.search(name)
 
 
-def _is_wc_match(match: dict, domestic_ids: set[int]) -> bool:
+def _is_wc_match(match: dict, club_ids: set[int]) -> bool:
     """
     True if a fixture belongs to the World Cup.
 
@@ -245,10 +282,10 @@ def _is_wc_match(match: dict, domestic_ids: set[int]) -> bool:
     18 Jul 2026 even though Myanmar is not a WC participant.
 
     The leagueId no longer decides membership. It survives only as a
-    disqualifier (a domestic club competition is never the World Cup) and, at
-    the call site, as the group-vs-knockout signal.
+    disqualifier (a club competition is never the World Cup) and, at the call
+    site, as the group-vs-knockout signal.
     """
-    if match.get("leagueId") in domestic_ids:
+    if match.get("leagueId") in club_ids:
         return False
     home = match["home"]["longName"]
     away = match["away"]["longName"]
@@ -276,15 +313,61 @@ def _resolve_parent_league(match: dict) -> int | None:
         return None
 
 
-def _discover_uefa_feed_ids(upcoming: list[dict], known_ids: set[int]) -> dict[str, set[int]]:
+def _roster_team_ids(parent_id: int) -> set[int]:
     """
-    Find UEFA feed leagueIds we don't know yet, by resolving each unfamiliar
-    leagueId to its parent competition. One lookup per distinct leagueId, cached
-    process-wide (hits and misses both) and capped per run. Largest fixture
-    lists are checked first — a UEFA round is always one of the bigger blocks of
-    matches on its matchday.
+    Team ids that played in a parent competition's most recent full season.
+    One API call per parent id, cached for the process lifetime. Returns an
+    empty set on any error, which simply drops that competition back to
+    fixture-count ranking — the sweep still works, it just ranks blindly.
+    """
+    if parent_id in _roster_cache:
+        return _roster_cache[parent_id]
 
-    ONE shared sweep serves every tracked UEFA competition, and it has to be:
+    teams: set[int] = set()
+    try:
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/football-get-all-matches-by-league",
+            headers=_api_headers(),
+            params={"leagueid": parent_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        for m in resp.json().get("response", {}).get("matches", []):
+            for side in ("home", "away"):
+                tid = (m.get(side) or {}).get("id")
+                if tid is not None:
+                    teams.add(int(tid))
+        log.info("Roster for parent league %s: %d teams", parent_id, len(teams))
+    except Exception as exc:
+        log.debug("roster lookup failed for parent league %s: %s", parent_id, exc)
+
+    _roster_cache[parent_id] = teams
+    return teams
+
+
+def _discover_feed_ids(
+    upcoming: list[dict], known_ids: set[int], missing: list[str]
+) -> dict[str, set[int]]:
+    """
+    Find feed leagueIds we don't know yet, by resolving each unfamiliar leagueId
+    to its parent competition. One lookup per distinct leagueId, cached
+    process-wide (hits and misses both) and capped per run.
+
+    Candidate ORDER is what makes the cap survivable, and fixture count alone is
+    not good enough. A UEFA round is one of the bigger blocks on its matchday, so
+    largest-first finds it — but a domestic matchday is small. Measured on the
+    live 8 Aug 2026 slate: 138 unfamiliar ids, and the 3-match Belgian block
+    ranked #62 by size, far outside the 12-lookup cap. Ranking by size alone
+    would have left Jupiler Pro League undiscoverable in practice, which is the
+    whole point of putting it here.
+
+    So blocks are ranked first by how much of their line-up matches a missing
+    competition's known roster (ROSTER_PARENTS), then by fixture count. The
+    Belgian block scores 5/6 on that measure and sorts to the front; the parent
+    lookup that follows still has the final say, so a roster near-miss on a
+    promoted club costs nothing and a false lead is simply rejected.
+
+    ONE shared sweep serves every tracked competition, and it has to be:
     _parent_league_cache records each leagueId exactly once, so a second,
     per-competition sweep would skip every id the first had already resolved —
     including that competition's own ids, filed as cached misses.
@@ -299,11 +382,36 @@ def _discover_uefa_feed_ids(upcoming: list[dict], known_ids: set[int]) -> dict[s
     if not by_league:
         return {}
 
-    candidates = sorted(by_league.items(), key=lambda kv: -len(kv[1]))
+    rosters = [
+        teams
+        for competition in missing
+        if competition in ROSTER_PARENTS
+        for teams in (_roster_team_ids(ROSTER_PARENTS[competition]),)
+        if teams
+    ]
+
+    def _rank(item: tuple[int, list[dict]]) -> tuple[float, int]:
+        """Best roster overlap first (as a fraction of the block's own teams),
+        then most fixtures. Both negated — sorted() is ascending."""
+        _lid, matches = item
+        overlap = 0.0
+        if rosters:
+            team_ids = {
+                tid
+                for m in matches
+                for tid in (m["home"].get("id"), m["away"].get("id"))
+                if tid is not None
+            }
+            if team_ids:
+                overlap = max(len(team_ids & r) / len(team_ids) for r in rosters)
+        return (-overlap, -len(matches))
+
+    candidates = sorted(by_league.items(), key=_rank)
     if len(candidates) > MAX_PARENT_LOOKUPS_PER_RUN:
         log.info(
-            "Parent-league discovery: %d unfamiliar leagueIds, resolving the %d largest",
-            len(candidates), MAX_PARENT_LOOKUPS_PER_RUN,
+            "Parent-league discovery: %d unfamiliar leagueIds, resolving the top %d "
+            "(missing: %s)",
+            len(candidates), MAX_PARENT_LOOKUPS_PER_RUN, ", ".join(missing),
         )
 
     found: dict[str, set[int]] = {}
@@ -311,7 +419,7 @@ def _discover_uefa_feed_ids(upcoming: list[dict], known_ids: set[int]) -> dict[s
         time.sleep(1)
         parent = _resolve_parent_league(matches[0])
         _parent_league_cache[lid] = parent
-        for competition, parent_ids in UEFA_PARENT_IDS.items():
+        for competition, parent_ids in PARENT_RESOLVED_IDS.items():
             if parent in parent_ids:
                 found.setdefault(competition, set()).add(lid)
                 log.info(
@@ -328,12 +436,18 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
 
     result: dict[str, list[dict]] = {}
 
-    # Domestic leagues — single leagueId each
+    # Domestic leagues — single stable leagueId each
     domestic_ids: set[int] = set(LEAGUES.values())
     for league_name, league_id in LEAGUES.items():
         found = [m for m in upcoming if m.get("leagueId") == league_id]
         if found:
             result[league_name] = [build_fixture_summary(m) for m in found]
+
+    # Every club-competition id we know, used below only as a World Cup
+    # disqualifier — a club fixture is never a national-team tournament match.
+    club_ids: set[int] = set(domestic_ids)
+    for feed_ids in FEED_LEAGUE_IDS.values():
+        club_ids |= feed_ids
 
     # World Cup — active until July 19 2026.
     # Membership is decided by _is_wc_match(), which requires BOTH teams to be
@@ -341,7 +455,7 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
     # alternative route in (that was the bug — see _is_wc_match); below it only
     # separates known group-stage ids from knockout ones.
     if date.today() <= WC_2026_END:
-        wc = [m for m in upcoming if _is_wc_match(m, domestic_ids)]
+        wc = [m for m in upcoming if _is_wc_match(m, club_ids)]
         if wc:
             knockout_new = [m for m in wc if m.get("leagueId") not in WC_2026_IDS]
             if knockout_new:
@@ -359,26 +473,28 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
                 summaries.append(f)
             result["FIFA World Cup 2026"] = summaries
 
-    # UEFA club competitions — qualifying ties plus league-phase/knockout games.
-    uefa: dict[str, list[dict]] = {
+    # Competitions matched by stable parent id — the Belgian Pro League, plus the
+    # UEFA club competitions' qualifying ties and league-phase/knockout games.
+    resolved: dict[str, list[dict]] = {
         competition: [m for m in upcoming if m.get("leagueId") in feed_ids]
-        for competition, feed_ids in UEFA_FEED_IDS.items()
+        for competition, feed_ids in FEED_LEAGUE_IDS.items()
     }
-    if not all(uefa.values()):
+    missing = [c for c, matches in resolved.items() if not matches]
+    if missing:
         # At least one competition has nothing under a known id: either it
         # simply isn't playing in this window, or its feed id rotated
         # (qualifying -> league phase, or a new season). Only then is the sweep
         # worth its lookups — and results are cached, so a rotated id costs one
         # discovery and never again.
         known_ids = domestic_ids | WC_2026_IDS
-        for feed_ids in UEFA_FEED_IDS.values():
+        for feed_ids in FEED_LEAGUE_IDS.values():
             known_ids |= feed_ids
-        for competition, new_ids in _discover_uefa_feed_ids(upcoming, known_ids).items():
-            UEFA_FEED_IDS.setdefault(competition, set()).update(new_ids)
-            uefa[competition] = [
-                m for m in upcoming if m.get("leagueId") in UEFA_FEED_IDS[competition]
+        for competition, new_ids in _discover_feed_ids(upcoming, known_ids, missing).items():
+            FEED_LEAGUE_IDS.setdefault(competition, set()).update(new_ids)
+            resolved[competition] = [
+                m for m in upcoming if m.get("leagueId") in FEED_LEAGUE_IDS[competition]
             ]
-    for competition, matches in uefa.items():
+    for competition, matches in resolved.items():
         if matches:
             result[competition] = [build_fixture_summary(m) for m in matches]
 

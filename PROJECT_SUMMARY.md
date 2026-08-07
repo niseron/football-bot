@@ -13,7 +13,9 @@ An automated football betting analysis bot that:
 - Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
 - Tracks all picks and P&L in a Google Sheet with conditional formatting, a Picks tab and a Summary tab
 
-Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), UEFA Champions League (added 4 Aug 2026 — qualifying rounds, league phase and knockouts; **already producing fixtures**, Q3 is under way), UEFA Conference League (added 30 Jul 2026, same three stages), and FIFA World Cup 2026 (ended 19 Jul 2026). Both UEFA competitions are matched by stable parent id rather than a pinned feed id — see "UEFA leagueId resolution" below.
+Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), UEFA Champions League (added 4 Aug 2026 — qualifying rounds, league phase and knockouts; **already producing fixtures**, Q3 is under way), UEFA Conference League (added 30 Jul 2026, same three stages), and FIFA World Cup 2026 (ended 19 Jul 2026). Both UEFA competitions and the Jupiler Pro League are matched by stable parent id rather than a pinned feed id — see "Parent-id leagueId resolution" below.
+
+⚠️ **The Jupiler Pro League produced zero picks from the initial commit until 8 Aug 2026.** It was pinned in `LEAGUES` as leagueId `900433`, which the live feed never returns — the Belgian fixtures carry a season-scoped id (`937988` in 2026-27, parent `40`). `partition_fixtures()` therefore matched nothing for it on every run, so its fixtures were never fetched, never analysed and never rejected: the pipeline simply never saw them. Confirmed 8 Aug 2026 against the Google Sheet's Picks tab — 187 logged picks, **0 with League = Jupiler Pro League** (164 FIFA World Cup 2026, 21 Conference League, 2 Friendlies). Fixed 8 Aug 2026 by moving Belgium onto the parent-resolution path. Consequence for calibration: there is no Belgian sample at all, and the League Breakdown's Jupiler row reading zero is a real absence of data, not variance.
 
 Since 9 Jul 2026 the repo also hosts a **fully separate tennis picks system** (ATP/WTA) — see the "Tennis System — SEPARATE from football" section below. The two systems share the Railway process and API keys but no data paths, tabs, or calibration samples. Since 6 Aug 2026 tennis no longer uses The Odds API at all (football-only) — tennis CLV is disabled by choice; see section 7.
 
@@ -247,34 +249,51 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - Duplicate pick prevention (won't re-post same pick same day)
 - Single daily job at 12:00 Brussels — evening picks job removed
 
-### UEFA leagueId resolution (Conference League 30 Jul 2026; generalised for Champions League 4 Aug 2026)
-The by-date fixtures feed returns no competition name — only a `leagueId` that is
-**season- and stage-specific**. That id rotates when qualifying ends and the league
-phase begins, and again every season, so pinning it would make the competition
-silently vanish from the picks mid-season. Champions League is the clearest proof:
-its feed id was `904988` in the 2025-26 league phase and is `937348` in 2026-27
-qualifying. **This is why Champions League is not in `LEAGUES`** — that dict is for
-domestic leagues whose single id is stable all season.
+### Parent-id leagueId resolution (Conference League 30 Jul 2026; Champions League 4 Aug 2026; Jupiler Pro League 8 Aug 2026)
+The by-date fixtures feed returns no competition name — only a `leagueId`, and for
+some competitions that id is **season-specific** (and for UEFA, stage-specific too).
+It rotates when qualifying ends and the league phase begins, and again every season,
+so pinning it makes the competition silently vanish from the picks. Champions League
+is the clearest proof: its feed id was `904988` in the 2025-26 league phase and is
+`937348` in 2026-27 qualifying. **This is why those competitions are not in
+`LEAGUES`** — that dict is only for leagues the feed tags with a stable id.
 
 Instead `partition_fixtures()` matches against the *stable* fotmob parent ids in
-`UEFA_PARENT_IDS`:
+`PARENT_RESOLVED_IDS`:
 
 | Competition | Qualification parent | Main parent |
 |---|---|---|
+| Jupiler Pro League | — | `40` |
 | Champions League | `10611` | `42` |
 | Conference League | `10615` | `10216` |
 
-- Fast path: any match whose `leagueId` is in `UEFA_FEED_IDS[competition]` (seeded
-  with `937348` / `937351`) is bucketed straight away — **zero extra API calls**.
+- Fast path: any match whose `leagueId` is in `FEED_LEAGUE_IDS[competition]` (seeded
+  with `937988` / `937348` / `937351`) is bucketed straight away — **zero extra API calls**.
 - Self-heal: only when some tracked competition yields nothing does
-  `_discover_uefa_feed_ids()` run. It resolves unfamiliar `leagueId`s to their
+  `_discover_feed_ids()` run. It resolves unfamiliar `leagueId`s to their
   `parentLeagueId` via `football-get-match-detail` (one lookup per distinct id,
-  largest fixture lists first, capped at `MAX_PARENT_LOOKUPS_PER_RUN = 12`) and
-  files each hit under the competition that owns that parent.
-- **One shared sweep serves every UEFA competition, and it must.** `_parent_league_cache`
+  capped at `MAX_PARENT_LOOKUPS_PER_RUN = 12`) and files each hit under the
+  competition that owns that parent.
+- **Candidate ranking is what makes that cap survivable, and fixture count alone is
+  not enough.** A UEFA round is one of the bigger blocks on its matchday, so
+  largest-first finds it; a domestic matchday is small. Measured on the live
+  8 Aug 2026 slate: 138 unfamiliar ids, and the 3-match Belgian block ranked **#62**
+  by size — far outside the cap. Ranking by size alone would have left the Jupiler
+  fix cosmetic, self-healing in theory and never in practice.
+  So blocks are ranked by **roster overlap first** (what fraction of the block's own
+  team ids appear in a missing competition's known roster, from `ROSTER_PARENTS`
+  via `football-get-all-matches-by-league` — one cached call per parent), then by
+  fixture count. That moved the Belgian block from #62 to **#1**.
+- Roster overlap only *ranks*; the `parentLeagueId` lookup still decides. That split
+  matters: the roster is the parent's last completed season, so it misses promoted
+  clubs — on 8 Aug 2026 parent `40` covered 13 of the 16 clubs in the 2026-27 Belgian
+  slate (Kortrijk, Lommel, Beveren had just come up). Ranking absorbs a 13/16 roster
+  without trouble; deciding membership on it would have dropped every fixture
+  involving a promoted club. **Never promote roster overlap to a membership test.**
+- **One shared sweep serves every competition, and it must.** `_parent_league_cache`
   records each id exactly once, so a second per-competition sweep would skip every
   id the first had already resolved — including its own, filed as cached misses.
-  Anything added here goes in `UEFA_PARENT_IDS`, never in a parallel sweep.
+  Anything added here goes in `PARENT_RESOLVED_IDS`, never in a parallel sweep.
 - `_parent_league_cache` caches hits *and* misses for the process lifetime, so a
   rotated id costs one discovery sweep and never again. `main.py` runs as a
   long-lived scheduler, so the cache resets only on redeploy.
@@ -286,6 +305,30 @@ Re-verified 4 Aug 2026 for Champions League: `937348` resolved live to parent `1
 ("Champions League"); 2 Q3 fixtures bucketed on the fast path with no extra calls; a
 wiped CL seed rediscovered `937348` and produced an identical fixture set with
 Conference League unaffected.
+Verified 8 Aug 2026 for Belgium: 3 Jupiler fixtures bucketed on the fast path
+(Standard–Cercle, St.Truiden–Lommel, Westerlo–Union SG); with the seed and both
+caches wiped, discovery rediscovered `937988` via parent `40` on the **first** lookup
+and returned an identical fixture set, UEFA competitions unaffected.
+
+### Which pinned ids can go stale (audit, 8 Aug 2026)
+Run this check before adding any league, and re-check if a league ever goes quiet:
+resolve one of its live fixtures through `football-get-match-detail` and compare
+`parentLeagueId` to the id you intend to pin. **Self-resolving → safe in `LEAGUES`;
+anything else is season-scoped and belongs in `PARENT_RESOLVED_IDS`.**
+
+| League | Pinned id | Resolves to | Verdict |
+|---|---|---|---|
+| Premier League | `47` | `47` | Stable parent — safe |
+| Bundesliga | `54` | `54` | Stable parent — safe |
+| La Liga | `87` | `87` | Stable parent — safe |
+| Serie A | `55` | `55` | Stable parent — safe |
+| Ligue 1 | `53` | `53` | Stable parent — safe |
+| Jupiler Pro League | ~~`900433`~~ | `40` (feed `937988`) | **Season-scoped — moved out of `LEAGUES`** |
+
+So this does **not** recur next August: all five remaining `LEAGUES` entries are
+stable parent ids that the feed uses directly, and Belgium — the only season-scoped
+one — is now on the self-healing path. The shape is a useful tell: the stable ids are
+small (2 digits), while season-scoped ids are 6-digit (`900433`, `937988`, `937348`).
 
 **Odds caveat (Conference League only):** The Odds API has no key for Conference
 League *qualifying* — only `soccer_uefa_europa_conference_league` for the main
@@ -539,7 +582,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Area | Done | Status |
 |---|---|---|
 | Bot core | 96% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026) |
-| Data quality | 86% | The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
+| Data quality | 88% | Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |

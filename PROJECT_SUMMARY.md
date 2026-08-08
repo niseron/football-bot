@@ -521,10 +521,41 @@ now stores the matched price verbatim, written by `main.py` → `tracker.log_pic
 prices this bot picks, but lossy past roughly 6.00 (an 8.50 price round-trips to 8.47). The
 explicit column is preferred; the derivation is the fallback for historical rows only.
 
-**Historical rows were left as they were settled.** 15 settled picks had a market price but were
-booked at the estimate: 9 overstated (+1.74u), 6 understated (−1.75u), **net −0.01u** on a 3.49u
-gross absolute error. The net is a rounding artefact, not a systematic bias — the estimate runs
-long on some picks and short on others. Correcting them is a data decision, not a code one.
+**Historical rows.** 15 settled picks had a market price but were booked at the estimate:
+9 overstated (+1.74u), 6 understated (−1.75u), **net −0.01u** on a 3.49u gross absolute error.
+The net is a rounding artefact, not a systematic bias — the estimate runs long on some picks and
+short on others, so the headline P&L was very nearly right by cancellation while most individual
+rows were wrong.
+
+Row 191 (Westerlo vs Union St.Gilloise, 8 Aug) was corrected by hand on 9 Aug 2026: +1.00u → +0.69u,
+dropping total P&L from 30.67u to 30.36u and the bankroll to €403.60. **The other 14 are still
+booked at the estimate** — they are listed below, and the decision to leave them is deliberate, not
+an oversight. Anything reading per-pick P&L (`edge_report`, `clv_report`) sees those 14 as they were
+settled.
+
+| Row | Date | Pick | Est | Market | Booked | Correct | Δ |
+|---|---|---|---|---|---|---|---|
+| 116 | 04 Jul | Morocco Win | 2.30 | 1.80 | +1.30 | +0.80 | +0.50 |
+| 118 | 04 Jul | France Win | 1.40 | 1.18 | +0.40 | +0.18 | +0.22 |
+| 122 | 05 Jul | Over 2.5 Goals | 1.85 | 1.70 | +0.85 | +0.70 | +0.15 |
+| 123 | 05 Jul | England Win | 1.80 | 2.40 | +0.80 | +1.40 | −0.60 |
+| 125 | 05 Jul | England −0.5 AH | 1.80 | 2.35 | +0.80 | +1.35 | −0.55 |
+| 130 | 06 Jul | Over 2.5 Goals | 1.72 | 2.00 | +0.72 | +1.00 | −0.28 |
+| 131 | 07 Jul | Argentina Win | 1.30 | 1.34 | +0.30 | +0.34 | −0.04 |
+| 132 | 07 Jul | Over 2.5 Goals | 1.75 | 1.95 | +0.75 | +0.95 | −0.20 |
+| 136 | 09 Jul | France Win | 1.65 | 1.58 | +0.65 | +0.58 | +0.07 |
+| 139 | 09 Jul | Under 2.5 Goals | 1.90 | 1.84 | +0.90 | +0.84 | +0.06 |
+| 141 | 10 Jul | Spain Win | 1.75 | 1.63 | +0.75 | +0.63 | +0.12 |
+| 143 | 10 Jul | Over 2.5 Goals | 2.00 | 1.79 | +1.00 | +0.79 | +0.21 |
+| 145 | 10 Jul | Spain −0.5 AH | 1.75 | 1.65 | +0.75 | +0.65 | +0.10 |
+| 146 | 11 Jul | England Win | 1.85 | 1.93 | +0.85 | +0.93 | −0.08 |
+
+Net across the remaining 14: **−0.32u, i.e. currently *under*stated** (8 overstated by +1.43u,
+6 understated by −1.75u) — correcting them would raise total P&L from 30.36u to 30.68u. Row 191
+happened to be the single largest overstatement, so removing it flipped the sign of the remainder;
+the gross error is what matters per-row, not this near-zero net. To correct them, rewrite the 'Profit/Loss'
+cell with `pnl_for_result(result, market_odds_from_row(row, header))` and call
+`finalize_workbook()` once at the end.
 
 ### Closing Line Value (CLV) tracking (added — `closing_odds.py`)
 - Each pick's kickoff time is captured from the RapidAPI fixture data at pick-log time and stored in the 'Kickoff UTC' column (plus 'League', for odds-batching)

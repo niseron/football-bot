@@ -24,7 +24,7 @@ PICKS_HEADERS = [
     "Date", "Match", "Bet Type", "Pick", "Odds",
     "Confidence", "Result", "Profit/Loss", "Running Total P&L", "Bankroll (€)",
     "Claude Prob %", "Market Prob %",
-    "League", "Kickoff UTC", "Closing Odds",
+    "League", "Kickoff UTC", "Closing Odds", "Market Odds",
 ]
 
 STARTING_BANKROLL = 100.0    # € tracked bankroll (used for running P&L in the sheet)
@@ -299,6 +299,81 @@ def _format_result_row(
             log.error("Row %d formatting batchUpdate failed — %r", sheet_row, exc, exc_info=True)
 
 
+# ── Settlement price resolution ───────────────────────────────────────────────
+#
+# The 'Odds' column holds Claude's ESTIMATED price. When the pick was matched
+# to a real bookmaker line, the picks card shows that market price instead —
+# so the market price is what a follower actually got, and the only correct
+# basis for P&L. Settling a 1.75 market price at a 2.00 estimate books a
+# payout nobody received.
+#
+# 'Market Odds' (added 9 Aug 2026) stores the matched price verbatim. Rows
+# logged before that carry only 'Market Prob %', which main.py writes as
+# 100/market_odds rounded to 1 dp — invertible, and exact after rounding to
+# 2 dp at the short prices this bot picks, but lossy past roughly 6.00 (an
+# 8.50 price round-trips to 8.47). Prefer the explicit column; derive only
+# when it is absent.
+
+
+def _col(header: list[str], name: str) -> int | None:
+    try:
+        return header.index(name)
+    except ValueError:
+        return None  # sheet pre-dates this column
+
+
+def _cell_float(row: list[str], idx: int | None) -> float | None:
+    if idx is None or len(row) <= idx:
+        return None
+    val = (row[idx] or "").strip()
+    if not val:
+        return None
+    try:
+        return float(val)
+    except ValueError:
+        return None
+
+
+def market_odds_from_row(row: list[str], header: list[str]) -> float | None:
+    """The matched market price for a row, or None when no market line was matched."""
+    explicit = _cell_float(row, _col(header, "Market Odds"))
+    if explicit is not None and explicit > 1.0:
+        return round(explicit, 2)
+    prob = _cell_float(row, _col(header, "Market Prob %"))
+    if prob is not None and prob > 0:
+        return round(100.0 / prob, 2)
+    return None
+
+
+def settlement_odds_from_row(row: list[str], header: list[str]) -> float:
+    """
+    The price this pick settles at: the market price when one was matched,
+    otherwise Claude's estimate. Falls back to 1.0 (P&L 0) on an unreadable
+    Odds cell, matching the previous behaviour of every caller.
+    """
+    market = market_odds_from_row(row, header)
+    if market is not None:
+        return market
+    return _cell_float(row, _col(header, "Odds")) or 1.0
+
+
+def pnl_for_result(result: str, odds: float) -> float:
+    """
+    Units won/lost on a 1-unit stake. Single definition shared by the
+    automatic (auto_results.py) and manual (update_result) settlement paths
+    so the two can never drift apart on which price they pay out at.
+    """
+    if result == "WIN":
+        return round(odds - 1, 2)
+    if result == "HALF WIN":
+        return round(0.5 * (odds - 1), 2)
+    if result == "HALF LOSS":
+        return -0.50
+    if result == "LOSS":
+        return -1.0
+    return 0.0
+
+
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 def init_excel() -> None:
@@ -352,6 +427,7 @@ def log_to_excel(
     claude_prob: float | None = None,
     market_prob: float | None = None,
     kickoff_utc: str | None = None,
+    market_odds: float | None = None,
 ) -> None:
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
     date_str = dt.strftime("%d-%b-%Y")
@@ -399,6 +475,10 @@ def log_to_excel(
         league or "",
         kickoff_utc or "",
         "",  # Closing Odds — populated later by the closing-odds job, if at all
+        # The price shown on the picks card and paid out at settlement. Empty
+        # when no market line was matched — settlement then falls back to the
+        # 'Odds' estimate.
+        round(float(market_odds), 2) if market_odds is not None else "",
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
@@ -420,6 +500,7 @@ def get_pending_picks_rows(lookback_days: int = 7) -> list[dict]:
         return []
 
     cutoff = date.today() - timedelta(days=lookback_days)
+    header = rows[0] if rows else []
     pending = []
 
     for i, row in enumerate(rows[1:], start=2):  # row 1 = header; Sheets rows are 1-based
@@ -439,7 +520,12 @@ def get_pending_picks_rows(lookback_days: int = 7) -> list[dict]:
             "match":     row[1] if len(row) > 1 else "",
             "bet_type":  row[2] if len(row) > 2 else "",
             "pick":      row[3] if len(row) > 3 else "",
-            "odds":      float(row[4]) if len(row) > 4 and row[4] else 1.0,
+            # 'odds' is the SETTLEMENT price — the market price when one was
+            # matched, else the estimate. The raw estimate stays available as
+            # 'est_odds' for calibration; 'market_odds' is None when unmatched.
+            "odds":        settlement_odds_from_row(row, header),
+            "est_odds":    _cell_float(row, _col(header, "Odds")) or 1.0,
+            "market_odds": market_odds_from_row(row, header),
         })
     return pending
 
@@ -839,21 +925,11 @@ def update_result(match_query: str, pick_query: str, result: str, pnl: float | N
         print(f"No pending pick found matching '{match_query}' / '{pick_query}'")
         return False
 
-    try:
-        odds = float(rows[target_row - 1][4]) if len(rows[target_row - 1]) > 4 and rows[target_row - 1][4] else 1.0
-    except ValueError:
-        odds = 1.0
+    # Same price rule as the automatic checker: pay out at the market price
+    # when one was matched, since that is what the card showed.
+    odds = settlement_odds_from_row(rows[target_row - 1], rows[0] if rows else [])
     if pnl is None:
-        if result == "WIN":
-            pnl = round(odds - 1, 2)
-        elif result == "HALF WIN":
-            pnl = round(0.5 * (odds - 1), 2)
-        elif result == "HALF LOSS":
-            pnl = -0.50
-        elif result == "LOSS":
-            pnl = -1.0
-        else:
-            pnl = 0.0
+        pnl = pnl_for_result(result, odds)
 
     update_row_result(target_row, result, pnl)
     finalize_workbook()
@@ -877,6 +953,7 @@ def get_picks_for_date(dt: date) -> list[dict]:
         log.error("Sheets read failed: %s", exc)
         return []
 
+    header = rows[0] if rows else []
     result = []
     for row in rows[1:]:
         if not row or not row[0]:
@@ -887,10 +964,9 @@ def get_picks_for_date(dt: date) -> list[dict]:
             continue
         if row_date != dt:
             continue
-        try:
-            odds = float(row[4]) if len(row) > 4 and row[4] else 1.0
-        except ValueError:
-            odds = 1.0
+        # Settlement price, so the result notification quotes the same odds the
+        # P&L was actually paid at (and the same figure the picks card showed).
+        odds = settlement_odds_from_row(row, header)
         try:
             pnl = float(row[7]) if len(row) > 7 and row[7] else None
         except ValueError:

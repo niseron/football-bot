@@ -205,7 +205,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 
 | Tab | Columns |
 |---|---|
-| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds |
+| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds, Market Odds. **'Odds' is Claude's estimate; 'Market Odds' is the matched market price and is what settlement pays out at** (see 'Settlement pays the market price', 9 Aug 2026). |
 | Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, Bet Type Breakdown table, and (4 Aug 2026) a **League Breakdown** table — wins / losses / win rate / total P&L / picks per competition, sorted by P&L descending. Built from the Picks tab's League column; deliberately one section in this tab, never per-league tabs, so calibration data stays unified. Every tracked competition gets a row even at zero picks (most open their 2026-27 season mid-to-late August — zeros are expected, not a bug), leagues found in the sheet but not in `TRACKED_LEAGUES` are appended rather than dropped, and the 119 picks logged before the League column existed group under `(no league recorded)` so the section's P&L reconciles exactly with the headline total. Note `Picks` here counts every logged pick incl. pending/void, unlike Bet Type Breakdown's `Total Picks` (settled wins + losses only). Below it sits a **Bet Type × League Breakdown** (4 Aug 2026) — win rate, P&L and pick count for every league/bet-type cell, leagues ordered by P&L to match the section above. A cell shows a win rate only at `_MIN_CELL_SAMPLE` (10) or more **decided** picks and otherwise reads `insufficient data`; the gate is on the rate's own denominator (wins + losses), not on settled count, because 10 settled picks that are 8 VOIDs and 2 decided would otherwise print exactly the 2-sample rate the rule exists to hide. P&L and pick count always show — only the rate is unsafe at low n. Only leagues with ≥1 settled pick appear, so not-yet-started competitions add no rows here (they stay visible at zero in the League Breakdown). On 4 Aug 2026, 11 of 18 cells read `insufficient data` — slicing two ways splits an already-small sample hard, and that is the honest state, not a gap to fill. |
 | Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier ('Top 150' / 'Lower Ranked', for future per-tier calibration), Stake € (SIM), Running P&L (u), Bankroll € (SIM), Player IDs. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 | Tennis Summary | **Tennis system only** — mirror of football's Summary tab, rebuilt by `_refresh_tennis_summary()` whenever a tennis result settles (`finalize_tennis_workbook()`, called from auto-results and the manual override): overall record, win rate, units P&L, simulated bankroll + ROI, best bet type / confidence level, Bet Type Breakdown (win-rate-desc), plus a tennis-only Rank Tier Breakdown (Top 150 vs Lower Ranked; pre-10-Jul rows show as '(untracked)'). Header labels the staking as SIMULATED. |
@@ -492,9 +492,39 @@ and still carry the bookmaker margin, so they overstate true probability by roug
    stored 'Odds' column, which is the **estimate** whenever no market odds matched. A winning
    Midtjylland pick logs +0.60u where the real price paid +0.36u. Every Conference League
    qualifying pick since 30 Jul 2026 carries this inflation in the tracked P&L.
+   **Partly fixed 9 Aug 2026** — settlement now pays the market price wherever one was matched
+   (see below). This entry still stands for genuinely uncovered fixtures like Conference League
+   qualifying: with no market price at all, the estimate is the only number available, so those
+   picks keep whatever inflation the estimate carries.
 
 Re-check against `calibration_report()` once the sample reaches ~300 settled picks (~Oct 2026).
 If the direction holds there, it is a prompt/scoring issue rather than noise.
+
+### Settlement pays the market price (fixed 9 Aug 2026)
+
+**The bug.** The picks card has shown the real market price since 4 Aug 2026 ("one odds figure,
+never two"), but settlement kept computing `pnl = odds − 1` off the 'Odds' column — Claude's
+*estimate*. Any pick whose card showed a market price different from the estimate booked a payout
+nobody received. Live example: Westerlo vs Union St.Gilloise (8 Aug) settled +1.00u off a 2.00
+estimate where the card showed 1.69 — the real payout was +0.69u.
+
+**The fix.** `excel_tracker.settlement_odds_from_row()` is now the single source of truth for the
+settlement price: matched market price when there is one, Claude's estimate when there isn't.
+`pnl_for_result()` is likewise the single P&L definition, shared by the automatic checker
+(`auto_results.py`) and the manual override (`update_result`) so the two cannot drift.
+`get_picks_for_date()` resolves the same way, so result notifications quote the price actually paid.
+
+**Storage.** A 'Market Odds' column (appended to `PICKS_HEADERS`, self-migrating via `init_excel`)
+now stores the matched price verbatim, written by `main.py` → `tracker.log_pick` →
+`log_to_excel(market_odds=…)`. Rows logged before 9 Aug 2026 have only 'Market Prob %', which is
+`100 / market_odds` rounded to 1 dp — invertible, and exact after rounding to 2 dp at the short
+prices this bot picks, but lossy past roughly 6.00 (an 8.50 price round-trips to 8.47). The
+explicit column is preferred; the derivation is the fallback for historical rows only.
+
+**Historical rows were left as they were settled.** 15 settled picks had a market price but were
+booked at the estimate: 9 overstated (+1.74u), 6 understated (−1.75u), **net −0.01u** on a 3.49u
+gross absolute error. The net is a rounding artefact, not a systematic bias — the estimate runs
+long on some picks and short on others. Correcting them is a data decision, not a code one.
 
 ### Closing Line Value (CLV) tracking (added — `closing_odds.py`)
 - Each pick's kickoff time is captured from the RapidAPI fixture data at pick-log time and stored in the 'Kickoff UTC' column (plus 'League', for odds-batching)
@@ -581,7 +611,7 @@ Completion estimates per area — update these percentages whenever a related ch
 
 | Area | Done | Status |
 |---|---|---|
-| Bot core | 96% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026) |
+| Bot core | 97% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026) |
 | Data quality | 88% | Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |

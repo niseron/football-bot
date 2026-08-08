@@ -27,6 +27,7 @@ from excel_tracker import (
     get_pending_picks_rows,
     get_picks_for_date,
     init_excel,
+    pnl_for_result,
     update_row_result,
 )
 
@@ -482,22 +483,18 @@ def run_auto_results(
             stats["errors"] += 1
             continue
 
-        if result == "WIN":
-            pnl = round(odds - 1, 2)
-        elif result == "HALF WIN":
-            pnl = round(0.5 * (odds - 1), 2)
-        elif result == "HALF LOSS":
-            pnl = -0.50
-        elif result == "LOSS":
-            pnl = -1.0
-        else:
-            pnl = 0.0
+        # 'odds' is the settlement price resolved by the pending-rows reader:
+        # the matched market price when there is one, else Claude's estimate.
+        # Paying out at the estimate inflated P&L on every pick whose card
+        # showed a shorter market price (fixed 9 Aug 2026).
+        pnl = pnl_for_result(result, odds)
         row_writer(sheet_row, result, pnl)
         changed = True
         stats["updated"] += 1
 
-        log.info("%s [%s→%s]  score %d-%d  P&L %+.2f",
-                 match, pick, result, home_score, away_score, pnl)
+        log.info("%s [%s→%s]  score %d-%d  @ %.2f (%s)  P&L %+.2f",
+                 match, pick, result, home_score, away_score, odds,
+                 "market" if p.get("market_odds") is not None else "estimate", pnl)
 
         resolved.append({
             "match":      match,

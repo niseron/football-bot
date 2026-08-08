@@ -1152,6 +1152,8 @@ async def daily_picks_job():
                 claude_prob=float(claude_prob) if claude_prob is not None else None,
                 market_prob=pick.get("market_prob"),
                 kickoff_utc=kickoff_lookup.get(pick["match"], ""),
+                # The price the card shows and settlement pays out at.
+                market_odds=pick.get("market_odds"),
             )
         except Exception as exc:
             log.warning("Failed to log pick: %s", exc)

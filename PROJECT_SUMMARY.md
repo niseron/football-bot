@@ -448,6 +448,66 @@ were the difference.)
 - P&L: HALF WIN = `+0.50 × (odds − 1)` units; HALF LOSS = `−0.50` units
 - HALF WIN / HALF LOSS flow through the entire stack: Sheets, formatting, Summary, notifications
 
+### Extra-time settlement: single match vs two-legged tie (fixed 12 Aug 2026)
+
+Unscoped picks settle on **90 minutes** (the bookmaker default; knockout picks may
+override with a `(90 min)` / `(Full-Time incl. ET/Pens)` suffix since 12 Jul 2026).
+The API returns only the final score, so when a match runs past 90 minutes the
+regulation score is unknown and `evaluate_pick()` derives what it can. What is
+derivable depends on **why** it went past 90:
+
+| | Single match | Two-legged tie |
+|---|---|---|
+| Why ET happened | scores level at 90' | **aggregate** level at 90' |
+| Regulation result | guaranteed a draw | **could be anything** |
+| Match Winner / AH / Double Chance | settled off the guaranteed draw | `PENDING` |
+| BTTS | `LOSS`/`WIN` if a side was scoreless over 120' (goals are monotonic), else `PENDING` | same |
+| Over/Under | bound is `2 × min(home, away)` | bound is the **final total** |
+
+Detected via `status.aggregatedStr`, which is present only on two-legged ties and
+is passed to `evaluate_pick(..., two_legged=True)`.
+
+Before this fix a two-legged tie was settled as though regulation had ended level.
+A team can lead 1-0 on the night and still play extra time because the aggregate is
+level, so a correct Match Winner pick could be booked as LOSS. The Over/Under case
+was worse: the `2 × min` bound is *tighter* than the final total and is only valid
+under the draw inference, so a 3-0 AET tie would have settled `Under 2.5` as WIN
+even though all three goals may have come inside 90 minutes.
+
+**Audit of the full history (12 Aug 2026):** all 207 settled picks were matched to
+their API fixture (no gaps); 27 ran past 90 minutes. 24 were single matches (inference valid, unaffected). **3 were two-legged
+— r170, r202, r203 — and none was mis-settled**: r170 (Gent vs LNZ Cherkasy, Over
+2.5, pens 0-0) still settles LOSS under the corrected bound; r202 was settled by
+hand on 12 Aug after external verification; r203 (CSKA 1948 vs Panathinaikos, MW
+Panathinaikos Win, AET 1-2, agg 2-3) is correct as LOSS because leg 1 finished
+**1-1** — a level first leg forces the second leg to be level at 90' too, which
+collapses the two-legged case back to the single-match one. The new code returns
+`PENDING` for r202/r203 rather than guessing; that is the intended trade.
+
+⚠️ The same audit found three **single-match** rows that *are* mis-settled, from
+before the 12 Jul 2026 ET rules existed — see Known Limitations.
+
+### PENDING alerting (added 12 Aug 2026)
+
+A `PENDING` verdict means a human must settle the row via `update_result.py`. It
+used to increment `stats['errors']` and nothing more, so a row could sit unsettled
+until it aged out of the `LOOKBACK_DAYS` window and was stranded permanently — which
+is what happened to the 10 Aug Bodø/Glimt BTTS pick (caught by hand at ~28h, one day
+from being lost). Now `run_auto_results()` collects `stats['pending_alerts']` and
+`run_all.py` posts each to **`results-cards`** (Discord-only):
+
+- **first sighting** → `⏳ NEEDS MANUAL SETTLEMENT`, with the score, the match status
+  (ET / pens / two-legged + aggregate), the reason it could not be settled, the sheet
+  row, and the exact `update_result.py` command
+- **still unsettled 24h after kickoff** (`PENDING_FOLLOWUP_HOURS`) → `🔁 STILL
+  UNSETTLED after Nh`, plus a warning that it is about to leave the lookback window
+
+De-duplicated per `(match, bet_type, pick)` so the 30-minute poll does not repeat
+itself. If a pick is first seen when already past 24h — a Railway restart clears the
+in-process state, or the API resolved the fixture late — it emits the follow-up
+variant once rather than both alerts 30 minutes apart. State is in-process only, so a
+restart can re-send one alert; that is the safe direction to fail.
+
 ### Real odds & value flagging (added)
 - `fetch_real_odds()` pulls live h2h/totals/spreads (Asian handicap) odds from The Odds API per fixture
 - Each Claude pick is matched to its real market outcome; a pick is flagged as "value" only when Claude's implied probability exceeds the market's by ≥5 percentage points
@@ -634,8 +694,7 @@ date-gated shut (`WC_2026_END`, 19 Jul 2026) so it cannot fire again as written.
 - **Win rate is the wrong success metric** — a high win rate at low average odds can still be break-even or negative ROI. The metric that matters is ROI vs market implied probability, which the `edge_report` now tracks.
 - **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap. *Note: the first spot check (6 Aug 2026, n=3 — see "Early calibration observation" above) pointed the **other** way, showing 11-19pp **under**confidence on short-priced favourites. Far too small a sample to overturn this expectation; recorded so the formal report is read against both hypotheses, not just this one.*
 - **No market data at all for Europa/Conference League qualifying** — *provider gap, not a budget or mapping problem; the 20,000-unit paid tier does not fix it.* Measured 6 Aug 2026 across all 67 soccer keys (see "Odds caveat" above): those fixtures exist under no sport key. Consequences while the bot picks these competitions: no value flags, no `Market Prob %` (so the picks contribute to `calibration_report` but never to `edge_report`/`clv_report`), and **P&L computed off Claude's estimated odds**, which the 6 Aug spot check showed run 11-19pp short of real market prices — i.e. tracked returns on these picks are inflated. Champions League qualifying is unaffected (covered, 10 events listed for 11 Aug).
-- **PENDING settlements need a human, and nothing chases them** — `evaluate_pick()` deliberately returns `PENDING` when a match went past 90 minutes and the regulation outcome genuinely cannot be derived from the API's final score (the API returns only the AET/pens score). That is correct, but `run_auto_results` just counts it under `errors` and moves on: no alert fires, and after `LOOKBACK_DAYS` the row falls out of the pending window and is stranded unsettled forever. Hit on 12 Aug 2026 — row 202 (Bodø/Glimt vs Union St.Gilloise, BTTS Yes, 10 Aug) sat unsettled for ~28h and was one day from ageing out; settled manually to WIN +0.75u after confirming the match stood **2-2 at 90'** (Blomberg 51', Smith 61', Hauge 76', Fuseini 88'; Helmersen 117' in ET). Worth an alert to `results-cards` on any `PENDING`.
-- **`reg_draw` assumes a single-match knockout — wrong for two-legged ties** — `evaluate_pick()` reasons that "a match can only reach extra time by being level after 90 minutes", and settles Match Winner / BTTS / O/U on that basis. In a **two-legged** tie extra time is triggered by the *aggregate* being level, not the night's score, so a team can lead 1-0 at 90' and still play ET. In that case `reg_draw` settles a correct Match Winner pick as LOSS. The 11 Aug 2026 tie happened to be level on the night (2-2) so nothing was mis-settled, but this is luck, not correctness. UEFA qualifying rounds — currently most of the book — are all two-legged. Fix would be to return `PENDING` when `status.aggregatedStr` is present rather than assuming a regulation draw. **Not yet changed** (settlement-logic change, needs a deliberate call).
+- ⚠️ **Three pre-12-Jul-2026 rows are mis-settled under the current 90-minute policy — not yet corrected.** Found by the 12 Aug 2026 two-legged audit (below). Before 12 Jul 2026 settlement used the raw final score with no extra-time awareness; the 90-minute default arrived that day and nothing backfilled the rows settled under the old rule. Three are provably wrong because their match went to ET/pens as a **single** match, which guarantees regulation ended level: **r103** (1 Jul, Belgium vs Senegal, AH Belgium −0.5 @1.85, stored WIN, regulation goal difference was 0 → LOSS), **r111** (3 Jul, Argentina vs Cape Verde, MW Argentina Win @1.12, stored WIN → LOSS) and **r146** (11 Jul, Norway vs England, MW England Win @1.93, stored WIN → LOSS). Net effect: running P&L is overstated by **4.82 units** (31.57 → 26.75 if corrected). A further four BTTS rows (**r87, r90, r105, r147**) are genuinely underivable — the 90' score cannot be recovered from an AET/pens final score — so their stored values are unverifiable rather than known-wrong. Correcting any of these rewrites historical P&L and the calibration sample, so it is left as a deliberate decision.
 - **No injury/lineup data** — the bot has form and H2H context but no player availability, injury status, or individual player form. Napoleon Games odds are also not in The Odds API, so market comparison uses consensus European bookmaker odds instead.
 - **Kelly stakes based on thin data** — bet-type win rates driving Kelly calculations are based on small samples (10-30 picks per type) and may regress significantly.
 
@@ -647,7 +706,7 @@ Completion estimates per area — update these percentages whenever a related ch
 
 | Area | Done | Status |
 |---|---|---|
-| Bot core | 97% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026) |
+| Bot core | 98% | Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026) |
 | Data quality | 90% | Picks-per-run hard-capped at `MAX_PICKS_PER_RUN` in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |

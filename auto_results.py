@@ -14,7 +14,7 @@ import os
 import re
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import requests
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -41,6 +41,18 @@ LOOKBACK_DAYS = 7
 _matches_cache: dict[date, tuple[datetime, list[dict]]] = {}
 _CACHE_TTL = timedelta(minutes=30)
 _last_api_call: float = 0.0
+
+# PENDING picks need a human (evaluate_pick could not derive the outcome). Before
+# 12 Aug 2026 they were counted under stats['errors'] and nothing else happened,
+# so a row could sit unsettled until it fell out of the lookback window and was
+# stranded forever — which is exactly what happened to the 10 Aug Bodø/Glimt BTTS
+# pick. Now every PENDING is announced once when first seen, and again if it is
+# still unsettled 24h after kickoff. Keyed by (match, bet_type, pick).
+# In-process only: a Railway restart re-sends the first alert, which is the safe
+# direction to fail.
+_pending_alerted:     set[tuple] = set()
+_pending_followed_up: set[tuple] = set()
+PENDING_FOLLOWUP_HOURS = 24
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -150,6 +162,67 @@ def _format_result_notification(r: dict) -> str:
     )
 
 
+def _pick_scope(pick: str) -> str | None:
+    """
+    The time-scope suffix on a knockout pick, added 12 Jul 2026:
+    '90' for '(90 min)', 'ft' for '(Full-Time incl. ET/Pens)', None if absent.
+    Shared by evaluate_pick() and the PENDING alert builder so the two can
+    never disagree about how a pick was scoped.
+    """
+    m = re.search(r'\s*\(([^)]*)\)$', pick.lower().strip())
+    if not m:
+        return None
+    inner = m.group(1)
+    if "90" in inner:
+        return "90"
+    if any(x in inner for x in ("full", "et", "pen")):
+        return "ft"
+    return None
+
+
+def _pending_reason(
+    bet_type: str,
+    pick: str,
+    *,
+    extra_time: bool,
+    penalties: bool,
+    two_legged: bool,
+    scope_ft: bool,
+) -> str:
+    """Why evaluate_pick() could not settle this pick, in one human sentence."""
+    if penalties and scope_ft:
+        return ("decided on a penalty shootout — the API score is level, so the "
+                "winner cannot be read from it")
+    if extra_time or penalties:
+        if two_legged:
+            return ("went past 90 minutes in a two-legged tie — extra time was "
+                    "triggered by the aggregate, not the score on the night, so "
+                    "the 90-minute outcome cannot be derived")
+        return ("went past 90 minutes — the API returns only the final score, "
+                "so the 90-minute outcome cannot be derived")
+    return f"no settlement rule matched bet type '{bet_type}' / pick '{pick}'"
+
+
+def _format_pending_notification(p: dict) -> str:
+    """Alert for a pick that needs manual settlement."""
+    head = ("⏳ NEEDS MANUAL SETTLEMENT"
+            if p["stage"] == "initial"
+            else f"🔁 STILL UNSETTLED after {p['hours_since_kickoff']:.0f}h")
+    lines = [
+        f"{head} — {p['match']}",
+        f"Bet: {p['bet_type']}",
+        f"Pick: {p['pick']}",
+        f"Score: {p['score']}{' ' + p['status_note'] if p['status_note'] else ''}",
+        f"Why: {p['reason']}",
+        f"Sheet row {p['sheet_row']} — settle with: "
+        f"python update_result.py \"{p['match']}\" \"{p['pick']}\" WIN|LOSS",
+    ]
+    if p["stage"] != "initial":
+        lines.append("⚠️ This will be stranded permanently once it leaves the "
+                     f"{LOOKBACK_DAYS}-day lookback window.")
+    return "\n".join(lines)
+
+
 # ── API ───────────────────────────────────────────────────────────────────────
 
 def _fetch_matches(dt: date) -> list[dict]:
@@ -232,6 +305,7 @@ def evaluate_pick(
     *,
     extra_time: bool = False,
     penalties: bool = False,
+    two_legged: bool = False,
 ) -> str:
     """
     Return WIN, LOSS, VOID, or PENDING (unrecognised bet type / data missing).
@@ -244,10 +318,23 @@ def evaluate_pick(
     time, so extra_time/penalties (from the match status) decide how each
     scope settles. Unscoped picks follow the bookmaker default for EVERY bet
     type: 90 minutes only. When a match went past 90 minutes the regulation
-    score itself is unknown (the API only returns the final score), but the
-    match can only reach extra time level after 90 minutes — each bet type
-    derives what it can from that fact and returns PENDING (manual settlement
-    via update_result.py) when the regulation outcome is genuinely ambiguous.
+    score itself is unknown (the API only returns the final score), so each
+    bet type derives what it can and returns PENDING (manual settlement via
+    update_result.py) when the regulation outcome is genuinely ambiguous.
+
+    What can be derived depends on WHY the match went past 90 minutes:
+
+    * Single match (two_legged=False) — extra time is only reachable from a
+      level score, so regulation is guaranteed to have ended a draw. That is
+      a strong fact and most bet types settle off it.
+    * Two-legged tie (two_legged=True) — extra time is triggered by the
+      AGGREGATE being level, not the night's score. A team can lead 1-0 at
+      90' and still play extra time, so regulation could have ended in any
+      result and the draw inference is invalid. Only conclusions that follow
+      from goals being monotonic (a side scoreless over 120' was scoreless
+      over 90'; the 90' total cannot exceed the final total) survive; every
+      other case returns PENDING. Fixed 12 Aug 2026 — before that a
+      two-legged tie was settled as though regulation had ended level.
     """
     bt    = bet_type.lower()
     pk    = pick.lower().strip()
@@ -259,21 +346,22 @@ def evaluate_pick(
     dr    = home_score == away_score
 
     # Detect and strip a trailing time-scope marker from the pick text
-    scope = None
-    m = re.search(r'\s*\(([^)]*)\)$', pk)
-    if m:
-        inner = m.group(1)
-        if "90" in inner:
-            scope = "90"
-        elif any(x in inner for x in ("full", "et", "pen")):
-            scope = "ft"
-        if scope:
-            pk = pk[:m.start()].strip()
+    scope = _pick_scope(pk)
+    if scope:
+        pk = re.sub(r'\s*\([^)]*\)$', '', pk).strip()
 
-    # Match went past 90 minutes and the pick settles on regulation time
-    # (the default). The API score includes ET goals, but regulation is
-    # guaranteed to have ended level — that is the only way to reach ET.
-    reg_draw = (extra_time or penalties) and scope != "ft"
+    # Match went past 90 minutes and the pick settles on regulation time (the
+    # default). The API score includes ET goals, so the 90' score is unknown.
+    past_90 = (extra_time or penalties) and scope != "ft"
+
+    # Single match: ET is only reachable from a level score, so regulation is
+    # guaranteed to have ended a draw.
+    reg_draw = past_90 and not two_legged
+
+    # Two-legged tie: ET is triggered by the aggregate, so regulation could
+    # have ended in ANY result. Nothing may be inferred from the scoreline
+    # beyond what monotonic goal counts give us.
+    reg_unknown = past_90 and two_legged
 
     # ── Match Winner ─────────────────────────────────────────────────────────
     if any(x in bt for x in ("match winner", "1x2", "result", "moneyline")):
@@ -282,6 +370,12 @@ def evaluate_pick(
         away_pick = pk in ("away", "away win", "2") or an in pk or pk in an
         draw_pick = pk in ("draw", "x", "tie")
 
+        if reg_unknown:
+            log.warning("Pick '%s' (%s) went past 90 minutes in a TWO-LEGGED tie "
+                        "— extra time was triggered by the aggregate, so the "
+                        "90-minute result cannot be derived; settle manually "
+                        "via update_result.py", pick, bet_type)
+            return "PENDING"
         if reg_draw:
             # A single-match knockout only reaches extra time when level after
             # 90 minutes, so the regulation result is a draw regardless of the
@@ -301,14 +395,18 @@ def evaluate_pick(
 
     # ── Both Teams to Score ──────────────────────────────────────────────────
     elif any(x in bt for x in ("both teams to score", "btts", "gg/ng", "goal goal")):
-        if reg_draw:
+        if past_90:
             if min(home_score, away_score) == 0:
-                # Level after 90' with one side scoreless overall → reg was 0-0
+                # Goals are monotonic: a side that failed to score across the
+                # full 120' also failed to score in the first 90'. Holds for a
+                # two-legged tie too — it needs no draw inference.
                 both = False
             else:
-                log.warning("Pick '%s' (%s) went to extra time — the 90-minute "
-                            "BTTS outcome cannot be derived from the AET score; "
-                            "settle manually via update_result.py", pick, bet_type)
+                log.warning("Pick '%s' (%s) went past 90 minutes%s — the "
+                            "90-minute BTTS outcome cannot be derived from the "
+                            "final score; settle manually via update_result.py",
+                            pick, bet_type,
+                            " in a TWO-LEGGED tie" if two_legged else "")
                 return "PENDING"
         else:
             both = home_score > 0 and away_score > 0
@@ -319,15 +417,22 @@ def evaluate_pick(
     elif any(x in bt for x in ("over", "under", "total goals", "goals over", "o/u")):
         nums      = re.findall(r'\d+\.?\d*', bt)
         threshold = float(nums[0]) if nums else 2.5
-        if reg_draw:
-            # Regulation ended h-h with h ≤ min(final scores), so the highest
-            # possible 90-minute total is 2 × min(home, away).
-            if 2 * min(home_score, away_score) < threshold:
+        if past_90:
+            # Upper bound on the 90-minute total. Single match: regulation
+            # ended h-h with h ≤ min(final scores), so at most 2 × min. Two
+            # legs: no draw inference is available, only that goals are
+            # monotonic — the 90' total cannot exceed the final total. (The
+            # 2 × min bound is the tighter of the two, so applying it to a
+            # two-legged tie could settle Under on a match that was already
+            # past the line at 90'.)
+            max_reg_total = total if two_legged else 2 * min(home_score, away_score)
+            if max_reg_total < threshold:
                 if "over"  in pk: return "LOSS"
                 if "under" in pk: return "WIN"
-            log.warning("Pick '%s' (%s) went to extra time — the 90-minute "
-                        "total cannot be derived from the AET score; settle "
-                        "manually via update_result.py", pick, bet_type)
+            log.warning("Pick '%s' (%s) went past 90 minutes%s — the 90-minute "
+                        "total cannot be derived from the final score; settle "
+                        "manually via update_result.py", pick, bet_type,
+                        " in a TWO-LEGGED tie" if two_legged else "")
             return "PENDING"
         if "over"  in pk: return "WIN" if total >  threshold else "LOSS"
         if "under" in pk: return "WIN" if total <  threshold else "LOSS"
@@ -343,6 +448,12 @@ def evaluate_pick(
                 score, opp = away_score, home_score
             else:
                 score, opp = None, None
+            if score is not None and reg_unknown:
+                log.warning("Pick '%s' (%s) went past 90 minutes in a TWO-LEGGED "
+                            "tie — extra time was triggered by the aggregate, so "
+                            "the 90-minute goal difference cannot be derived; "
+                            "settle manually via update_result.py", pick, bet_type)
+                return "PENDING"
             if score is not None and reg_draw:
                 # AH settles on the goal difference, which was exactly 0 after
                 # 90 minutes no matter how many ET goals the API score holds.
@@ -363,6 +474,12 @@ def evaluate_pick(
 
     # ── Double Chance ────────────────────────────────────────────────────────
     elif "double chance" in bt:
+        if reg_unknown:
+            log.warning("Pick '%s' (%s) went past 90 minutes in a TWO-LEGGED tie "
+                        "— extra time was triggered by the aggregate, so the "
+                        "90-minute result cannot be derived; settle manually "
+                        "via update_result.py", pick, bet_type)
+            return "PENDING"
         if reg_draw:
             # Regulation result was a draw: 'or draw' sides win, '12' loses.
             hw, aw, dr = False, False, True
@@ -404,8 +521,13 @@ def run_auto_results(
 
     init_excel()
 
+    # 'pending_alerts' rides along in stats so the return signature stays a
+    # 2-tuple — run_all.py owns delivery, the same way it does for 'resolved'.
+    # Keeping the send out of here means a caller settling a different tab via
+    # the hooks below never posts to the football results channel.
     stats   = {"checked": 0, "updated": 0, "not_finished": 0,
-               "no_match": 0, "too_old": 0, "errors": 0}
+               "no_match": 0, "too_old": 0, "errors": 0, "pending": 0,
+               "pending_alerts": []}
     resolved: list[dict] = []
 
     # ── 1. Collect pending rows from Google Sheets ────────────────────────────
@@ -470,17 +592,72 @@ def run_auto_results(
 
         # Knockout finishes: the API's status.reason says how the match ended
         # (FT / AET / Pen) while the score always includes extra time.
-        reason     = (api_match.get("status") or {}).get("reason") or {}
+        status     = api_match.get("status") or {}
+        reason     = status.get("reason") or {}
         fin_txt    = f"{reason.get('short', '')} {reason.get('long', '')}".lower()
         penalties  = fin_txt.startswith("pen") or "penalt" in fin_txt
         extra_time = penalties or "aet" in fin_txt or "extra time" in fin_txt
+        # A two-legged tie carries an aggregate score. Extra time there is
+        # triggered by the aggregate, so 'went to ET' does NOT imply the night
+        # ended level — see evaluate_pick().
+        two_legged = bool(status.get("aggregatedStr"))
 
         result = evaluate_pick(bet_type, pick, home_name, away_name, home_score, away_score,
-                               extra_time=extra_time, penalties=penalties)
+                               extra_time=extra_time, penalties=penalties,
+                               two_legged=two_legged)
 
         if result == "PENDING":
             log.warning("Could not evaluate bet_type='%s' pick='%s'", bet_type, pick)
             stats["errors"] += 1
+            stats["pending"] += 1
+
+            key = (match, bet_type, pick)
+            kickoff = status.get("utcTime") or ""
+            hours = 0.0
+            try:
+                ko = datetime.fromisoformat(kickoff.replace("Z", "+00:00"))
+                hours = (datetime.now(timezone.utc) - ko).total_seconds() / 3600
+            except ValueError:
+                log.warning("Unparseable kickoff '%s' for pending pick '%s'", kickoff, match)
+
+            stage = None
+            if key not in _pending_alerted:
+                _pending_alerted.add(key)
+                if hours >= PENDING_FOLLOWUP_HOURS:
+                    # Already past the follow-up window on first sighting — a
+                    # restart cleared the in-process state, or the API resolved
+                    # the fixture late. Send the louder 'still unsettled' alert
+                    # once instead of both variants 30 minutes apart.
+                    stage = "followup"
+                    _pending_followed_up.add(key)
+                else:
+                    stage = "initial"
+            elif hours >= PENDING_FOLLOWUP_HOURS and key not in _pending_followed_up:
+                stage = "followup"
+                _pending_followed_up.add(key)
+
+            if stage:
+                status_note = ("(after penalties)" if penalties
+                               else "(after extra time)" if extra_time else "")
+                if two_legged:
+                    status_note += f" two-legged, agg {status['aggregatedStr']}"
+                stats["pending_alerts"].append({
+                    "stage":       stage,
+                    "sheet_row":   sheet_row,
+                    "match":       match,
+                    "bet_type":    bet_type,
+                    "pick":        pick,
+                    "score":       f"{home_score}-{away_score}",
+                    "status_note": status_note.strip(),
+                    "kickoff_utc": kickoff,
+                    "hours_since_kickoff": hours,
+                    "reason": _pending_reason(
+                        bet_type, pick,
+                        extra_time=extra_time, penalties=penalties,
+                        two_legged=two_legged,
+                        scope_ft=_pick_scope(pick) == "ft",
+                    ),
+                })
             continue
 
         # 'odds' is the settlement price resolved by the pending-rows reader:

@@ -23,7 +23,12 @@ log = logging.getLogger(__name__)
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from auto_results import _format_result_notification, _telegram_send, run_auto_results
+from auto_results import (
+    _format_pending_notification,
+    _format_result_notification,
+    _telegram_send,
+    run_auto_results,
+)
 from closing_odds import run_closing_odds_check
 from discord_bot import send_to_discord
 from main import daily_picks_job
@@ -57,6 +62,18 @@ async def live_results_check() -> None:
         # Discord mirror — same trigger, same text; send_to_discord never raises
         await asyncio.to_thread(send_to_discord, "results-cards", msg)
         _notified.add(key)
+
+    # Picks evaluate_pick() could not settle. Discord-only and deliberately
+    # louder than a log line: before 12 Aug 2026 these were silent and a row
+    # could age out of the lookback window unsettled. run_auto_results already
+    # decides what to announce (first sighting, then again 24h after kickoff)
+    # and de-duplicates, so everything here just gets sent.
+    for p in stats.get("pending_alerts", []):
+        log.warning("PENDING pick needs manual settlement (%s): %s | %s — %s",
+                    p["stage"], p["match"], p["pick"], p["reason"])
+        await asyncio.to_thread(
+            send_to_discord, "results-cards", _format_pending_notification(p)
+        )
 
 
 async def closing_odds_job() -> None:

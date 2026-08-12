@@ -169,6 +169,14 @@ _roster_cache: dict[int, set[int]] = {}
 # can never blow out the RapidAPI budget.
 MAX_PARENT_LOOKUPS_PER_RUN = 12
 
+# Hard cap on picks per run. The SYSTEM_PROMPT asks for the "top 5", but that is
+# only an instruction — it has been exceeded in practice (16 Jun 2026: 8 picks in
+# one run; 14 Jun: 14). The picks card renders 5, so anything past this cap used
+# to be logged to the sheet and settled into P&L without ever being shown.
+# Enforced once, in analyse_with_claude(), so every downstream consumer — sheet,
+# Telegram, card, Discord embeds — sees the identical list.
+MAX_PICKS_PER_RUN = 5
+
 # Regex to identify youth-team suffixes  e.g. "U19", "U-21", "U 23"
 _YOUTH_RE = re.compile(r"\bU[\s-]?1[5-9]\b|\bU[\s-]?2[0-3]\b|youth|junior", re.IGNORECASE)
 
@@ -212,6 +220,7 @@ DISCORD_LEAGUE_CHANNEL_KEYS: dict[str, str] = {
     "Serie A": "serie-a",
     "Ligue 1": "ligue-1",
     "Champions League": "champions-league",
+    "Conference League": "conference-league",
 }
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -998,6 +1007,20 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
         if key not in seen:
             seen.add(key)
             deduped.append(pick)
+
+    # Single enforcement point for MAX_PICKS_PER_RUN — upstream of logging, so a
+    # pick can never reach the sheet (and therefore P&L) without also reaching
+    # the card. Never silent: the dropped picks are logged in full.
+    if len(deduped) > MAX_PICKS_PER_RUN:
+        dropped = deduped[MAX_PICKS_PER_RUN:]
+        log.warning(
+            "Analysis returned %d picks, capping at %d — dropping %d: %s",
+            len(deduped), MAX_PICKS_PER_RUN, len(dropped),
+            "; ".join(f"{p.get('match')} [{p.get('bet_type')} · {p.get('pick')}]"
+                      for p in dropped),
+        )
+        deduped = deduped[:MAX_PICKS_PER_RUN]
+
     return deduped
 
 

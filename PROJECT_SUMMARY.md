@@ -142,6 +142,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `serie-a` | Each Serie A pick as an embed (league tracked since 19 Jul 2026; first fixtures ~22 Aug 2026) | `main.py` |
 | `ligue-1` | Each Ligue 1 pick as an embed (league tracked since 19 Jul 2026; first fixtures ~21 Aug 2026) | `main.py` |
 | `champions-league` | Each Champions League pick as an embed (tracked since 4 Aug 2026; live immediately — Q3 fixtures were already in the 48h window that day) | `main.py` |
+| `conference-league` | Each Conference League pick as an embed. *New key 12 Aug 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, these picks are skipped silently and reach Discord via the card only (still logged to Sheets).* | `main.py` |
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
@@ -149,18 +150,20 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 
 The league-name → key routing lives in `main.py`'s `DISCORD_LEAGUE_CHANNEL_KEYS`.
 
-**Conference League has no dedicated channel by design** (added 30 Jul 2026). It is
-deliberately absent from `DISCORD_LEAGUE_CHANNEL_KEYS`, so its picks reach Discord
-only via the daily card in `picks-cards` — which is exactly what was asked for. A
-league missing from that map is simply not routed to a per-league channel; nothing
-errors. To also get per-pick embeds later, add a `conference-league` channel id to
-`DISCORD_CHANNELS_JSON` and the matching `"Conference League": "conference-league"`
-entry to `DISCORD_LEAGUE_CHANNEL_KEYS`.
+**Conference League got its own channel on 12 Aug 2026**, reversing the 30 Jul 2026
+decision to leave it off `DISCORD_LEAGUE_CHANNEL_KEYS`. Reason: card-only routing
+made it the one tracked competition whose picks had a *single* Discord surface, so
+anything dropped from the card vanished from Discord entirely — while a Premier
+League pick in the same situation still reached its league channel. That mattered
+because Conference League qualifying has been carrying most of the book since
+early Aug. Both UEFA competitions now route identically.
 
-**Champions League is the opposite case** (added 4 Aug 2026): it *does* have a
-dedicated `champions-league` channel and is in `DISCORD_LEAGUE_CHANNEL_KEYS`, so its
-picks get per-pick embeds *and* appear on the card. The two UEFA competitions share
-all their fixture-matching machinery and differ only in this routing choice.
+⚠️ **Needs a channel id.** `"Conference League": "conference-league"` is in
+`DISCORD_LEAGUE_CHANNEL_KEYS`, but until a `conference-league` id is added to
+`DISCORD_CHANNELS_JSON` on Railway, `send_to_discord()` logs
+`Discord channel key 'conference-league' not mapped — skipping` and those picks
+keep reaching Discord via the card only. Nothing errors; the rest of the run is
+untouched. (Same pattern as `tennis-picks-lower` above.)
 
 **Pick embed format** (built by `discord_bot.py`'s `build_pick_embed()`, since 10 Jul 2026 — previously plain text): title = match name; stripe colour by confidence (High = green `#00c853`, Medium = blue `#2196f3`, Low = orange `#ff6f00`); a full-width **Pick** field with the selection; inline **Bet Type** / **Odds** / **Confidence** fields side by side (Odds shows a SINGLE figure — the real market price when one was matched, otherwise the estimate; see "Model-name-free output" below); the full reasoning as the description; a `🔥 VALUE` footer only when the pick beat the market by ≥5pp. Context renders as the small author line — the league for football, `Tour | Tournament | Surface` for tennis. Card/result sends (`picks-cards`, `results-cards`, `weekly-cards`, `tennis-results`) are unchanged plain text/images.
 
@@ -585,7 +588,7 @@ cell with `pnl_for_result(result, market_odds_from_row(row, header))` and call
 ### Discord delivery (added — `discord_bot.py`)
 - Every daily picks card and weekly card is mirrored to Discord right after its Telegram send
 - Live result notifications (the automatic 30-minute checker) mirror to Discord from the identical trigger as the Telegram notification; the results PNG card additionally mirrors when the manual `--results` path generates it
-- Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup` / `bundesliga` / `la-liga` / `serie-a` / `ligue-1` / `champions-league`) — see section 5b for the embed format
+- Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup` / `bundesliga` / `la-liga` / `serie-a` / `ligue-1` / `champions-league` / `conference-league`) — see section 5b for the embed format
 - Entirely fail-silent — see section 5b for the mapping structure and guarantees
 
 ### Tracking and reporting
@@ -631,6 +634,8 @@ date-gated shut (`WC_2026_END`, 19 Jul 2026) so it cannot fire again as written.
 - **Win rate is the wrong success metric** — a high win rate at low average odds can still be break-even or negative ROI. The metric that matters is ROI vs market implied probability, which the `edge_report` now tracks.
 - **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap. *Note: the first spot check (6 Aug 2026, n=3 — see "Early calibration observation" above) pointed the **other** way, showing 11-19pp **under**confidence on short-priced favourites. Far too small a sample to overturn this expectation; recorded so the formal report is read against both hypotheses, not just this one.*
 - **No market data at all for Europa/Conference League qualifying** — *provider gap, not a budget or mapping problem; the 20,000-unit paid tier does not fix it.* Measured 6 Aug 2026 across all 67 soccer keys (see "Odds caveat" above): those fixtures exist under no sport key. Consequences while the bot picks these competitions: no value flags, no `Market Prob %` (so the picks contribute to `calibration_report` but never to `edge_report`/`clv_report`), and **P&L computed off Claude's estimated odds**, which the 6 Aug spot check showed run 11-19pp short of real market prices — i.e. tracked returns on these picks are inflated. Champions League qualifying is unaffected (covered, 10 events listed for 11 Aug).
+- **PENDING settlements need a human, and nothing chases them** — `evaluate_pick()` deliberately returns `PENDING` when a match went past 90 minutes and the regulation outcome genuinely cannot be derived from the API's final score (the API returns only the AET/pens score). That is correct, but `run_auto_results` just counts it under `errors` and moves on: no alert fires, and after `LOOKBACK_DAYS` the row falls out of the pending window and is stranded unsettled forever. Hit on 12 Aug 2026 — row 202 (Bodø/Glimt vs Union St.Gilloise, BTTS Yes, 10 Aug) sat unsettled for ~28h and was one day from ageing out; settled manually to WIN +0.75u after confirming the match stood **2-2 at 90'** (Blomberg 51', Smith 61', Hauge 76', Fuseini 88'; Helmersen 117' in ET). Worth an alert to `results-cards` on any `PENDING`.
+- **`reg_draw` assumes a single-match knockout — wrong for two-legged ties** — `evaluate_pick()` reasons that "a match can only reach extra time by being level after 90 minutes", and settles Match Winner / BTTS / O/U on that basis. In a **two-legged** tie extra time is triggered by the *aggregate* being level, not the night's score, so a team can lead 1-0 at 90' and still play ET. In that case `reg_draw` settles a correct Match Winner pick as LOSS. The 11 Aug 2026 tie happened to be level on the night (2-2) so nothing was mis-settled, but this is luck, not correctness. UEFA qualifying rounds — currently most of the book — are all two-legged. Fix would be to return `PENDING` when `status.aggregatedStr` is present rather than assuming a regulation draw. **Not yet changed** (settlement-logic change, needs a deliberate call).
 - **No injury/lineup data** — the bot has form and H2H context but no player availability, injury status, or individual player form. Napoleon Games odds are also not in The Odds API, so market comparison uses consensus European bookmaker odds instead.
 - **Kelly stakes based on thin data** — bet-type win rates driving Kelly calculations are based on small samples (10-30 picks per type) and may regress significantly.
 
@@ -643,7 +648,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Area | Done | Status |
 |---|---|---|
 | Bot core | 97% | Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026) |
-| Data quality | 88% | Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
+| Data quality | 90% | Picks-per-run hard-capped at `MAX_PICKS_PER_RUN` in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |

@@ -47,7 +47,19 @@ _last_api_call: float = 0.0
 # so a row could sit unsettled until it fell out of the lookback window and was
 # stranded forever — which is exactly what happened to the 10 Aug Bodø/Glimt BTTS
 # pick. Now every PENDING is announced once when first seen, and again if it is
-# still unsettled 24h after kickoff. Keyed by (match, bet_type, pick).
+# still unsettled 24h after kickoff.
+#
+# Keyed by (alert_scope, match, bet_type, pick) — the scope is NOT decorative.
+# These sets are module-level and every caller of run_auto_results shares them,
+# so without it a second pipeline settling a different tab (the Opus 5 shadow,
+# 13 Aug 2026) would consume football's alert slot for any pick both models
+# happened to make: the shadow's caller discards its alerts, so the football
+# row's alert would then never be raised anywhere and the row could strand
+# silently — reintroducing the exact 10 Aug failure this block exists to
+# prevent. Collisions are expected, not rare: both pipelines analyse the same
+# fixtures with the same prompt, and PENDING is a property of the fixture (a
+# two-legged tie, an unhandled bet type), not of the model.
+#
 # In-process only: a Railway restart re-sends the first alert, which is the safe
 # direction to fail.
 _pending_alerted:     set[tuple] = set()
@@ -505,6 +517,7 @@ def run_auto_results(
     pending_source=None,
     row_writer=None,
     finalizer=None,
+    alert_scope: str = "football",
 ) -> tuple[dict, list[dict]]:
     """
     Scan pending Google Sheets rows, fetch API scores, update the sheet.
@@ -514,6 +527,16 @@ def run_auto_results(
     (get_pending_picks_rows / update_row_result / finalize_workbook); a
     caller may pass its own tab's reader/writer plus a different finalizer
     to settle another tab with the identical evaluation logic.
+
+    `alert_scope` namespaces the module-level PENDING-alert dedup sets. ANY
+    caller settling a tab other than the football one MUST pass its own scope,
+    or its PENDING rows will consume football's alert slots — see the comment
+    on _pending_alerted above.
+
+    `row_writer` may return False to signal the write failed; that row is then
+    not counted as updated and not reported as resolved. A writer returning
+    None (the football one) is treated as success, so this is backward
+    compatible.
     """
     pending_source = pending_source or get_pending_picks_rows
     row_writer     = row_writer or update_row_result
@@ -611,7 +634,7 @@ def run_auto_results(
             stats["errors"] += 1
             stats["pending"] += 1
 
-            key = (match, bet_type, pick)
+            key = (alert_scope, match, bet_type, pick)
             kickoff = status.get("utcTime") or ""
             hours = 0.0
             try:
@@ -665,7 +688,16 @@ def run_auto_results(
         # Paying out at the estimate inflated P&L on every pick whose card
         # showed a shorter market price (fixed 9 Aug 2026).
         pnl = pnl_for_result(result, odds)
-        row_writer(sheet_row, result, pnl)
+        # A writer that returns False failed to write. Counting it as settled
+        # anyway is how the tennis pipeline can announce '✅ settled' for a row
+        # that is still PENDING on the sheet (tennis_excel_tracker.py:368 +
+        # tennis_auto_results.py:415) — not reproduced here. None means success,
+        # so the football writer is unaffected.
+        if row_writer(sheet_row, result, pnl) is False:
+            log.error("Row %s: result write FAILED — leaving PENDING, not reporting settled",
+                      sheet_row)
+            stats["errors"] += 1
+            continue
         changed = True
         stats["updated"] += 1
 

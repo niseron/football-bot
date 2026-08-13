@@ -147,6 +147,7 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
+| `opus-shadow` | **Opus 5 shadow experiment only** (13 Aug 2026) — every Opus pick as a text embed, all leagues, both tiers, author line `OPUS 5 SHADOW · <league> · <tier> #<rank>` and a `SIM` stake tag. No cards. Results are **never** posted here — settlement writes to the sheet only. Channel id `1537471803440762992`, verified reachable 13 Aug 2026. Also the experiment's master gate: while this key is absent from `DISCORD_CHANNELS_JSON` the whole shadow is inert (no model call, no cost, no sheet or Odds API usage). | `opus_shadow.py` |
 | `usage` | Daily API usage + cost report at 23:50 Brussels — Anthropic tokens/cost per job, The Odds API units against the 20,000/month tier (football-only spend since 6 Aug 2026), RapidAPI football + tennis quotas (added 4 Aug 2026) | `run_all.py` `usage_summary_job` → `usage_tracker.py` |
 
 The league-name → key routing lives in `main.py`'s `DISCORD_LEAGUE_CHANNEL_KEYS`.
@@ -220,6 +221,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 | Summary | **Core-tier only** (13 Aug 2026) apart from the final tier block — every figure below is computed from Core rows, so Extended picks never move the headline win rate, P&L or bankroll. A **Pick Tier Breakdown** table is appended at the bottom (wins / losses / win rate / total P&L / picks for Core vs Extended) — the one section that deliberately sees both tiers. Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, Bet Type Breakdown table, and (4 Aug 2026) a **League Breakdown** table — wins / losses / win rate / total P&L / picks per competition, sorted by P&L descending. Built from the Picks tab's League column; deliberately one section in this tab, never per-league tabs, so calibration data stays unified. Every tracked competition gets a row even at zero picks (most open their 2026-27 season mid-to-late August — zeros are expected, not a bug), leagues found in the sheet but not in `TRACKED_LEAGUES` are appended rather than dropped, and the 119 picks logged before the League column existed group under `(no league recorded)` so the section's P&L reconciles exactly with the headline total. Note `Picks` here counts every logged pick incl. pending/void, unlike Bet Type Breakdown's `Total Picks` (settled wins + losses only). Below it sits a **Bet Type × League Breakdown** (4 Aug 2026) — win rate, P&L and pick count for every league/bet-type cell, leagues ordered by P&L to match the section above. A cell shows a win rate only at `_MIN_CELL_SAMPLE` (10) or more **decided** picks and otherwise reads `insufficient data`; the gate is on the rate's own denominator (wins + losses), not on settled count, because 10 settled picks that are 8 VOIDs and 2 decided would otherwise print exactly the 2-sample rate the rule exists to hide. P&L and pick count always show — only the rate is unsafe at low n. Only leagues with ≥1 settled pick appear, so not-yet-started competitions add no rows here (they stay visible at zero in the League Breakdown). On 4 Aug 2026, 11 of 18 cells read `insufficient data` — slicing two ways splits an already-small sample hard, and that is the honest state, not a gap to fill. |
 | Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier ('Top 150' / 'Lower Ranked', for future per-tier calibration), Stake € (SIM), Running P&L (u), Bankroll € (SIM), Player IDs. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 | Tennis Summary | **Tennis system only** — mirror of football's Summary tab, rebuilt by `_refresh_tennis_summary()` whenever a tennis result settles (`finalize_tennis_workbook()`, called from auto-results and the manual override): overall record, win rate, units P&L, simulated bankroll + ROI, best bet type / confidence level, Bet Type Breakdown (win-rate-desc), plus a tennis-only Rank Tier Breakdown (Top 150 vs Lower Ranked; pre-10-Jul rows show as '(untracked)'). Header labels the staking as SIMULATED. |
+| Opus Shadow Picks | **Opus 5 shadow experiment only** (13 Aug 2026) — mirrors the football Picks columns including `Pick Tier`, plus two SIMULATED staking columns appended at the end: `Stake EUR (SIM)` and `Bankroll EUR (SIM)` (€100 start, half-Kelly capped at 5%, same logic as the tennis tab). Written exclusively by `opus_tracker.py`; **no football code reads it and it reads no football tab**, which is what keeps Opus out of calibration/edge/CLV and the football Summary. Running Total P&L here is tier-BLIND (both tiers move it) — the shadow has no baseline to protect. `Closing Odds` stays empty: the shadow does no closing-odds polling, so it cannot eat football's CLV budget. |
 | Fable Picks | **HISTORICAL — discontinued experiment data, kept for reference.** Rows logged by the Fable 5 shadow experiment (12-18 Jul 2026) with the football Picks structure minus staking/bankroll columns (units P&L only). Nothing reads or writes this tab anymore — the Fable pipeline was removed on 19 Jul 2026 (see the discontinued-experiment note in section on the Fable 5 shadow pipeline). |
 
 **Conditional formatting (applied via batchUpdate on every write):**
@@ -477,11 +479,28 @@ The check uses `GET /v4/sports`, which is **free** (verified: it does not move `
 and it **fails open** — an unreadable quota must not silently disable polling for a month. The daily
 summary warns below 25% remaining.
 
-**Budget at the current caps** (3 units/call), tennis now contributing zero: football polling 60/day
-+ football enrichment ~5/day = **195 units/day ≈ 6,000/month, ~30% of the tier**, leaving ~14,000
-units for Historical Odds work and spikes. (Before tennis was switched off on 6 Aug 2026 the same
-caps projected 351 units/day ≈ 10,900/month, ~54% — tennis polling 40/day + tennis enrichment 12/day
-were the difference.)
+**Budget at the current caps** (3 units/call), tennis contributing zero. Re-costed 13 Aug 2026 —
+the previous figure understated enrichment because it predated two changes on that date:
+
+| Source | Requests/day | Units/day |
+|---|---|---|
+| Football closing-odds polling (self-imposed cap) | 60 | 180 |
+| Football picks enrichment | 0-10 | **0-30** |
+| Opus 5 shadow enrichment (separate pick set) | 0-10 | **0-30** |
+| **Worst case** | 80 | **240 ≈ 7,300/month, ~36% of the tier** |
+
+**Enrichment is one billed `/odds` call per unique FIXTURE, not per league** — the cache in
+`enrich_picks_with_real_odds` is keyed `(home, away, league)` and lives only for that one call, so
+two picks on different fixtures in the same competition each fire a full league-wide request. That
+makes the picks-run cost scale with `MAX_PICKS_PER_RUN`, which rose 5 → 10 on 13 Aug 2026: the old
+"~5 requests/day ≈ 195 units/day, ~30%" line was written for a 5-pick run and is superseded by the
+table above. (The closing-odds job *does* batch per competition — `closing_odds.py` — so only the
+picks path has this shape.)
+
+Live meter on 13 Aug 2026: **150 units used of 20,000** since the 6 Aug reset — actual burn sits far
+under the worst case, because the 60-request polling cap is rarely reached. (Before tennis was
+switched off on 6 Aug 2026 the same caps projected 351 units/day ≈ 10,900/month, ~54% — tennis
+polling 40/day + tennis enrichment 12/day were the difference.)
 
 > ⚠️ The 25% warning is a *fraction of the tier*, so it rescales automatically — but at 20,000 units
 > that is 5,000 remaining, which a healthy month reaches around day 17. Expect it to fire routinely;
@@ -811,6 +830,109 @@ fallback; only an explicit non-WC id list would close that, and the WC block is
 date-gated shut (`WC_2026_END`, 19 Jul 2026) so it cannot fire again as written.
 
 ---
+
+### Claude Opus 5 shadow experiment (added 13 Aug 2026 — `opus_shadow.py`, `opus_tracker.py`)
+
+Runs `claude-opus-5` over the **exact same enriched fixture pool** `daily_picks_job` just used for
+its production Sonnet picks — same fixtures, same form/H2H context, same `SYSTEM_PROMPT`, same
+10-pick ranked format, same Core/Extended tiers, same never-pad rule. **The model is the only
+variable, and no fixture data is re-fetched** (zero extra RapidAPI cost). Same design as the Fable 5
+shadow (12-18 Jul 2026, removed in `35846c9`) — which is why the generic hooks that experiment left
+behind are reused rather than a second engine being written.
+
+**Master gate.** The whole thing is inert unless `opus-shadow` is present in `DISCORD_CHANNELS_JSON`
+— no model call (so no cost), no sheet writes, no Odds API usage. Turning it off is deleting one key
+on Railway.
+
+**Where it hooks in.** Last statement group in `daily_picks_job`, *after* every production surface has
+already logged and delivered, wrapped so a shadow failure can only ever cost the shadow. Settlement is
+a 30-minute `opus_shadow_results_check` job in `run_all.py` that drops its `resolved` list on the
+floor — results go to the sheet and nowhere else.
+
+**Settlement reuses the production engine**, via `run_auto_results`'s three hooks:
+
+```python
+run_auto_results(lookback_days,
+                 pending_source=get_pending_opus_rows,
+                 row_writer=update_opus_row_result,
+                 finalizer=finalize_opus_sheet,
+                 alert_scope="opus-shadow")     # NOT optional — see below
+```
+
+No second evaluation engine — deliberately. The 9-11 Jul 2026 tennis outage came from a bespoke
+settlement path pointed at a results endpoint that could not return finished matches; a copy-pasted
+engine here would be the same class of risk. `run_auto_results` reads exactly six keys off a pending
+row (`sheet_row`, `date`, `match`, `bet_type`, `pick`, `odds`), verified against its source before
+`opus_tracker` was written.
+
+#### `alert_scope` — the sharp edge of reusing one settlement engine for two tabs
+
+An adversarial review of this change caught a real isolation breach in the first draft, and the fix
+is now a **standing rule: any caller settling a tab other than football MUST pass its own
+`alert_scope`.**
+
+`auto_results._pending_alerted` / `_pending_followed_up` are *module-level* sets, shared by every
+caller of `run_auto_results`. They were originally keyed `(match, bet_type, pick)` only. Because both
+pipelines analyse the identical fixture pool with the identical prompt — and PENDING is a property of
+the *fixture* (a two-legged tie, an unhandled bet type), not of the model — an Opus PENDING row would
+routinely produce the same key as a football one. The shadow's caller discards its alerts, so the
+football row's alert would then never be raised **anywhere**, and that row could age past
+`LOOKBACK_DAYS` and strand silently: the exact 10 Aug Bodø/Glimt failure the 12 Aug alerting change
+exists to prevent, reintroduced through a shared global. The key is now
+`(alert_scope, match, bet_type, pick)`.
+
+Two related hardenings landed with it:
+
+- **`row_writer` may return `False` to mean "the write failed"**, and `run_auto_results` now honours
+  it — the row is left PENDING, counted under `errors`, and not reported as resolved. A writer
+  returning `None` still means success, so football is unaffected. This is what
+  `update_opus_row_result` returns a bool *for*; in the first draft it returned one and the caller
+  ignored it, so the documented protection did not exist.
+- **The shadow's PENDING rows are logged loudly** in `run_all.opus_shadow_results_check` rather than
+  dropped with the rest of its alerts. They stay out of Discord (the experiment has no alert channel)
+  but are visible in the Railway logs, so shadow data cannot rot unnoticed.
+
+> The equivalent tennis bug is still live as of 13 Aug 2026 and was **not** fixed here (out of scope):
+> `tennis_excel_tracker.py:368` swallows every write exception and returns `None`, and
+> `tennis_auto_results.py:415` increments `stats["updated"]` regardless — so a failed Sheets write
+> still fires a "✅ settled" Discord message while the row stays PENDING forever.
+
+**Isolation — verified, not asserted.** Opus rows live only in `Opus Shadow Picks`. `calibration.py`'s
+three reports default to `excel_tracker._picks_ws`, and nothing points them here, so Opus cannot reach
+calibration, edge or CLV *by construction* — there is no code path, not merely a filter. Measured on
+13 Aug 2026 with 9 Opus rows live on the spreadsheet: calibration 98, edge 34, CLV 27, football Picks
+223 rows / 217 Core / 6 Extended — every figure identical to before the shadow existed.
+
+**Settlement verified live, not assumed** (13 Aug 2026). Five probe rows for already-finished 11 Aug
+fixtures were inserted into the Opus tab and settled through the hooks above: `checked=14, updated=5,
+not_finished=9, errors=0`; WIN/LOSS matched the football tab's outcomes, Running Total P&L accumulated
+(+0.30 → −0.70 → −0.20 → +0.60 → −0.40) and the SIM bankroll tracked it (€100.60 → €98.60 → €99.60 →
+€101.20 → €99.20). The nine same-day picks correctly stayed PENDING. Probes were then deleted and the
+totals recalculated. *(Probe P&L differs slightly from the football tab's on the same fixtures — the
+probes carried no Market Odds, so they settled at the estimate. Correct behaviour, different input.)*
+
+**Cost — measured on the live 38-fixture slate, not estimated.** Opus 5 is **$5 / input MTok and $25 /
+output MTok** (confirmed against the live models reference on the day, not recalled). It runs
+**adaptive thinking by default and thinking bills as output**, which is ~79% of the cost:
+
+| Effort | Input | Output | Cost/run | Monthly | Latency |
+|---|---|---|---|---|---|
+| `low` | 6,010 | 1,413 | $0.065 | $1.99 | 18s |
+| `medium` | 6,010 | 2,440 | $0.091 | $2.77 | 31s |
+| **`high`** (API default, what it runs at) | 6,010 | 4,441 | **$0.141** | **$4.29** | 56s |
+
+`high` deliberately: throttling the shadow would understate Opus and make the comparison misleading.
+For reference the production Sonnet football call is ~$0.026/run. `OPUS_MAX_TOKENS = 16000` because
+`max_tokens` caps thinking **plus** response text on Opus 5 — production's 2048 would truncate.
+
+**Two Opus 5 API specifics this code depends on.** Thinking blocks precede the text block, so the
+parser takes the first `type == "text"` block rather than `content[0]` (the exact bug that broke the
+Fable shadow on its first live run, `03b3ff0`). And `usage_tracker.ANTHROPIC_PRICING` gained a
+`claude-opus-5` row — without it `anthropic_cost()` logs the tokens at **$0.00 with a warning** (it
+does not fall back to another model's rate), so Opus spend would have read as free.
+
+**Odds:** Opus picks different fixtures, so it runs its own `enrich_picks_with_real_odds` pass — up to
+30 units/day, ~912/month, 4.6% of the 20,000 tier. No closing-odds polling for the shadow.
 
 ### Fable 5 shadow pipeline — DISCONTINUED 19 Jul 2026 (ran 12-18 Jul 2026)
 

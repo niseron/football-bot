@@ -111,6 +111,39 @@ async def tennis_live_results_check() -> None:
         _tennis_notified.add(key)
 
 
+async def opus_shadow_results_check() -> None:
+    """
+    Settle Opus 5 shadow rows. SHEET ONLY — unlike the football and tennis
+    result checks above, nothing is delivered anywhere: the shadow is a data
+    experiment, so `resolved` is deliberately dropped rather than posted.
+
+    Inert while the 'opus-shadow' channel key is unset (run_opus_auto_results
+    returns immediately), so this job costs nothing when the experiment is off.
+    """
+    try:
+        from opus_shadow import run_opus_auto_results
+        stats, resolved = await asyncio.to_thread(run_opus_auto_results, 2)
+        if stats:
+            log.info(
+                "Opus shadow settlement: checked=%s updated=%s pending=%s errors=%s",
+                stats.get("checked"), stats.get("updated"),
+                stats.get("pending"), stats.get("errors"),
+            )
+            # `resolved` is deliberately dropped — the shadow settles to the
+            # sheet only. PENDING rows are NOT dropped: a silently stranded row
+            # is how the shadow's data would quietly rot, so they are logged
+            # loudly here. They stay out of Discord (no alert channel for the
+            # experiment) but are visible in the Railway logs.
+            for a in stats.get("pending_alerts") or []:
+                log.warning(
+                    "Opus shadow PENDING (%s) row %s: %s — %s [%s] score %s — %s",
+                    a.get("stage"), a.get("sheet_row"), a.get("match"),
+                    a.get("pick"), a.get("bet_type"), a.get("score"), a.get("reason"),
+                )
+    except Exception as exc:
+        log.warning("Opus shadow results check failed (non-fatal): %s", exc)
+
+
 async def main() -> None:
     init_db()
 
@@ -137,6 +170,15 @@ async def main() -> None:
     # No tennis closing-odds job — Odds API disabled for tennis 6 Aug 2026
     scheduler.add_job(
         tennis_live_results_check, "interval", minutes=30,
+    )
+    # Opus 5 shadow settlement — sheet-only, no delivery. Same 30-min cadence
+    # as football's and registered back-to-back, so in practice the two fire in
+    # the SAME scheduler pass and run concurrently. That is safe rather than
+    # merely tolerable: run_auto_results' shared PENDING-alert state is
+    # namespaced per alert_scope, so neither run can consume the other's alert
+    # slot no matter which thread gets there first.
+    scheduler.add_job(
+        opus_shadow_results_check, "interval", minutes=30,
     )
     # Usage + cost report — 23:50 so it captures a full day of both pipelines
     scheduler.add_job(

@@ -17,9 +17,10 @@ from main import (
     analyse_with_claude,
     format_telegram_message,
     send_to_telegram,
+    _kickoff_lookup,
     _send_photo,
 )
-from excel_tracker import calculate_kelly_stake
+from excel_tracker import PICK_TIER_CORE, calculate_kelly_stake
 from tracker import log_pick, picks_exist_for_session
 
 
@@ -65,6 +66,19 @@ async def run():
     except Exception as exc:
         log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
 
+    try:
+        kickoff_lookup = _kickoff_lookup(fixtures_by_league)
+    except Exception as exc:
+        log.warning("Kickoff lookup build failed (non-fatal): %s", exc)
+        kickoff_lookup = {}
+
+    # pick_tier, kickoff_utc and market_odds must all be passed through here.
+    # Before 13 Aug 2026 this script omitted them, which was harmless while a
+    # run produced 5 picks and every pick was Core. Once MAX_PICKS_PER_RUN rose
+    # to 10, omitting pick_tier meant tracker.log_pick's "Core" default labelled
+    # ranks 6-10 as Core too — so a single `python _run_now.py` would have fed
+    # Extended picks straight into the running total, the Summary tab and the
+    # calibration / edge / CLV baseline that the tier split exists to protect.
     for pick in picks:
         try:
             claude_prob = pick.get("probability")
@@ -78,16 +92,25 @@ async def run():
                 session=session,
                 claude_prob=float(claude_prob) if claude_prob is not None else None,
                 market_prob=pick.get("market_prob"),
+                kickoff_utc=kickoff_lookup.get(pick["match"], ""),
+                market_odds=pick.get("market_odds"),
+                pick_tier=pick.get("pick_tier", PICK_TIER_CORE),
             )
         except Exception as exc:
             log.warning("Failed to log pick: %s", exc)
 
-    await send_to_telegram(format_telegram_message(picks, header="Football Picks"))
-    log.info("Sent %d pick(s) to Telegram", len(picks))
+    # Telegram and the card carry CORE only, matching daily_picks_job — this
+    # script is a stand-in for that job, so it must not publish a different book.
+    core_picks = [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE]
+    extended = len(picks) - len(core_picks)
+
+    await send_to_telegram(format_telegram_message(core_picks, header="Football Picks"))
+    log.info("Sent %d Core pick(s) to Telegram (%d Extended logged, not sent)",
+             len(core_picks), extended)
 
     try:
         from card_generator import generate_picks_card
-        card = generate_picks_card(picks, session=session)
+        card = generate_picks_card(core_picks, session=session)
         await _send_photo(card)
         log.info("Picks card sent: %s", card.name)
     except Exception as exc:

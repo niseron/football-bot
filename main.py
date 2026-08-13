@@ -1297,6 +1297,19 @@ async def daily_picks_job():
 
     log.info("Delivered %d Core and %d Extended pick(s)", len(core_picks), len(extended_picks))
 
+    # Opus 5 shadow — side-by-side model comparison on the EXACT same enriched
+    # fixture pool this run just used, so the model is the only variable (no
+    # second RapidAPI fetch, no re-enrichment). Deliberately last, after every
+    # production surface above has already been logged and delivered: a shadow
+    # failure can then only ever cost the shadow. Inert unless the
+    # 'opus-shadow' Discord key is configured. Lazy import avoids a circular
+    # import — opus_shadow imports SYSTEM_PROMPT/claude back from this module.
+    try:
+        from opus_shadow import run_opus_shadow
+        await asyncio.to_thread(run_opus_shadow, fixtures_by_league, kickoff_lookup)
+    except Exception as exc:
+        log.warning("Opus 5 shadow failed (non-fatal): %s", exc)
+
     try:
         ig_card = generate_picks_card_ig(core_picks)
         log.info("Instagram picks card saved: %s", ig_card.name)

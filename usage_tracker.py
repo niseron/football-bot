@@ -41,6 +41,17 @@ USAGE_HEADERS = [
 ANTHROPIC_PRICING: dict[str, tuple[float, float]] = {
     #                    input,  output
     "claude-sonnet-4-6": (3.00, 15.00),
+    # Added 13 Aug 2026 for the Opus 5 shadow experiment. Rates confirmed
+    # against the live models reference that day, not recalled: Claude Opus 5
+    # is $5 / input MTok and $25 / output MTok.
+    #
+    # Worth knowing when reading the Opus rows: Opus 5 runs ADAPTIVE THINKING
+    # BY DEFAULT and thinking tokens bill as OUTPUT. Measured on the 13 Aug
+    # slate, output (and so ~79% of the cost) scales with the effort level —
+    # 1,413 tokens at 'low', 2,440 at 'medium', 4,441 at 'high'. An Opus row
+    # whose output dwarfs the Sonnet row on the same fixtures is that, not a
+    # bug.
+    "claude-opus-5": (5.00, 25.00),
 }
 # Cache reads bill at ~0.1x input, 5-minute cache writes at ~1.25x input.
 # The bot sends no cache_control today, so these are 0 — included so the
@@ -169,6 +180,10 @@ def anthropic_totals() -> dict:
         "today": {"calls": 0, "input": 0, "output": 0, "cost": 0.0},
         "month": {"calls": 0, "input": 0, "output": 0, "cost": 0.0},
         "by_job_today": {},
+        # Distinct models seen today — the daily summary's heading is built from
+        # this rather than a hardcoded name, so the Opus 5 shadow's spend is not
+        # reported under Sonnet's label (13 Aug 2026).
+        "models_today": set(),
     }
     for r in _read_usage_rows():
         try:
@@ -185,6 +200,9 @@ def anthropic_totals() -> dict:
             job = r[2] if len(r) > 2 else "?"
             j = out["by_job_today"].setdefault(job, {"calls": 0, "cost": 0.0})
             j["calls"] += 1; j["cost"] += cost
+            model = r[3] if len(r) > 3 else ""
+            if model:
+                out["models_today"].add(model)
     return out
 
 
@@ -315,7 +333,13 @@ def build_daily_summary() -> str:
     # Anthropic
     a = anthropic_totals()
     t, m = a["today"], a["month"]
-    lines.append("**Anthropic (claude-sonnet-4-6)**")
+    # Model list is derived, not hardcoded: since 13 Aug 2026 the football and
+    # tennis jobs run Sonnet while the Opus 5 shadow runs claude-opus-5 at 1.67x
+    # the rate, so a fixed 'claude-sonnet-4-6' heading would have mislabelled
+    # the shadow's spend as Sonnet's.
+    models_today = sorted(a.get("models_today") or [])
+    heading = ", ".join(models_today) if models_today else "no calls today"
+    lines.append(f"**Anthropic ({heading})**")
     lines.append(f"  Today: {t['calls']} call(s) · {t['input']:,} in / {t['output']:,} out "
                  f"· **${t['cost']:.4f}**")
     for job, j in sorted(a["by_job_today"].items()):

@@ -50,6 +50,38 @@ valid without a backfill: never fill that column in on historical rows.
 Tennis is untouched by all of this — no tiers, no ranking, `tennis_*` modules
 unchanged. Details in PROJECT_SUMMARY.md, "Ranked picks and the Core/Extended split".
 
+## Opus 5 Shadow Experiment — Football Only (13 Aug 2026)
+
+`opus_shadow.py` + `opus_tracker.py` run `claude-opus-5` over the same enriched
+fixture pool `daily_picks_job` just used, so the model is the only variable (no
+second RapidAPI fetch). Picks go to the `Opus Shadow Picks` tab and the
+`opus-shadow` Discord channel as text embeds (both tiers, SIM stakes, no cards);
+**results go to the sheet only, never to Discord**.
+
+- **Master gate:** the whole experiment is inert unless `opus-shadow` is in
+  `DISCORD_CHANNELS_JSON`. Removing that key on Railway turns it off — no model
+  call, no cost, no sheet or Odds API usage.
+- **Never point calibration/CLV/edge or the football Summary at the Opus tab.**
+  Isolation is structural (separate tab, no shared code path), and that is the
+  experiment's whole value — an Opus row in the football baseline invalidates it.
+- **Settlement reuses `run_auto_results`' hooks** (`pending_source` / `row_writer`
+  / `finalizer`). Do not write a second evaluation engine — that is what broke
+  tennis settlement 9-11 Jul 2026.
+- **Any caller settling a non-football tab MUST pass its own `alert_scope`.**
+  `auto_results._pending_alerted` / `_pending_followed_up` are module-level sets
+  shared by every caller; without a distinct scope a shadow PENDING consumes
+  football's alert slot and a real football row can strand silently. A
+  `row_writer` may return `False` to mean the write failed — the row is then
+  left PENDING rather than reported settled.
+- Opus 5 returns thinking blocks **before** the text block: parse the first
+  `type == "text"` block, never `content[0]`. `max_tokens` caps thinking plus
+  response together, hence `OPUS_MAX_TOKENS = 16000`.
+- Adding a model to `usage_tracker.ANTHROPIC_PRICING` is required for cost
+  tracking — an unlisted model logs tokens at **$0.00 with a warning** rather
+  than guessing a rate.
+
+Details in PROJECT_SUMMARY.md, "Claude Opus 5 shadow experiment".
+
 ## Working Rules
 
 - Load `.env` via `from env_loader import load_env; load_env()` — never call

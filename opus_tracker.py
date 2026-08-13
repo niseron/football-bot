@@ -126,6 +126,17 @@ def log_opus_pick(
         log.error("opus_tracker: Sheets read failed: %s", exc)
         return
 
+    # Same two guards as excel_tracker.log_to_excel — see the long comment there.
+    # (a) same-day exact repeat; (b) cross-day repeat of an UNSETTLED bet on the
+    # same (match, bet_type). The shadow analyses the same 48-hour window as
+    # production, so it has the identical exposure: a fixture kicking off
+    # tomorrow appears in today's run and tomorrow's, and without (b) one match
+    # would settle two shadow rows and book its P&L twice.
+    header = rows[0] if rows else []
+    try:
+        result_idx = header.index("Result")
+    except ValueError:
+        result_idx = 6
     for row in rows[1:]:
         if not row or not row[0]:
             continue
@@ -136,6 +147,13 @@ def log_opus_pick(
         if (existing == target_date and len(row) > 3
                 and row[1] == match and row[2] == bet_type and row[3] == pick):
             log.info("opus_tracker: skipping duplicate '%s — %s'", match, pick)
+            return
+        settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
+        if not settled and len(row) > 2 and row[1] == match and row[2] == bet_type:
+            log.info(
+                "opus_tracker: skipping '%s — %s' — an UNSETTLED %s pick on this "
+                "match is already logged (%s)", match, pick, bet_type, row[0],
+            )
             return
 
     new_row = [

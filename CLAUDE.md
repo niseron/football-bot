@@ -89,6 +89,24 @@ second RapidAPI fetch). Picks go to the `Opus Shadow Picks` tab and the
 
 Details in PROJECT_SUMMARY.md, "Claude Opus 5 shadow experiment".
 
+## Duplicate Logging Guard (13 Aug 2026)
+
+`fetch_upcoming_matches` covers a 48-hour window, so a fixture kicking off
+tomorrow is offered to Claude today **and** tomorrow. `analyse_with_claude`
+dedupes `(match, bet_type)` only *within one batch*, and the sheet writers'
+original guard was date-scoped — so the same bet was logged twice and one match
+settled both rows, booking P&L twice.
+
+`excel_tracker.log_to_excel` and `opus_tracker.log_opus_pick` now also skip when
+an **unsettled** row for the same `(match, bet_type)` exists on **any** date.
+Keep that key at `(match, bet_type)` — the narrower `(match, bet_type, pick)`
+lets opposite sides of one market through, which has already happened.
+
+This is a **logging-level** guard on purpose: cards, Telegram and Discord all
+render the unfiltered `picks` list, so a repeated fixture still shows on the
+card. Do not push this filter up into `analyse_with_claude` or the delivery
+path.
+
 ## Working Rules
 
 - Load `.env` via `from env_loader import load_env; load_env()` — never call

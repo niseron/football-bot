@@ -589,6 +589,58 @@ restart can re-send one alert; that is the safe direction to fail.
 - Both Claude's estimated odds and the real market odds are shown side by side in the Telegram message and the picks card
 - If `ODDS_API_KEY` is missing, the fixture/market can't be matched, or the API call fails, the pick silently falls back to Claude-only odds (no crash, no message)
 
+### Cross-day duplicate logging (fixed 13 Aug 2026)
+
+**A fixture inside the 48-hour window was picked and logged on two consecutive days, and one match
+then settled both rows — booking its P&L twice and counting it twice in calibration.**
+
+Cause, confirmed in code:
+
+| Layer | Dedupe key | Why it missed this |
+|---|---|---|
+| `main.analyse_with_claude` | `(match, bet_type)` | **within a single batch only** — it never sees yesterday's picks |
+| `excel_tracker.log_to_excel` | `(date, match, bet_type, pick)` | **date-scoped** — a repeat on the next day is a different key |
+| `tracker.log_pick` (picks.db) | `(date, match, bet_type, pick, session)` | same, date-scoped |
+
+`fetch_upcoming_matches` pulls today **and** tomorrow, so a fixture kicking off tomorrow is offered to
+Claude on both days. Nothing compared the new pick against already-logged, still-unsettled rows.
+
+**Fix:** `log_to_excel` and `opus_tracker.log_opus_pick` now also skip when an **unsettled** row for the
+same `(match, bet_type)` exists on **any** date. Deliberately keyed on `(match, bet_type)` and not the
+full `(match, bet_type, pick)`: on 3-4 Jul 2026 the same Canada vs Morocco BTTS market was logged
+`Yes` one day and `No` the next — opposite sides of one market, which the narrower key would have let
+through. Only unsettled rows block; once a row has a Result the fixture is over, so a later row on it
+is a data problem worth seeing rather than hiding.
+
+**This is a logging-level fix only.** Picks cards, the Telegram post and the Discord embeds all render
+the unfiltered `picks` list, so a repeated fixture still appears on the card exactly as before — only
+the sheet write is suppressed.
+
+**Measured impact at the time of the fix** (223 rows, 30 Jun - 13 Aug 2026):
+
+| Key | Duplicated groups | Redundant rows | Double-counted P&L |
+|---|---|---|---|
+| `(match, bet_type, pick)` — exact | 15 | 15 | +3.35u |
+| **`(match, bet_type)` — the fix's key** | **16** | **16** | **+4.20u** |
+| `(match)` — any bet on the same fixture | 25 | 32 | +5.42u |
+
+At the fix's key: **+4.20u double-counted against a reported Core settled P&L of +31.57u — a 13.3%
+overstatement**, from 16 of 223 rows (7.2%). Corrected figure would be **+27.37u**.
+
+**Not covered by this fix, by design:** two *different* bet types on one fixture (e.g. Midtjylland vs
+Bohemian logged `Match Winner` on 12 Aug and `Asian Handicap` on 13 Aug). Those are genuinely distinct
+bets rather than a duplicate, but they do concentrate two stakes on one result — the `(match)` row
+above quantifies that at a further 9 groups / 16 rows / +1.22u beyond the fix's key.
+
+**Existing rows were left untouched** — the numbers above are an audit, not a correction. Nothing has
+been deleted or re-settled.
+
+> Separately noted on 13 Aug 2026: the Picks tab's `A1` header cell had been blanked to `' '` instead
+> of `Date`. Harmless — no code indexes that column by name (every reader uses positional index 0) and
+> the row data was intact — but restored to `Date` so the header matches `PICKS_HEADERS` again. Cause
+> not established; `init_excel()` only appends missing *trailing* headers, so it would not have
+> repaired this on its own.
+
 ### Ranked picks and the Core/Extended split (13 Aug 2026)
 
 **Pick volume doubles from this date: 5 per run → up to 10.** Claude now returns picks *ranked*

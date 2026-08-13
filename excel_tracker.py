@@ -508,6 +508,27 @@ def log_to_excel(
     except Exception as exc:
         log.warning("Picks header migration failed (non-fatal): %s", exc)
 
+    # Two separate guards, and the second is the one that matters.
+    #
+    # (a) SAME-DAY exact repeat — a re-run of the same job. Date-scoped.
+    #
+    # (b) CROSS-DAY repeat of an UNSETTLED bet on the same (match, bet_type),
+    #     added 13 Aug 2026. fetch_upcoming_matches pulls a 48-hour window, so a
+    #     fixture kicking off tomorrow appears in today's run AND tomorrow's.
+    #     analyse_with_claude dedupes (match, bet_type) but only WITHIN one
+    #     batch, and guard (a) is keyed on the date — so the second day's pick
+    #     sailed through and the fixture was logged twice. One match then
+    #     settled both rows: P&L booked twice and the pick counted twice in
+    #     calibration. Measured on 13 Aug 2026: 16 duplicated groups across 223
+    #     rows, +4.20u double-counted, 13.3% of reported Core P&L.
+    #
+    # Keyed on (match, bet_type) rather than the full (match, bet_type, pick):
+    # on 3-4 Jul 2026 the same BTTS market was logged 'Yes' one day and 'No' the
+    # next — opposite sides of one market, which the narrower key would let
+    # through. Only UNSETTLED rows block: once a row has a Result the fixture is
+    # over, so a later row on it is a data problem to see, not one to hide.
+    result_idx = _col(header, "Result")
+    result_idx = 6 if result_idx is None else result_idx
     for row in rows[1:]:
         if not row or not row[0]:
             continue
@@ -523,6 +544,20 @@ def log_to_excel(
             and row[3] == pick
         ):
             log.info("Sheets: skipping duplicate '%s — %s'", match, pick)
+            return
+        settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
+        if (
+            not settled
+            and len(row) > 2
+            and row[1] == match
+            and row[2] == bet_type
+        ):
+            log.info(
+                "Sheets: skipping '%s — %s' — an UNSETTLED %s pick on this match is "
+                "already logged (%s, '%s'). Same fixture inside the 48h window on a "
+                "second day; logging it again would settle and book P&L twice.",
+                match, pick, bet_type, row[0], row[3] if len(row) > 3 else "?",
+            )
             return
 
     new_row = [

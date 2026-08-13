@@ -214,7 +214,12 @@ def run_opus_shadow(
 
     from discord_bot import send_to_discord
     from main import enrich_picks_with_real_odds
-    from opus_tracker import calculate_opus_stake, init_opus_sheet, log_opus_pick
+    from opus_tracker import (
+        apply_opus_formatting,
+        calculate_opus_stake,
+        init_opus_sheet,
+        log_opus_pick,
+    )
 
     picks = analyse_with_opus(fixtures_by_league)
     if not picks:
@@ -273,6 +278,10 @@ def run_opus_shadow(
             )
         except Exception as exc:
             log.warning("opus_shadow: failed to log %s: %s", pick.get("match"), exc)
+
+    # Once per run, after the whole batch is appended — appended rows carry no
+    # formatting, and one repaint costs one API call where per-pick would cost N.
+    apply_opus_formatting()
 
     # Text embeds, all leagues, both tiers. No cards — the shadow is a data
     # experiment, not a published product surface.

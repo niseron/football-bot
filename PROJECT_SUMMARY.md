@@ -1099,6 +1099,16 @@ calibration, edge or CLV *by construction* — there is no code path, not merely
 13 Aug 2026 with 9 Opus rows live on the spreadsheet: calibration 98, edge 34, CLV 27, football Picks
 223 rows / 217 Core / 6 Extended — every figure identical to before the shadow existed.
 
+**The tab is painted like the Picks tab** (13 Aug 2026): frozen bold header on dark green `#1a5c38`,
+alternating white / `#e8f5e9` data rows banded **by sheet row** so both tabs stripe in step when read
+side by side, Result cell coloured by outcome (`#00c853` WIN, `#ffab00` HALF WIN, `#ff6d00` HALF LOSS,
+`#d50000` LOSS, banding for VOID/blank), thick border, auto-sized columns. `apply_opus_formatting()`
+runs once per run after the batch is appended (appended rows carry no formatting) and again inside
+`finalize_opus_sheet` after settlement — recalculate first, repaint second, the same order
+`excel_tracker` uses. It is a **separate function** from `excel_tracker._apply_formatting`, which is
+hard-wired to `ss.worksheet("Picks")`; only the colour *constants* are imported, so the tabs cannot
+drift apart visually while no football row is ever read or written from here.
+
 **SIM staking is flat: €1000 start, €100 on every pick** (`OPUS_STARTING_BANKROLL` / `OPUS_FLAT_STAKE`
 in `opus_tracker.py`, set 13 Aug 2026 — previously €100 start with half-Kelly sizing off a €2 unit).
 `calculate_opus_stake()` therefore takes **no arguments**: a stake that varied with bet type, odds or

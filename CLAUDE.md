@@ -73,6 +73,10 @@ second RapidAPI fetch). Picks go to the `Opus Shadow Picks` tab and the
   quality rather than staking-model performance). `recalculate_opus_running_totals`
   rebuilds the bankroll from each row's own Stake cell, so changing the sizing means
   backfilling the existing rows too.
+- **The tab is styled like Picks** via `apply_opus_formatting()` (own function —
+  `excel_tracker._apply_formatting` is hard-wired to the Picks worksheet; only the
+  colour constants are shared). Runs after the batch is logged and again in
+  `finalize_opus_sheet`, always *after* the recalculation.
 - **Never point calibration/CLV/edge or the football Summary at the Opus tab.**
   Isolation is structural (separate tab, no shared code path), and that is the
   experiment's whole value — an Opus row in the football baseline invalidates it.

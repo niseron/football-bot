@@ -30,7 +30,20 @@ from datetime import date, datetime, timedelta
 
 import gspread
 
-from excel_tracker import PICK_TIER_CORE, PICK_TIER_EXTENDED, _get_spreadsheet
+from excel_tracker import (
+    PICK_TIER_CORE,
+    PICK_TIER_EXTENDED,
+    _BLACK_TEXT,
+    _DARK_GREEN,
+    _HALF_LOSS_ORANGE,
+    _HALF_WIN_AMBER,
+    _LIGHT_GREEN,
+    _LOSS_RED,
+    _WHITE,
+    _WHITE_TEXT,
+    _WIN_GREEN,
+    _get_spreadsheet,
+)
 
 log = logging.getLogger(__name__)
 
@@ -324,9 +337,133 @@ def recalculate_opus_running_totals() -> None:
             log.error("opus_tracker: running-total write failed: %s", exc)
 
 
+# ── Formatting ───────────────────────────────────────────────────────────────
+
+# Same outcome→colour map the Picks tab uses. VOID and blank stay on the row's
+# banding colour, exactly as they do there.
+_RESULT_COLORS = {
+    "WIN":       _WIN_GREEN,
+    "HALF WIN":  _HALF_WIN_AMBER,
+    "HALF LOSS": _HALF_LOSS_ORANGE,
+    "LOSS":      _LOSS_RED,
+}
+
+
+def apply_opus_formatting() -> None:
+    """
+    Paint the Opus tab exactly like the football Picks tab: frozen bold header on
+    dark green, alternating white / light-green data rows, the Result cell
+    coloured by outcome, a thick border around the used range, and auto-sized
+    columns.
+
+    Deliberately a SEPARATE function rather than a call to
+    excel_tracker._apply_formatting — that one is hard-wired to
+    ss.worksheet("Picks"), so pointing this tab at it is not possible anyway, and
+    a shared repaint over both tabs is the kind of coupling the experiment's
+    isolation rule exists to prevent. What IS shared is the colour constants, so
+    the two tabs cannot drift apart in appearance: they are values, not a data
+    path — nothing here reads or writes a football row.
+
+    Non-fatal throughout: cosmetics must never break a shadow run.
+    """
+    try:
+        ws = _opus_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.warning("opus_tracker: formatting skipped, Sheets read failed: %s", exc)
+        return
+    if not rows:
+        return
+
+    sid = ws.id
+    nrows = len(rows)
+    ncols = len(OPUS_HEADERS)
+    try:
+        result_col = rows[0].index("Result")
+    except ValueError:
+        result_col = OPUS_HEADERS.index("Result")
+
+    reqs: list[dict] = [
+        {   # Freeze the header row
+            "updateSheetProperties": {
+                "properties": {"sheetId": sid, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }
+        },
+        {   # Header: bold, dark green, white text
+            "repeatCell": {
+                "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": 1,
+                          "startColumnIndex": 0, "endColumnIndex": ncols},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": _DARK_GREEN,
+                    "textFormat": {"bold": True, "foregroundColor": _WHITE_TEXT},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+            }
+        },
+    ]
+
+    for i in range(1, nrows):
+        # Banding is by SHEET ROW, matching Picks — row 2 white, row 3 light
+        # green, and so on — so the two tabs stripe in step when read side by
+        # side. Repainting the whole row first is what clears a stale Result
+        # colour when a row is re-settled or corrected.
+        reqs.append({
+            "repeatCell": {
+                "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1,
+                          "startColumnIndex": 0, "endColumnIndex": ncols},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": _WHITE if i % 2 == 1 else _LIGHT_GREEN,
+                    "textFormat": {"bold": False, "foregroundColor": _BLACK_TEXT},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+            }
+        })
+        result_val = rows[i][result_col] if len(rows[i]) > result_col else ""
+        if result_val in _RESULT_COLORS:
+            reqs.append({
+                "repeatCell": {
+                    "range": {"sheetId": sid, "startRowIndex": i, "endRowIndex": i + 1,
+                              "startColumnIndex": result_col, "endColumnIndex": result_col + 1},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": _RESULT_COLORS[result_val],
+                        "textFormat": {"bold": True, "foregroundColor": _WHITE_TEXT},
+                    }},
+                    "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                }
+            })
+
+    thick = {"style": "SOLID_THICK", "colorStyle": {"rgbColor": _BLACK_TEXT}}
+    reqs.append({
+        "updateBorders": {
+            "range": {"sheetId": sid, "startRowIndex": 0, "endRowIndex": nrows,
+                      "startColumnIndex": 0, "endColumnIndex": ncols},
+            "top": thick, "bottom": thick, "left": thick, "right": thick,
+        }
+    })
+    reqs.append({
+        "autoResizeDimensions": {
+            "dimensions": {"sheetId": sid, "dimension": "COLUMNS",
+                           "startIndex": 0, "endIndex": ncols},
+        }
+    })
+
+    try:
+        _get_spreadsheet().batch_update({"requests": reqs})
+        log.info("opus_tracker: formatting applied (%d rows)", nrows)
+    except Exception as exc:
+        log.warning("opus_tracker: formatting failed (non-fatal): %s", exc)
+
+
 def finalize_opus_sheet() -> None:
-    """Finalizer hook for run_auto_results — recalculates totals only."""
+    """
+    Finalizer hook for run_auto_results — recalculate totals, then repaint.
+
+    Order matters and mirrors excel_tracker's: the recalculation writes the
+    Result-driven columns, the repaint colours what is now there.
+    """
     recalculate_opus_running_totals()
+    apply_opus_formatting()
 
 
 # ── Reporting ────────────────────────────────────────────────────────────────

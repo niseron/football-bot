@@ -594,9 +594,29 @@ stranded. That strongly suggests the WIN was entered **manually** by someone who
 90-minute score, in which case it is correct and should stay. I cannot distinguish a manual settlement
 from an automatic one by reading the sheet, so it is flagged, not changed.
 
-**Numbers, not corrections.** Nothing was altered. If both rows were reverted to PENDING, Core settled
-P&L moves **+26.15u → +26.40u** (removing +0.75u and −1.00u). If only row 203 is reverted, it is
-**+27.15u**.
+**Row 203 was reverted to PENDING on 13 Aug 2026; row 202 was deliberately left alone.** Reverting a
+settlement that is probably correct would itself be a regression, and the manual-settlement inference
+for row 202 is strong enough to leave standing.
+
+Only the Result and Profit/Loss cells were cleared — odds, probability, league, kickoff and tier all
+remain, so it is an ordinary unsettled pick again. Effect on the Core book:
+
+| | Before | After |
+|---|---|---|
+| Core settled | 178 | **177** |
+| Core W / L | 117 / 61 | **117 / 60** |
+| Core win rate | 65.7% | **66.1%** |
+| **Core settled P&L** | **+26.15u** | **+27.15u** |
+| calibration sample | 81 | **80** |
+
+⚠️ **Row 203 needs settling by hand and nothing will chase it.** The live 30-minute job calls
+`run_auto_results(2)` — a **2-day** lookback — and the row is dated 10 Aug, so it already sits outside
+that window and will not be re-checked. Even inside it, `evaluate_pick` correctly returns PENDING for
+this fixture, so it would raise an alert rather than settle. Settle it with the real 90-minute result:
+
+```
+python update_result.py "CSKA 1948 vs Panathinaikos" "Panathinaikos Win" WIN|LOSS
+```
 
 Everything settled from **12 Aug onward** goes through the fixed evaluator, so the 20 Aug Europa and
 Conference return legs — the first large block of two-legged second legs since the fix — settle

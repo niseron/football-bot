@@ -562,6 +562,47 @@ collapses the two-legged case back to the single-match one. The new code returns
 ⚠️ The same audit found three **single-match** rows that *are* mis-settled, from
 before the 12 Jul 2026 ET rules existed — see Known Limitations.
 
+#### Two-legged audit of every settled pick (13 Aug 2026)
+
+Run to confirm the 12 Aug fix landed and to find rows settled *before* it by the invalid inference.
+Method: for every settled pick in a UEFA competition (the only ones that can be two-legged), re-fetch
+the fixture from the API, read `status.aggregatedStr` and `status.reason`, and re-run the **current**
+`evaluate_pick` against the stored Result.
+
+- 207 settled picks total; **31** in UEFA competitions.
+- **15** carried an aggregate score — but 12 of those finished in normal time (`FT`), so the extra-time
+  inference never applied and they settled on the plain final score. Correct either way.
+- **3** actually went past 90 minutes in a two-legged tie. Those are the only rows the bug could reach:
+
+| Row | Date | Fixture | Pick | Leg / agg | Stored | Current logic | Verdict |
+|---|---|---|---|---|---|---|---|
+| 170 | 30 Jul | Gent vs LNZ Cherkasy | Over 2.5 Goals | 0-0 / 0-0, pens | LOSS | LOSS | **OK** — the monotonic bound settles it: the 120' total was 0, so the 90' total cannot have reached 2.5 |
+| 202 | 10 Aug | Bodø/Glimt vs Union St.Gilloise | BTTS Yes | 3-2 / 6-5, AET | WIN (+0.75u) | PENDING | **Review** — see below |
+| 203 | 10 Aug | CSKA 1948 vs Panathinaikos | Match Winner: Panathinaikos Win | 1-2 / 2-3, AET | LOSS (−1.00u) | PENDING | **Mis-settled** |
+
+**Row 203 is a genuine mis-settlement.** It was auto-settled before the 12 Aug fix, when
+`evaluate_pick` still inferred a regulation draw from extra time. That inference made the away pick a
+LOSS mechanically. In reality the aggregate was level at 90' of the second leg (that is *why* extra
+time happened) and the 1-2 leg score includes ET goals, so the 90-minute result — which is what an
+unscoped pick settles on — is genuinely underivable. It should read PENDING and be settled by hand.
+
+**Row 202 needs your confirmation rather than a verdict from me.** The current evaluator returns
+PENDING (both sides scored across 120', but whether both scored inside 90' cannot be derived). It
+currently reads WIN. This is the *same pick* the PENDING-alerting change of 12 Aug was written for —
+`auto_results.py`'s comment names "the 10 Aug Bodø/Glimt BTTS pick" as the row that sat unsettled and
+stranded. That strongly suggests the WIN was entered **manually** by someone who checked the real
+90-minute score, in which case it is correct and should stay. I cannot distinguish a manual settlement
+from an automatic one by reading the sheet, so it is flagged, not changed.
+
+**Numbers, not corrections.** Nothing was altered. If both rows were reverted to PENDING, Core settled
+P&L moves **+26.15u → +26.40u** (removing +0.75u and −1.00u). If only row 203 is reverted, it is
+**+27.15u**.
+
+Everything settled from **12 Aug onward** goes through the fixed evaluator, so the 20 Aug Europa and
+Conference return legs — the first large block of two-legged second legs since the fix — settle
+correctly: an aggregate-triggered extra time returns PENDING and raises a PENDING alert rather than
+booking a false LOSS.
+
 ### PENDING alerting (added 12 Aug 2026)
 
 A `PENDING` verdict means a human must settle the row via `update_result.py`. It

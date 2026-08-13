@@ -68,6 +68,11 @@ second RapidAPI fetch). Picks go to the `Opus Shadow Picks` tab and the
 - **Master gate:** the whole experiment is inert unless `opus-shadow` is in
   `DISCORD_CHANNELS_JSON`. Removing that key on Railway turns it off — no model
   call, no cost, no sheet or Odds API usage.
+- **SIM staking is flat: €1000 start, €100 per bet** (`OPUS_STARTING_BANKROLL` /
+  `OPUS_FLAT_STAKE`, 13 Aug 2026 — no Kelly, so the bankroll column reads as pick
+  quality rather than staking-model performance). `recalculate_opus_running_totals`
+  rebuilds the bankroll from each row's own Stake cell, so changing the sizing means
+  backfilling the existing rows too.
 - **Never point calibration/CLV/edge or the football Summary at the Opus tab.**
   Isolation is structural (separate tab, no shared code path), and that is the
   experiment's whole value — an Opus row in the football baseline invalidates it.

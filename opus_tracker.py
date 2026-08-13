@@ -48,12 +48,13 @@ OPUS_HEADERS = [
     "Stake EUR (SIM)",
 ]
 
-# Simulated money only. €100 start, matching the tennis experiment's scale
-# rather than football's real €1500 bankroll — nothing here is staked for real,
-# and sizing it like the real book would invite reading it as if it were.
-OPUS_STARTING_BANKROLL = 100.0   # EUR, start of the running bankroll column
-OPUS_REAL_BANKROLL     = 100.0   # EUR, base for Kelly sizing
-OPUS_UNIT_STAKE        = 2.0     # EUR flat fallback (2% of bankroll)
+# Simulated money only. €1000 start, flat €100 on every pick (user's chosen
+# sizing, 13 Aug 2026 — was €100 / half-Kelly). Nothing here is staked for real.
+# A flat stake also keeps the SIM bankroll a direct readout of PICK quality: with
+# variable sizing the column measures the staking model too, which is not the
+# question the shadow exists to answer.
+OPUS_STARTING_BANKROLL = 1000.0   # EUR, start of the running bankroll column
+OPUS_FLAT_STAKE        = 100.0    # EUR on every pick, no sizing model
 
 _SETTLED_RESULTS = ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID")
 
@@ -303,9 +304,9 @@ def recalculate_opus_running_totals() -> None:
             try:
                 units = float(pnl_str)
                 try:
-                    stake = float(row[stake_i]) if len(row) > stake_i and row[stake_i] else OPUS_UNIT_STAKE
+                    stake = float(row[stake_i]) if len(row) > stake_i and row[stake_i] else OPUS_FLAT_STAKE
                 except ValueError:
-                    stake = OPUS_UNIT_STAKE
+                    stake = OPUS_FLAT_STAKE
                 running += units
                 bankroll += units * stake
                 updates.append({"range": f"I{i}", "values": [[round(running, 2)]]})
@@ -331,7 +332,7 @@ def finalize_opus_sheet() -> None:
 # ── Reporting ────────────────────────────────────────────────────────────────
 
 def get_opus_bet_type_breakdown() -> list[dict]:
-    """Settled Opus picks grouped by bet type — feeds the SIM Kelly sizing."""
+    """Settled Opus picks grouped by bet type — reporting only (staking is flat)."""
     try:
         rows = _opus_ws().get_all_values()
     except Exception as exc:
@@ -427,26 +428,14 @@ def get_opus_tier_breakdown() -> dict:
 
 # ── SIM staking ──────────────────────────────────────────────────────────────
 
-def calculate_opus_kelly_stake(bet_type: str, odds: float, confidence: str) -> dict:
+def calculate_opus_stake() -> dict:
     """
-    {"stake": euros, "note": str} — the same half-Kelly / 5%-cap logic tennis
-    uses, sized against OPUS_REAL_BANKROLL (€100). SIMULATED: no Opus pick is
-    ever staked for real, so callers must render this with a SIM tag.
-    Flat OPUS_UNIT_STAKE below 10 settled picks for the bet type.
+    {"stake": euros, "note": str} — a FLAT OPUS_FLAT_STAKE on every pick.
+
+    Replaced the half-Kelly sizing on 13 Aug 2026 (user's call). It takes no
+    arguments on purpose: a stake that depended on bet type, odds or the
+    settled record would not be flat, so there is nothing to pass. SIMULATED —
+    no Opus pick is ever staked for real, so callers must render it with a SIM
+    tag.
     """
-    breakdown = get_opus_bet_type_breakdown()
-    record = next(
-        (b for b in breakdown if b["bet_type"].strip().lower() == bet_type.strip().lower()),
-        None,
-    )
-    if record is None or record["total"] < 10:
-        count = record["total"] if record else 0
-        return {"stake": OPUS_UNIT_STAKE, "note": f"insufficient data ({count} settled picks)"}
-
-    win_rate = record["win_rate"] / 100.0
-    kelly = (win_rate * (odds - 1) - (1 - win_rate)) / (odds - 1)
-    if kelly <= 0:
-        return {"stake": 0.0, "note": "negative edge"}
-
-    fraction = min(kelly * 0.5, 0.05)   # half-Kelly, capped at 5% of bankroll
-    return {"stake": round(fraction * OPUS_REAL_BANKROLL, 2), "note": ""}
+    return {"stake": OPUS_FLAT_STAKE, "note": ""}

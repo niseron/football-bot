@@ -1099,11 +1099,24 @@ calibration, edge or CLV *by construction* — there is no code path, not merely
 13 Aug 2026 with 9 Opus rows live on the spreadsheet: calibration 98, edge 34, CLV 27, football Picks
 223 rows / 217 Core / 6 Extended — every figure identical to before the shadow existed.
 
+**SIM staking is flat: €1000 start, €100 on every pick** (`OPUS_STARTING_BANKROLL` / `OPUS_FLAT_STAKE`
+in `opus_tracker.py`, set 13 Aug 2026 — previously €100 start with half-Kelly sizing off a €2 unit).
+`calculate_opus_stake()` therefore takes **no arguments**: a stake that varied with bet type, odds or
+the settled record would not be flat, so there is nothing to pass. Flat sizing keeps the SIM bankroll a
+direct readout of *pick quality* — with Kelly it also measures the staking model, which is not the
+question the shadow exists to answer. Still SIM: no Opus pick is staked for real, and every stake and
+bankroll figure on the tab and in the Discord embed carries the SIM tag.
+
+`recalculate_opus_running_totals` rebuilds the bankroll from **each row's own Stake cell**, not from the
+constant, so changing the sizing needs the existing rows backfilled too or the curve mixes two scales —
+done for the 9 live rows by `_opus_restake_aug13.py` (kept as the audit trail; it touches no other tab).
+After the backfill: WIN +0.40u → €1040.00, LOSS −1.00u → €940.00.
+
 **Settlement verified live, not assumed** (13 Aug 2026). Five probe rows for already-finished 11 Aug
 fixtures were inserted into the Opus tab and settled through the hooks above: `checked=14, updated=5,
 not_finished=9, errors=0`; WIN/LOSS matched the football tab's outcomes, Running Total P&L accumulated
 (+0.30 → −0.70 → −0.20 → +0.60 → −0.40) and the SIM bankroll tracked it (€100.60 → €98.60 → €99.60 →
-€101.20 → €99.20). The nine same-day picks correctly stayed PENDING. Probes were then deleted and the
+€101.20 → €99.20 — the then-current €100/€2 sizing, since replaced by €1000/€100 flat). The nine same-day picks correctly stayed PENDING. Probes were then deleted and the
 totals recalculated. *(Probe P&L differs slightly from the football tab's on the same fixtures — the
 probes carried no Market Odds, so they settled at the estimate. Correct behaviour, different input.)*
 

@@ -183,10 +183,10 @@ def _opus_embed(pick: dict) -> dict:
         context += f" #{rank}"
 
     shown = dict(pick)
-    kelly = pick.get("kelly") or {}
-    if kelly.get("stake") is not None:
-        note = f" ({kelly['note']})" if kelly.get("note") else ""
-        shown["stake_display"] = f"EUR {float(kelly['stake']):.2f} SIM{note}"
+    stake_info = pick.get("stake_info") or {}
+    if stake_info.get("stake") is not None:
+        note = f" ({stake_info['note']})" if stake_info.get("note") else ""
+        shown["stake_display"] = f"EUR {float(stake_info['stake']):.2f} SIM{note}"
     return build_pick_embed(shown, context=context)
 
 
@@ -214,7 +214,7 @@ def run_opus_shadow(
 
     from discord_bot import send_to_discord
     from main import enrich_picks_with_real_odds
-    from opus_tracker import calculate_opus_kelly_stake, init_opus_sheet, log_opus_pick
+    from opus_tracker import calculate_opus_stake, init_opus_sheet, log_opus_pick
 
     picks = analyse_with_opus(fixtures_by_league)
     if not picks:
@@ -229,20 +229,18 @@ def run_opus_shadow(
     except Exception as exc:
         log.warning("opus_shadow: odds enrichment failed — Opus odds only: %s", exc)
 
+    # Flat €100 per pick off a €1000 SIM bank — same figure for every row, so it
+    # is resolved once rather than per pick.
+    stake_info = calculate_opus_stake()
     for pick in picks:
-        try:
-            pick["kelly"] = calculate_opus_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
-            )
-        except Exception as exc:
-            log.warning("opus_shadow: SIM stake failed for %s: %s", pick.get("match"), exc)
+        pick["stake_info"] = stake_info
 
     if dry_run:
         print("\n" + "=" * 74)
         print(f"OPUS 5 SHADOW (dry run) — {len(picks)} pick(s), effort={OPUS_EFFORT}")
         print("=" * 74)
         for p in picks:
-            k = p.get("kelly") or {}
+            k = p.get("stake_info") or {}
             print(f'  #{p.get("rank"):<2} [{p.get("pick_tier"):8}] {p["match"]}')
             print(f'      {p["bet_type"]}: {p["pick"]} @ {p["odds"]} '
                   f'({p.get("confidence")}, p={p.get("probability")}, '
@@ -271,7 +269,7 @@ def run_opus_shadow(
                 kickoff_utc=kickoff_lookup.get(pick["match"], ""),
                 market_odds=pick.get("market_odds"),
                 pick_tier=pick.get("pick_tier"),
-                stake=(pick.get("kelly") or {}).get("stake"),
+                stake=(pick.get("stake_info") or {}).get("stake"),
             )
         except Exception as exc:
             log.warning("opus_shadow: failed to log %s: %s", pick.get("match"), exc)

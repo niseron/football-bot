@@ -365,8 +365,20 @@ def get_unsettled_tennis_picks_with_start() -> list[dict]:
 
 # ── Write result / closing odds for one row ───────────────────────────────────
 
-def update_tennis_row_result(sheet_row: int, result: str, pnl: float) -> None:
-    """Write Result (G) and P&L (H) to a specific Tennis Picks row."""
+def update_tennis_row_result(sheet_row: int, result: str, pnl: float) -> bool:
+    """
+    Write Result (G) and P&L (H) to a specific Tennis Picks row.
+    Returns True on success, False if the write failed.
+
+    The bool matters (added 13 Aug 2026). This used to return None on both
+    paths, swallowing the exception into a log line — and both callers then
+    treated the row as settled regardless. The automatic settler counted it in
+    stats["updated"] and appended it to `resolved`, which run_all posts to the
+    'tennis-results' Discord channel, so a failed Sheets write announced
+    "✅ WIN … settled" for a row that was still PENDING on the sheet and would
+    stay that way until it aged out of the lookback window. Silent, and the
+    Discord message actively hid it. Callers now gate on this value.
+    """
     try:
         ss = _get_spreadsheet()
         ws = ss.worksheet(TENNIS_SHEET_NAME)
@@ -375,23 +387,33 @@ def update_tennis_row_result(sheet_row: int, result: str, pnl: float) -> None:
             {"range": f"H{sheet_row}", "values": [[round(pnl, 2)]]},
         ])
         _apply_tennis_formatting()
+        return True
     except Exception as exc:
-        log.error("Tennis Sheets update_tennis_row_result failed: %s", exc)
+        log.error("Tennis Sheets update_tennis_row_result failed (row %s): %s", sheet_row, exc)
+        return False
 
 
-def update_tennis_closing_odds(sheet_row: int, closing_odds: float) -> None:
+def update_tennis_closing_odds(sheet_row: int, closing_odds: float) -> bool:
     """
     Write (overwriting any prior value) the Closing Odds cell for one tennis row.
     Called repeatedly as the match start approaches — the last write before the
     start becomes the closing price. Column located by header name.
+
+    Returns True on success, False if the write failed — same reason as
+    update_tennis_row_result above: its caller logged "wrote <price>" whether or
+    not anything reached the sheet. Less damaging than the result bug (a missing
+    closing price costs CLV coverage, not a false settlement claim), fixed
+    alongside it so the tennis writers behave consistently.
     """
     try:
         ws = _tennis_ws()
         header = ws.row_values(1)
         col = header.index("Closing Odds") + 1  # gspread columns are 1-based
         ws.update_cell(sheet_row, col, round(float(closing_odds), 2))
+        return True
     except Exception as exc:
         log.error("Tennis Sheets update_tennis_closing_odds failed (row %d): %s", sheet_row, exc)
+        return False
 
 
 # ── Simulated Kelly staking (mirrors football's calculate_kelly_stake) ────────
@@ -728,10 +750,18 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
         else:
             pnl = 0.0
 
-    update_tennis_row_result(target_row, result, pnl)
+    match_name = rows[target_row - 1][1] if len(rows[target_row - 1]) > 1 else "?"
+
+    # Same gate as the automatic settler: this used to print "Updated" and
+    # return True even when nothing reached the sheet, so an operator settling a
+    # stranded pick by hand could be told it worked when it had not.
+    if not update_tennis_row_result(target_row, result, pnl):
+        print(f"FAILED to write the result for '{match_name}' — the row is still "
+              f"PENDING on the sheet. See the log for the Sheets error.")
+        return False
+
     finalize_tennis_workbook()
 
-    match_name = rows[target_row - 1][1] if len(rows[target_row - 1]) > 1 else "?"
     sign = "+" if pnl >= 0 else ""
     print(f"Updated  : {match_name}")
     print(f"Result   : {result}")

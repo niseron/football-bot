@@ -412,7 +412,20 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
         else:
             pnl = 0.0
 
-        update_tennis_row_result(p["sheet_row"], result, pnl)
+        # Gate on the write. Before 13 Aug 2026 this call's return was ignored,
+        # so a failed Sheets write still counted as updated and still appended
+        # to `resolved` — which run_all posts to 'tennis-results'. The row stayed
+        # PENDING while Discord said it had settled, and it then aged out of the
+        # lookback window unnoticed. A failed write now leaves the row PENDING
+        # (so the next 30-minute cycle retries it) and announces nothing.
+        if not update_tennis_row_result(p["sheet_row"], result, pnl):
+            log.error(
+                "%s [%s→%s] — Sheets write FAILED, leaving PENDING for the next "
+                "cycle and NOT reporting it settled", match, p["pick"], result,
+            )
+            stats["errors"] += 1
+            continue
+
         stats["updated"] += 1
 
         if result_type and result_type != "completed":

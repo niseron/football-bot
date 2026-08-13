@@ -33,6 +33,13 @@ football `results-cards` channel.
 `TELEGRAM_TENNIS_CHANNEL_ID` was removed on 10 Jul 2026; do not reintroduce
 it or add any Telegram send to the tennis pipeline.
 
+Sheet writers in this pipeline return `bool` and their callers gate on it
+(fixed 13 Aug 2026): `update_tennis_row_result` and `update_tennis_closing_odds`
+used to swallow exceptions and return `None`, so a failed write still counted as
+settled and still posted "✅ settled" to `tennis-results` while the row stayed
+PENDING. A failed result write must leave the row PENDING for the next cycle to
+retry and announce nothing — never report a settlement you did not write.
+
 ## Pick Tiers — Football Only (13 Aug 2026)
 
 Football returns up to 10 ranked picks per run (`MAX_PICKS_PER_RUN = 10`), split by

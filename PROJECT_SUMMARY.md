@@ -892,10 +892,8 @@ Two related hardenings landed with it:
   dropped with the rest of its alerts. They stay out of Discord (the experiment has no alert channel)
   but are visible in the Railway logs, so shadow data cannot rot unnoticed.
 
-> The equivalent tennis bug is still live as of 13 Aug 2026 and was **not** fixed here (out of scope):
-> `tennis_excel_tracker.py:368` swallows every write exception and returns `None`, and
-> `tennis_auto_results.py:415` increments `stats["updated"]` regardless — so a failed Sheets write
-> still fires a "✅ settled" Discord message while the row stays PENDING forever.
+> The same bug existed in tennis and was **fixed on 13 Aug 2026** — see "Tennis settlement: a failed
+> write no longer reports success" in the tennis section below.
 
 **Isolation — verified, not asserted.** Opus rows live only in `Opus Shadow Picks`. `calibration.py`'s
 three reports default to `excel_tracker._picks_ws`, and nothing points them here, so Opus cannot reach
@@ -1008,6 +1006,29 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 - **Staking — STAGED, currently SIMULATED (11 Jul 2026):** tennis stakes use the same half-Kelly / 5%-cap logic as football (`calculate_tennis_kelly_stake` in `tennis_excel_tracker.py`, per-bet-type historical win rate, flat `TENNIS_UNIT_STAKE` €2 below 10 settled picks, €0 on negative edge), sized against `TENNIS_REAL_BANKROLL` = **€100 — a fresh bankroll fully independent of football's €1500**. **No real money is on tennis yet**: every stake is tagged `SIM` in the sheet's 'Stake € (SIM)' column and in the Discord embed's Stake field, and the running 'Bankroll € (SIM)' column (start €100, ±units × €2, recalculated on every settle like football's col J) is paper-only. The plan is to switch to real money once the user decides the pipeline is trustworthy (results flowing correctly + enough settled picks to judge calibration); at that point the SIM tags come off and the constants get re-based to the real deposit. **Since 6 Aug 2026 that decision has to be made on calibration alone** — with the Odds API off for tennis there is no forward CLV evidence, so the usual "positive CLV + good calibration" test is only half available (see the CLV bullet above).
 - **CLV — DISABLED BY CHOICE, 6 Aug 2026:** the tennis pipeline makes **no Odds API calls of any kind**. `tennis_closing_odds.py` returns immediately (before any Sheets read or network call) and `run_all.py` no longer schedules it; the picks-run enrichment is off by the same switch, `tennis_main.TENNIS_ODDS_API_ENABLED = False`. The whole Odds API allowance now goes to football, which keeps full usage. **What this costs:** the tennis 'Closing Odds' column stops accruing, so `tennis_calibration.py`'s `tennis_clv_report()` is frozen at the sample collected 9 Jul – 6 Aug 2026 and no new pick can ever have CLV. **Consequence for the real-money decision — the tennis criterion (positive CLV + good calibration) can now only be PARTIALLY evaluated: calibration yes, CLV no.** Calibration is unaffected because it reads Claude's `probability` and the settled Result, neither of which involves the Odds API — Brier score, per-confidence buckets and the 300-pick threshold all keep working normally. The edge report loses its market input in the same way CLV does. **No picks are excluded from any metric or report** — every pick still counts in calibration, results, P&L, the Tennis Summary tab and the bet-type/rank-tier breakdowns; only the market-derived columns are absent. To restore CLV, flip the flag, re-add the scheduler job, and the caps below apply again. _(Previous sizing, kept for re-enabling: own cap of 40 tennis odds requests/day budgeted separately from football's 60 — set lower despite tennis batching worse, since each tournament is its own sport key, because tennis produces fewer picks (~3-5/day); picks-run enrichment `MAX_TENNIS_ODDS_KEYS_PER_RUN` = 12.)_
 - **Auto results:** `tennis_auto_results.py` (scheduled every 30 min via `run_all.py`'s `tennis_live_results_check`) scans unsettled Tennis Picks rows, finds each match in the Tennis API's fixtures-by-date (both tours, start date + next day, 30-min cache), and settles all four bet types from the set-score string: Match Winner by sets won, Total Games by summed games vs the line, Set Betting by exact set score from the picked player's perspective, Handicap by game margin + line. Retirements/walkovers settle **VOID** for every bet type (conservative — bookmaker rules differ; override with `tennis_update_result.py` if your book settled differently). Each newly settled pick posts its result text to the `tennis-results` Discord channel — Discord-only, never Telegram and never the football `results-cards` channel.
+
+### Tennis settlement: a failed write no longer reports success (fixed 13 Aug 2026)
+
+`update_tennis_row_result` used to swallow every Sheets exception into a `log.error` and return
+`None` on both the success and failure paths. Its callers ignored that return, so a **failed write
+was indistinguishable from a successful one**:
+
+- `tennis_auto_results.py` counted the row in `stats["updated"]` and appended it to `resolved`, which
+  `run_all.tennis_live_results_check` posts to the `tennis-results` Discord channel. So a Sheets
+  outage produced a "✅ WIN … settled" message for a row that was **still PENDING on the sheet** —
+  and would stay PENDING until it aged past the lookback window and stranded, exactly like the
+  9-11 Jul 2026 rows, except now with a Discord message actively asserting the opposite.
+- `update_tennis_result` (the manual `tennis_update_result.py` override) printed `Updated : <match>`
+  and returned `True` regardless — so an operator hand-settling a stranded pick could be told it
+  worked when nothing had been written.
+- `tennis_closing_odds.py` logged `wrote <price>` unconditionally (less damaging: a missing closing
+  price costs CLV coverage, not a false settlement claim).
+
+Both writers now return `bool` and all three callers gate on it. A failed result write leaves the row
+PENDING — so the next 30-minute cycle simply retries it — counts an `errors` entry, and announces
+nothing. Found by an adversarial review of the Opus 5 shadow work, which had deliberately not
+reproduced the pattern; the same gate now exists in football (`run_auto_results` honours a `False`
+from `row_writer`), the Opus shadow, and tennis.
 
 ### Tennis limitations (own list, separate from football's)
 

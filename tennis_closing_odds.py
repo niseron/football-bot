@@ -194,11 +194,20 @@ def run_tennis_closing_odds_check() -> None:
                 if closing_odds is None:
                     continue  # event found but no market for this bet type (e.g. Set Betting)
 
-                update_tennis_closing_odds(p["sheet_row"], closing_odds)
-                log.info(
-                    "tennis_closing_odds: wrote %.2f for '%s' | %s (start %s)",
-                    closing_odds, match, p.get("pick", ""), p.get("start_utc", ""),
-                )
+                # Only claim the write when it happened — this logged "wrote"
+                # unconditionally before 13 Aug 2026, so a failed Sheets write
+                # left no trace that the closing price was missing.
+                if update_tennis_closing_odds(p["sheet_row"], closing_odds):
+                    log.info(
+                        "tennis_closing_odds: wrote %.2f for '%s' | %s (start %s)",
+                        closing_odds, match, p.get("pick", ""), p.get("start_utc", ""),
+                    )
+                else:
+                    log.error(
+                        "tennis_closing_odds: FAILED to write %.2f for '%s' | %s — "
+                        "no closing price recorded for this pick",
+                        closing_odds, match, p.get("pick", ""),
+                    )
             except Exception as exc:
                 log.debug("tennis_closing_odds: skipped a pick (%s): %s", p.get("match"), exc)
                 continue

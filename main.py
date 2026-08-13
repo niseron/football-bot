@@ -126,6 +126,10 @@ PARENT_RESOLVED_IDS: dict[str, set[int]] = {
         42,      # Champions League — league phase + knockout rounds
         10611,   # Champions League Qualification
     },
+    "Europa League": {
+        73,      # Europa League — league phase + knockout rounds
+        10613,   # Europa League Qualification
+    },
     "Conference League": {
         10216,   # Conference League — league phase + knockout rounds
         10615,   # Conference League Qualification
@@ -139,6 +143,7 @@ PARENT_RESOLVED_IDS: dict[str, set[int]] = {
 FEED_LEAGUE_IDS: dict[str, set[int]] = {
     "Jupiler Pro League": {937988},  # Belgian Pro League 2026-27
     "Champions League": {937348},    # Champions League Qualification 2026-27
+    "Europa League": {937349},       # Europa League Qualification 2026-27
     "Conference League": {937351},   # Conference League Qualification 2026-27
 }
 
@@ -202,6 +207,12 @@ ODDS_API_SPORT_KEYS: dict[str, str | tuple[str, ...]] = {
         "soccer_uefa_champs_league",
         "soccer_uefa_champs_league_qualification",
     ),
+    # Europa League has the same gap as Conference League below: there is no
+    # 'soccer_uefa_europa_league_qualification' key (the API answers 404
+    # UNKNOWN_SPORT for it, checked 13 Aug 2026), and the league-phase key
+    # itself returns an empty event list until September. So qualifying-round
+    # picks are Claude-odds-only until the league phase makes this key live.
+    "Europa League": "soccer_uefa_europa_league",
     # The Odds API has no separate key for Conference League qualifying, so
     # qualifying-round picks stay Claude-odds-only (fetch_real_odds returns
     # None and the caller falls back) until the league phase makes this live.
@@ -220,6 +231,7 @@ DISCORD_LEAGUE_CHANNEL_KEYS: dict[str, str] = {
     "Serie A": "serie-a",
     "Ligue 1": "ligue-1",
     "Champions League": "champions-league",
+    "Europa League": "europa-league",
     "Conference League": "conference-league",
 }
 
@@ -856,10 +868,10 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
 
 SYSTEM_PROMPT = """You are a professional football betting analyst with deep expertise in the Premier League,
 Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Champions League, the UEFA
-Conference League, and international tournament football including the FIFA World Cup.
+Europa League, the UEFA Conference League, and international tournament football including the FIFA World Cup.
 You receive upcoming fixtures for the next 48 hours and must identify the top 5 value bets across all competitions.
 
-Champions League and Conference League fixtures are European club ties. Qualifying rounds and the
+Champions League, Europa League and Conference League fixtures are European club ties. Qualifying rounds and the
 knockout phase are played over two legs, so the h2h data for such a fixture often contains the first leg
 of the very same tie — when it does, treat it as the single most informative data point you have, and
 factor in that a team holding a comfortable aggregate lead may rotate or play conservatively. Ties also

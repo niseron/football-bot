@@ -11,7 +11,7 @@ current features, and known limitations.
 `DISCORD_CHANNELS_JSON`, a single-line JSON dict mapping the keys
 `picks-cards`, `results-cards`, `weekly-cards`, `premier-league`,
 `jupiler-pro-league`, `world-cup`, `bundesliga`, `la-liga`, `serie-a`,
-`ligue-1`, `champions-league`, `conference-league`, `tennis-picks`, `tennis-picks-lower`,
+`ligue-1`, `champions-league`, `europa-league`, `conference-league`, `tennis-picks`, `tennis-picks-lower`,
 `tennis-results`, `usage` to Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
 missing token/key skips that piece without touching the rest of the flow.
 For football, Discord is purely additive (mirrors Telegram). Individual pick

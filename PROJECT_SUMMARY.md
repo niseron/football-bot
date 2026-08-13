@@ -142,7 +142,8 @@ Delivery channel via `discord_bot.py` — no changes to pick generation or calib
 | `serie-a` | Each Serie A pick as an embed (league tracked since 19 Jul 2026; first fixtures ~22 Aug 2026) | `main.py` |
 | `ligue-1` | Each Ligue 1 pick as an embed (league tracked since 19 Jul 2026; first fixtures ~21 Aug 2026) | `main.py` |
 | `champions-league` | Each Champions League pick as an embed (tracked since 4 Aug 2026; live immediately — Q3 fixtures were already in the 48h window that day) | `main.py` |
-| `conference-league` | Each Conference League pick as an embed. *New key 12 Aug 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, these picks are skipped silently and reach Discord via the card only (still logged to Sheets).* | `main.py` |
+| `conference-league` | Each Conference League pick as an embed (key added 12 Aug 2026; channel id `1537177968999268444` mapped and verified reachable 13 Aug 2026) | `main.py` |
+| `europa-league` | Each Europa League pick as an embed (tracked since 13 Aug 2026; live immediately — 12 Q3 fixtures were already in the 48h window that day). Channel id `1537453739252908123`, verified reachable 13 Aug 2026 | `main.py` |
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
@@ -158,12 +159,19 @@ League pick in the same situation still reached its league channel. That mattere
 because Conference League qualifying has been carrying most of the book since
 early Aug. Both UEFA competitions now route identically.
 
-⚠️ **Needs a channel id.** `"Conference League": "conference-league"` is in
-`DISCORD_LEAGUE_CHANNEL_KEYS`, but until a `conference-league` id is added to
-`DISCORD_CHANNELS_JSON` on Railway, `send_to_discord()` logs
-`Discord channel key 'conference-league' not mapped — skipping` and those picks
-keep reaching Discord via the card only. Nothing errors; the rest of the run is
-untouched. (Same pattern as `tennis-picks-lower` above.)
+**Europa League joined them on 13 Aug 2026** — the last of the three UEFA club
+competitions to be tracked. All three now route identically: parent-id resolution,
+own Discord channel, own Odds API key entry. See "Europa League added" below for
+why it was excluded until then.
+
+Both channel ids are mapped as of 13 Aug 2026 (`conference-league`
+`1537177968999268444`, `europa-league` `1537453739252908123`), each confirmed with
+a read-only `GET /v10/channels/{id}` — same guild `1524850408852291754` and same
+category as `champions-league`. Remember `DISCORD_CHANNELS_JSON` must be set on
+**Railway** as well as locally; a key missing there makes `send_to_discord()` log
+`Discord channel key '<key>' not mapped — skipping` and those picks reach Discord
+via the card only. Nothing errors; the rest of the run is untouched. (Same pattern
+as `tennis-picks-lower` above.)
 
 **Pick embed format** (built by `discord_bot.py`'s `build_pick_embed()`, since 10 Jul 2026 — previously plain text): title = match name; stripe colour by confidence (High = green `#00c853`, Medium = blue `#2196f3`, Low = orange `#ff6f00`); a full-width **Pick** field with the selection; inline **Bet Type** / **Odds** / **Confidence** fields side by side (Odds shows a SINGLE figure — the real market price when one was matched, otherwise the estimate; see "Model-name-free output" below); the full reasoning as the description; a `🔥 VALUE` footer only when the pick beat the market by ≥5pp. Context renders as the small author line — the league for football, `Tour | Tournament | Surface` for tennis. Card/result sends (`picks-cards`, `results-cards`, `weekly-cards`, `tennis-results`) are unchanged plain text/images.
 
@@ -252,7 +260,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - Duplicate pick prevention (won't re-post same pick same day)
 - Single daily job at 12:00 Brussels — evening picks job removed
 
-### Parent-id leagueId resolution (Conference League 30 Jul 2026; Champions League 4 Aug 2026; Jupiler Pro League 8 Aug 2026)
+### Parent-id leagueId resolution (Conference League 30 Jul 2026; Champions League 4 Aug 2026; Jupiler Pro League 8 Aug 2026; Europa League 13 Aug 2026)
 The by-date fixtures feed returns no competition name — only a `leagueId`, and for
 some competitions that id is **season-specific** (and for UEFA, stage-specific too).
 It rotates when qualifying ends and the league phase begins, and again every season,
@@ -268,10 +276,11 @@ Instead `partition_fixtures()` matches against the *stable* fotmob parent ids in
 |---|---|---|
 | Jupiler Pro League | — | `40` |
 | Champions League | `10611` | `42` |
+| Europa League | `10613` | `73` |
 | Conference League | `10615` | `10216` |
 
 - Fast path: any match whose `leagueId` is in `FEED_LEAGUE_IDS[competition]` (seeded
-  with `937988` / `937348` / `937351`) is bucketed straight away — **zero extra API calls**.
+  with `937988` / `937348` / `937349` / `937351`) is bucketed straight away — **zero extra API calls**.
 - Self-heal: only when some tracked competition yields nothing does
   `_discover_feed_ids()` run. It resolves unfamiliar `leagueId`s to their
   `parentLeagueId` via `football-get-match-detail` (one lookup per distinct id,
@@ -302,7 +311,11 @@ Instead `partition_fixtures()` matches against the *stable* fotmob parent ids in
   long-lived scheduler, so the cache resets only on redeploy.
 
 Verified 30 Jul 2026: 19 Conference League Q2 fixtures bucketed, Europa League
-Qualification (`937349`, parent `10613`) correctly excluded, wiped seed rediscovered.
+Qualification (`937349`, parent `10613`) correctly excluded *at that time*, wiped
+seed rediscovered. (That exclusion was deliberate and is now reversed — Europa
+League has been tracked since 13 Aug 2026; see "Europa League added" below. The
+30 Jul run is what first identified `937349` → parent `10613`, and that mapping was
+re-confirmed live on 13 Aug before seeding it.)
 Re-verified 4 Aug 2026 for Champions League: `937348` resolved live to parent `10611`
 ("Champions League Qualification"), `904988` (17 Sep 2025) to parent `42`
 ("Champions League"); 2 Q3 fixtures bucketed on the fast path with no extra calls; a
@@ -312,6 +325,41 @@ Verified 8 Aug 2026 for Belgium: 3 Jupiler fixtures bucketed on the fast path
 (Standard–Cercle, St.Truiden–Lommel, Westerlo–Union SG); with the seed and both
 caches wiped, discovery rediscovered `937988` via parent `40` on the **first** lookup
 and returned an identical fixture set, UEFA competitions unaffected.
+
+### Europa League added (13 Aug 2026)
+The last of the three UEFA club competitions to be tracked, completing the set.
+Until this date Europa League fixtures were **invisible to the pipeline** — not
+dropped late, never fetched: `_discover_feed_ids()` resolved the block to parent
+`10613`, matched it against no entry in `PARENT_RESOLVED_IDS`, and rejected it
+(`main.py` `_discover_feed_ids`, the `break` on a parent hit). Because rejection
+happens before analysis, **no Europa League pick has ever existed** — the Sheet has
+zero Europa rows all-time, so there was no backlog to recover when the competition
+was switched on.
+
+Five edits, mirroring exactly what Conference League needed:
+
+| Where | Added |
+|---|---|
+| `PARENT_RESOLVED_IDS` | `"Europa League": {73, 10613}` |
+| `FEED_LEAGUE_IDS` | `{937349}` (Europa League Qualification 2026-27) |
+| `ODDS_API_SPORT_KEYS` | `soccer_uefa_europa_league` (qualifying is Claude-odds-only — see the odds caveat above) |
+| `DISCORD_LEAGUE_CHANNEL_KEYS` | `"Europa League": "europa-league"` |
+| `SYSTEM_PROMPT` | named in the competition list **and** in the two-legged-tie paragraph, which previously said "Champions League and Conference League" — that paragraph carries the this-leg-only betting rule, so leaving it out would have let Europa ties be priced as elimination games |
+
+Verified 13 Aug 2026 immediately after the change: `partition_fixtures()` bucketed
+**12 Europa League fixtures** (Rangers–Jagiellonia, Hearts–Benfica, Anderlecht–PAOK,
+Beşiktaş–Hradec Kralove et al.) on the fast path with zero extra API calls, alongside
+25 Conference League and 1 Jupiler — Conference League's count unchanged, confirming
+the new bucket takes nothing from it. `937349` re-resolved live to parent `10613`
+before seeding.
+
+**Live on the day it shipped, mid-window.** Unlike Bundesliga/La Liga/Serie A/Ligue 1
+(tracked 19 Jul, first fixtures weeks later), Europa League Q3 was already playing —
+12 fixtures kicked off 17:00–19:00Z on 13 Aug, hours after the change. The 12:00 run
+that day predated the wiring, so it produced 5 Conference League picks and no Europa
+ones. Whether to backfill that gap with a supplementary run is the same call as
+30 Jul (see `_post_conference_league_jul30.py`); the mechanics that make it safe are
+in section 9.
 
 ### Which pinned ids can go stale (audit, 8 Aug 2026)
 Run this check before adding any league, and re-check if a league ever goes quiet:
@@ -333,10 +381,16 @@ stable parent ids that the feed uses directly, and Belgium — the only season-s
 one — is now on the self-healing path. The shape is a useful tell: the stable ids are
 small (2 digits), while season-scoped ids are 6-digit (`900433`, `937988`, `937348`).
 
-**Odds caveat (Conference League only):** The Odds API has no key for Conference
-League *qualifying* — only `soccer_uefa_europa_conference_league` for the main
-competition, which is inactive until the league phase. Qualifying picks are
-therefore Claude-odds-only (no market odds, no value flag).
+**Odds caveat (Conference League and Europa League):** The Odds API has no key for
+either competition's *qualifying* rounds — only `soccer_uefa_europa_conference_league`
+and `soccer_uefa_europa_league` for the main competitions, both inactive until the
+league phase. Qualifying picks in both are therefore Claude-odds-only (no market
+odds, no value flag).
+
+Re-checked for Europa League on 13 Aug 2026: `soccer_uefa_europa_league` answers
+`200` with an **empty** event list, and `soccer_uefa_europa_league_qualification`
+does not exist at all (`404 UNKNOWN_SPORT`). Same provider gap as Conference
+League, same non-fix: the plan tier is irrelevant.
 
 **Measured 6 Aug 2026 — this is a provider gap, NOT a quota or mapping problem,
 and upgrading the plan does not fix it.** Verified by sweeping the `/events`
@@ -648,7 +702,7 @@ cell with `pnl_for_result(result, market_odds_from_row(row, header))` and call
 ### Discord delivery (added — `discord_bot.py`)
 - Every daily picks card and weekly card is mirrored to Discord right after its Telegram send
 - Live result notifications (the automatic 30-minute checker) mirror to Discord from the identical trigger as the Telegram notification; the results PNG card additionally mirrors when the manual `--results` path generates it
-- Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup` / `bundesliga` / `la-liga` / `serie-a` / `ligue-1` / `champions-league` / `conference-league`) — see section 5b for the embed format
+- Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup` / `bundesliga` / `la-liga` / `serie-a` / `ligue-1` / `champions-league` / `europa-league` / `conference-league`) — see section 5b for the embed format
 - Entirely fail-silent — see section 5b for the mapping structure and guarantees
 
 ### Tracking and reporting

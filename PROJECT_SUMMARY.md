@@ -216,8 +216,8 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 
 | Tab | Columns |
 |---|---|
-| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds, Market Odds. **'Odds' is Claude's estimate; 'Market Odds' is the matched market price and is what settlement pays out at** (see 'Settlement pays the market price', 9 Aug 2026). |
-| Summary | Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, Bet Type Breakdown table, and (4 Aug 2026) a **League Breakdown** table — wins / losses / win rate / total P&L / picks per competition, sorted by P&L descending. Built from the Picks tab's League column; deliberately one section in this tab, never per-league tabs, so calibration data stays unified. Every tracked competition gets a row even at zero picks (most open their 2026-27 season mid-to-late August — zeros are expected, not a bug), leagues found in the sheet but not in `TRACKED_LEAGUES` are appended rather than dropped, and the 119 picks logged before the League column existed group under `(no league recorded)` so the section's P&L reconciles exactly with the headline total. Note `Picks` here counts every logged pick incl. pending/void, unlike Bet Type Breakdown's `Total Picks` (settled wins + losses only). Below it sits a **Bet Type × League Breakdown** (4 Aug 2026) — win rate, P&L and pick count for every league/bet-type cell, leagues ordered by P&L to match the section above. A cell shows a win rate only at `_MIN_CELL_SAMPLE` (10) or more **decided** picks and otherwise reads `insufficient data`; the gate is on the rate's own denominator (wins + losses), not on settled count, because 10 settled picks that are 8 VOIDs and 2 decided would otherwise print exactly the 2-sample rate the rule exists to hide. P&L and pick count always show — only the rate is unsafe at low n. Only leagues with ≥1 settled pick appear, so not-yet-started competitions add no rows here (they stay visible at zero in the League Breakdown). On 4 Aug 2026, 11 of 18 cells read `insufficient data` — slicing two ways splits an already-small sample hard, and that is the honest state, not a gap to fill. |
+| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds, Market Odds, **Pick Tier** (added 13 Aug 2026). **'Odds' is Claude's estimate; 'Market Odds' is the matched market price and is what settlement pays out at** (see 'Settlement pays the market price', 9 Aug 2026). **'Pick Tier' is `Core` (ranks 1-5) or `Extended` (ranks 6-10); BLANK MEANS CORE and the 217 rows logged before 13 Aug 2026 are deliberately left blank — never backfill them** (see 'Ranked picks and the Core/Extended split'). Running Total P&L and Bankroll are Core-only and stay blank on Extended rows. |
+| Summary | **Core-tier only** (13 Aug 2026) apart from the final tier block — every figure below is computed from Core rows, so Extended picks never move the headline win rate, P&L or bankroll. A **Pick Tier Breakdown** table is appended at the bottom (wins / losses / win rate / total P&L / picks for Core vs Extended) — the one section that deliberately sees both tiers. Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, Bet Type Breakdown table, and (4 Aug 2026) a **League Breakdown** table — wins / losses / win rate / total P&L / picks per competition, sorted by P&L descending. Built from the Picks tab's League column; deliberately one section in this tab, never per-league tabs, so calibration data stays unified. Every tracked competition gets a row even at zero picks (most open their 2026-27 season mid-to-late August — zeros are expected, not a bug), leagues found in the sheet but not in `TRACKED_LEAGUES` are appended rather than dropped, and the 119 picks logged before the League column existed group under `(no league recorded)` so the section's P&L reconciles exactly with the headline total. Note `Picks` here counts every logged pick incl. pending/void, unlike Bet Type Breakdown's `Total Picks` (settled wins + losses only). Below it sits a **Bet Type × League Breakdown** (4 Aug 2026) — win rate, P&L and pick count for every league/bet-type cell, leagues ordered by P&L to match the section above. A cell shows a win rate only at `_MIN_CELL_SAMPLE` (10) or more **decided** picks and otherwise reads `insufficient data`; the gate is on the rate's own denominator (wins + losses), not on settled count, because 10 settled picks that are 8 VOIDs and 2 decided would otherwise print exactly the 2-sample rate the rule exists to hide. P&L and pick count always show — only the rate is unsafe at low n. Only leagues with ≥1 settled pick appear, so not-yet-started competitions add no rows here (they stay visible at zero in the League Breakdown). On 4 Aug 2026, 11 of 18 cells read `insufficient data` — slicing two ways splits an already-small sample hard, and that is the honest state, not a gap to fill. |
 | Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier ('Top 150' / 'Lower Ranked', for future per-tier calibration), Stake € (SIM), Running P&L (u), Bankroll € (SIM), Player IDs. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 | Tennis Summary | **Tennis system only** — mirror of football's Summary tab, rebuilt by `_refresh_tennis_summary()` whenever a tennis result settles (`finalize_tennis_workbook()`, called from auto-results and the manual override): overall record, win rate, units P&L, simulated bankroll + ROI, best bet type / confidence level, Bet Type Breakdown (win-rate-desc), plus a tennis-only Rank Tier Breakdown (Top 150 vs Lower Ranked; pre-10-Jul rows show as '(untracked)'). Header labels the staking as SIMULATED. |
 | Fable Picks | **HISTORICAL — discontinued experiment data, kept for reference.** Rows logged by the Fable 5 shadow experiment (12-18 Jul 2026) with the football Picks structure minus staking/bankroll columns (units P&L only). Nothing reads or writes this tab anymore — the Fable pipeline was removed on 19 Jul 2026 (see the discontinued-experiment note in section on the Fable 5 shadow pipeline). |
@@ -238,7 +238,9 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 ## 7. Current Bot Features
 
 ### Core picks pipeline
-- Top 5 value picks per day across all tracked competitions
+- Up to **10** ranked value picks per day across all tracked competitions, split into
+  **Core (ranks 1-5)** and **Extended (ranks 6-10)** — see "Ranked picks and the Core/Extended
+  split" below. Was a flat top 5 until 13 Aug 2026.
 - Picks use actual team names (never generic "Home Win" / "Away Win")
 - Supported bet types: Match Winner, Both Teams to Score, Over/Under Goals, Asian Handicap, Double Chance
 - Knockout Match Winner picks carry an explicit time scope (since 12 Jul 2026): "(90 min)" =
@@ -567,6 +569,83 @@ restart can re-send one alert; that is the safe direction to fail.
 - Each Claude pick is matched to its real market outcome; a pick is flagged as "value" only when Claude's implied probability exceeds the market's by ≥5 percentage points
 - Both Claude's estimated odds and the real market odds are shown side by side in the Telegram message and the picks card
 - If `ODDS_API_KEY` is missing, the fixture/market can't be matched, or the API call fails, the pick silently falls back to Claude-only odds (no crash, no message)
+
+### Ranked picks and the Core/Extended split (13 Aug 2026)
+
+**Pick volume doubles from this date: 5 per run → up to 10.** Claude now returns picks *ranked*
+best-to-worst — rank 1 the highest-conviction bet, rank 10 the weakest it would still genuinely
+place — and `MAX_PICKS_PER_RUN` rose 5 → 10 (`CORE_PICKS_PER_RUN = 5` marks the tier boundary).
+
+| Tier | Ranks | Sheet / settlement | Card + Telegram | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
+|---|---|---|---|---|---|---|
+| **Core** | 1-5 | logged + settled | **yes** | league channel | **yes** | **yes** |
+| **Extended** | 6-10 | logged + settled | no | league channel, labelled `· EXTENDED #n` | **no** | **no** |
+
+**The Core baseline is unaffected.** This is the whole point of the design, and it holds in the
+strongest sense available: not one historical row was rewritten. Core keeps its own card, Telegram
+post, running total, bankroll, Summary figures and every calibration/edge/CLV report, so the series
+running unbroken since **30 Jun 2026** stays directly comparable through the October read and beyond.
+Verified on the day: with 217 rows on the sheet, the three reports returned identical sample sizes
+(calibration 98, edge 34, CLV 27) with the tier filter active and bypassed — it is provably a no-op
+on history.
+
+**Why a column, not a separate tab.** The alternative was an "Extended Picks" tab. That would have
+meant rebuilding the settlement path the way the Tennis tab did — `tennis_excel_tracker.py` duplicates
+~15 functions of `excel_tracker.py` (reader, writer, finalizer, running total, its own Summary tab).
+`get_pending_picks_rows()` selects purely on "Result empty + inside the lookback window" with no
+league, tier or source filter, so Extended rows in the Picks tab settle through the **existing,
+already-hardened path with zero new settlement code**, and inherit the PENDING alerting added on
+12 Aug for free. A separate tab strands picks silently if any one of the new reader, finalizer or
+scheduler wiring is wrong; a missed report filter is merely visible and reversible. The column trades
+an invisible failure for a visible one.
+
+**Blank means Core, permanently.** `_row_tier()` reads a missing column, a short row or an empty cell
+as Core, which is why the 217 pre-existing rows needed no backfill. **Never "migrate" old rows by
+filling this column in** — leaving them blank is what guarantees the baseline cannot drift.
+
+**One filter, seven sites.** `excel_tracker._core_rows()` is the single Core filter; every Core
+aggregation routes through it rather than repeating an inline tier check:
+
+| Site | Why it must be Core-only |
+|---|---|
+| `_recalculate_running_total` | cols I/J — the headline P&L and bankroll series |
+| `_refresh_summary` | Summary tab, which also feeds the picks-card footer win rate |
+| `calibration._settled_prob_rows` | feeds `calibration_report()` **and** `edge_report()` |
+| `calibration.clv_report` | closing odds ARE collected for Extended, but never scored here |
+| `get_weekly_data` | weekly card + `update_result.py` recap |
+| `get_bet_type_breakdown` | weekly card breakdown (and `get_overall_win_rate` via it) |
+| `get_picks_for_date` | results card + per-pick result notifications |
+
+Deliberately **not** filtered: `get_pending_picks_rows` (both tiers must settle) and
+`get_unsettled_picks_with_kickoff` (both tiers collect closing odds).
+
+**Tier comparison.** `get_tier_breakdown()` returns picks/settled/W/L/win rate/P&L per tier, and a
+`PICK TIER BREAKDOWN` block is appended to the Summary tab. This is the one reporting path allowed to
+see both tiers — comparing them is its purpose.
+
+**Never pad.** The prompt states that returning fewer than 10 is correct when fewer genuine value bets
+exist, that there is no penalty for a short list, and that a padded pick is worse than a missing one
+because every returned pick is staked for real. A short list logs at INFO, never as a warning —
+treating it as a fault is what would pressure the list back toward filler.
+
+**Rank is assigned from array position, not from Claude's `rank` field.** Dedup and the cap already
+operate on position, so a returned number could tier a pick differently from where it actually sits
+(or collide after a duplicate is dropped). Claude's *ordering* is respected; its *numbering* is not
+load-bearing. Verified with a duplicate injected at rank 1: it was removed and ranks stayed dense 1-10.
+
+#### ⚠️ Prompt regime change — forward series only (13 Aug 2026)
+
+Ranks 1-5 are now selected by a **different prompt** than before this date. `SYSTEM_PROMPT` asks for
+a ranked list of up to 10 rather than "the top 5", and Claude reasoning about a 10-deep ranking may
+order its best five differently than when asked for five outright.
+
+- **Historical data is untouched**, so the 30 Jun → 13 Aug 2026 baseline is unaffected as *stored data*.
+- **Going forward, "Core" is not produced by a byte-identical process.** When reading the October
+  calibration report, treat 13 Aug 2026 as a soft regime boundary: a shift in Core's measured
+  behaviour after this date could be the prompt change rather than model drift. Note it before
+  concluding anything about calibration.
+- The alternative — two separate Claude calls to keep the Core prompt byte-identical — was rejected:
+  it doubles token cost and can return the same fixture in both tiers.
 
 ### Probability calibration engine (added — `calibration.py`)
 - Claude must now output a `probability` field per pick (0-100, its estimated true win probability), logged to the 'Claude Prob %' column; the market implied probability (100 / market odds) is logged to 'Market Prob %' when real odds were found

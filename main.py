@@ -15,7 +15,7 @@ from telegram import Bot
 
 from env_loader import load_env
 from tracker import log_pick, picks_exist_for_session
-from excel_tracker import calculate_kelly_stake
+from excel_tracker import PICK_TIER_CORE, PICK_TIER_EXTENDED, calculate_kelly_stake
 from card_generator import generate_picks_card, generate_picks_card_ig
 from discord_bot import build_pick_embed, send_to_discord
 
@@ -174,13 +174,25 @@ _roster_cache: dict[int, set[int]] = {}
 # can never blow out the RapidAPI budget.
 MAX_PARENT_LOOKUPS_PER_RUN = 12
 
-# Hard cap on picks per run. The SYSTEM_PROMPT asks for the "top 5", but that is
-# only an instruction — it has been exceeded in practice (16 Jun 2026: 8 picks in
-# one run; 14 Jun: 14). The picks card renders 5, so anything past this cap used
-# to be logged to the sheet and settled into P&L without ever being shown.
-# Enforced once, in analyse_with_claude(), so every downstream consumer — sheet,
-# Telegram, card, Discord embeds — sees the identical list.
-MAX_PICKS_PER_RUN = 5
+# Hard cap on picks per run. The SYSTEM_PROMPT asks for a ranked list, but that
+# is only an instruction — it has been exceeded in practice (16 Jun 2026: 8 picks
+# in one run; 14 Jun: 14). Enforced once, in analyse_with_claude(), so every
+# downstream consumer — sheet, Telegram, card, Discord embeds — sees the
+# identical list.
+#
+# Raised 5 -> 10 on 13 Aug 2026, when picks became ranked and split into tiers.
+MAX_PICKS_PER_RUN = 10
+
+# Ranks 1..CORE_PICKS_PER_RUN are CORE, the rest EXTENDED. Core is the baseline
+# series running unbroken since 30 Jun 2026 — it keeps the card, the Telegram
+# post, the running total, the Summary tab and every calibration/edge/CLV report
+# to itself. Extended picks are logged, settled and posted to their league's
+# Discord channel, but are excluded from all of the above (excel_tracker's
+# _core_rows is the single filter enforcing that).
+#
+# This split is a REPORTING boundary, not a quality gate: an Extended pick is
+# still a bet Claude judged worth making, just a lower-conviction one.
+CORE_PICKS_PER_RUN = 5
 
 # Regex to identify youth-team suffixes  e.g. "U19", "U-21", "U 23"
 _YOUTH_RE = re.compile(r"\bU[\s-]?1[5-9]\b|\bU[\s-]?2[0-3]\b|youth|junior", re.IGNORECASE)
@@ -869,7 +881,19 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
 SYSTEM_PROMPT = """You are a professional football betting analyst with deep expertise in the Premier League,
 Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Champions League, the UEFA
 Europa League, the UEFA Conference League, and international tournament football including the FIFA World Cup.
-You receive upcoming fixtures for the next 48 hours and must identify the top 5 value bets across all competitions.
+You receive upcoming fixtures for the next 48 hours and must identify the best value bets across all
+competitions, ranked from best to worst — UP TO 10, in strict order of conviction.
+
+RANKING — read this carefully:
+- Rank 1 is your single highest-conviction bet; rank 10 is the weakest bet you would still genuinely
+  place. Order the "picks" array by that ranking, best first.
+- Return ONLY bets you actually believe are worth placing. If you find 6 genuinely good bets, return 6.
+  If you find 3, return 3. If you find none, return an empty array.
+- NEVER pad the list to reach 10. A padded pick is worse than a missing one: every pick returned is
+  staked and settled for real, so filler costs money. There is no penalty for a short list, and no
+  reward for a long one — being asked for up to 10 is permission, not a quota.
+- Do not reorder to spread picks across competitions or bet types. Conviction is the only ranking
+  criterion; if your five best bets are all in one competition, rank them 1-5 anyway.
 
 Champions League, Europa League and Conference League fixtures are European club ties. Qualifying rounds and the
 knockout phase are played over two legs, so the h2h data for such a fixture often contains the first leg
@@ -910,6 +934,7 @@ For each recommendation output valid JSON with this exact structure:
 {
   "picks": [
     {
+      "rank": <1 = highest conviction, ascending; array must be in this order and ranks must be unique>,
       "match": "<Home longName> vs <Away longName>",
       "league": "<league name>",
       "bet_type": "<e.g. Match Winner / Both Teams to Score / Over 2.5 Goals / Double Chance / Asian Handicap>",
@@ -1033,6 +1058,31 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
         )
         deduped = deduped[:MAX_PICKS_PER_RUN]
 
+    # Rank and tier are assigned HERE, from array position, and deliberately not
+    # taken from Claude's own "rank" field: position is what dedup and the cap
+    # above already operate on, so trusting a returned number could tier a pick
+    # differently from where it actually sits in the list (or collide after a
+    # duplicate is removed). Claude's ordering is respected; its numbering is not
+    # load-bearing.
+    for i, pick in enumerate(deduped, 1):
+        pick["rank"] = i
+        pick["pick_tier"] = PICK_TIER_CORE if i <= CORE_PICKS_PER_RUN else PICK_TIER_EXTENDED
+
+    n_core = sum(1 for p in deduped if p["pick_tier"] == PICK_TIER_CORE)
+    log.info(
+        "Analysis returned %d pick(s): %d Core, %d Extended",
+        len(deduped), n_core, len(deduped) - n_core,
+    )
+    # A short list is the expected, correct outcome when Claude finds fewer good
+    # bets — SYSTEM_PROMPT forbids padding. Logged at INFO, never warned about:
+    # treating it as a fault is exactly what would pressure the list back toward
+    # filler picks.
+    if len(deduped) < MAX_PICKS_PER_RUN:
+        log.info(
+            "Fewer than %d picks returned — no padding applied (this is expected "
+            "when the slate offers fewer genuine value bets)", MAX_PICKS_PER_RUN,
+        )
+
     return deduped
 
 
@@ -1095,8 +1145,21 @@ async def send_to_telegram(text: str):
 # ── Discord (additive delivery — never affects the Telegram flow) ────────────
 
 def _discord_pick_embed(p: dict) -> dict:
-    """One pick as a Discord embed; the league renders as the author line."""
-    return build_pick_embed(p, context=p.get("league", ""))
+    """
+    One pick as a Discord embed; the league renders as the author line.
+
+    Extended (rank 6-10) picks are labelled in that author line and carry their
+    rank, so a reader can tell at a glance that they sit outside the tracked
+    5-pick book — they are real bets, but not part of the headline P&L, and an
+    unlabelled embed would imply otherwise.
+    """
+    league = p.get("league", "")
+    rank   = p.get("rank")
+    if p.get("pick_tier") == PICK_TIER_EXTENDED:
+        context = f"{league} · EXTENDED #{rank}" if rank else f"{league} · EXTENDED"
+    else:
+        context = league
+    return build_pick_embed(p, context=context)
 
 
 async def _send_photo(path, chat_id: str | None = None) -> None:
@@ -1173,6 +1236,8 @@ async def daily_picks_job():
     except Exception as exc:
         log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
 
+    # BOTH tiers are logged and settled — the tier travels with the row so the
+    # reporting layer can filter on it (excel_tracker._core_rows).
     for pick in picks:
         try:
             claude_prob = pick.get("probability")
@@ -1189,26 +1254,37 @@ async def daily_picks_job():
                 kickoff_utc=kickoff_lookup.get(pick["match"], ""),
                 # The price the card shows and settlement pays out at.
                 market_odds=pick.get("market_odds"),
+                pick_tier=pick.get("pick_tier", PICK_TIER_CORE),
             )
         except Exception as exc:
             log.warning("Failed to log pick: %s", exc)
 
-    message = format_telegram_message(picks, header="Football Picks")
+    # From here on the CARD and TELEGRAM surfaces see Core only, so the daily
+    # post stays the same 5-pick book it has been since 30 Jun 2026. Extended
+    # picks reach Discord's league channels below, and the Sheet above.
+    core_picks     = [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE]
+    extended_picks = [p for p in picks if p.get("pick_tier") == PICK_TIER_EXTENDED]
+
+    message = format_telegram_message(core_picks, header="Football Picks")
     try:
         await send_to_telegram(message)
-        log.info("Sent %d morning picks to Telegram", len(picks))
+        log.info("Sent %d morning Core picks to Telegram", len(core_picks))
     except Exception as exc:
         log.error("Telegram send failed: %s", exc)
 
     card = None
     try:
-        card = generate_picks_card(picks, session="morning")
+        # Core only, passed explicitly: generate_picks_card also slices to 5
+        # internally, but relying on that would make the card's contents an
+        # accident of ordering rather than a stated choice.
+        card = generate_picks_card(core_picks, session="morning")
         await _send_photo(card)
         log.info("Picks card sent: %s", card.name)
     except Exception as exc:
         log.warning("Picks card failed (non-fatal): %s", exc)
 
-    # Discord delivery — additive; send_to_discord never raises
+    # Discord delivery — additive; send_to_discord never raises.
+    # Both tiers post to their league channel; the embed marks which is which.
     try:
         if card is not None:
             send_to_discord("picks-cards", image_path=card)
@@ -1219,8 +1295,10 @@ async def daily_picks_job():
     except Exception as exc:
         log.warning("Discord picks delivery failed (non-fatal): %s", exc)
 
+    log.info("Delivered %d Core and %d Extended pick(s)", len(core_picks), len(extended_picks))
+
     try:
-        ig_card = generate_picks_card_ig(picks)
+        ig_card = generate_picks_card_ig(core_picks)
         log.info("Instagram picks card saved: %s", ig_card.name)
         if TELEGRAM_IG_CHANNEL_ID:
             await _send_photo(ig_card, chat_id=TELEGRAM_IG_CHANNEL_ID)

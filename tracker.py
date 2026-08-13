@@ -20,12 +20,20 @@ def init_db():
                 odds      REAL    NOT NULL,
                 result    TEXT    DEFAULT 'PENDING',
                 profit    REAL    DEFAULT NULL,
-                session   TEXT    NOT NULL DEFAULT 'morning'
+                session   TEXT    NOT NULL DEFAULT 'morning',
+                pick_tier TEXT    NOT NULL DEFAULT 'Core'
             )
         """)
         # Migrate existing DBs that predate the session column
         try:
             conn.execute("ALTER TABLE picks ADD COLUMN session TEXT NOT NULL DEFAULT 'morning'")
+        except Exception:
+            pass
+        # Migrate existing DBs that predate the pick_tier column (13 Aug 2026).
+        # Defaulting to 'Core' matches the Sheet's blank-is-Core rule, so rows
+        # written before tiers existed keep their original meaning.
+        try:
+            conn.execute("ALTER TABLE picks ADD COLUMN pick_tier TEXT NOT NULL DEFAULT 'Core'")
         except Exception:
             pass
         conn.commit()
@@ -44,6 +52,7 @@ def log_pick(
     market_prob: float | None = None,
     kickoff_utc: str | None = None,
     market_odds: float | None = None,
+    pick_tier: str = "Core",
 ):
     import logging as _logging
     _log = _logging.getLogger(__name__)
@@ -58,14 +67,16 @@ def log_pick(
             _log.info("Skipping duplicate pick (already in DB): %s — %s", match, pick)
             return
         conn.execute(
-            "INSERT INTO picks (date, match, league, bet_type, pick, odds, session) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (pick_date, match, league, bet_type, pick, odds, session),
+            "INSERT INTO picks (date, match, league, bet_type, pick, odds, session, pick_tier) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pick_date, match, league, bet_type, pick, odds, session, pick_tier),
         )
         conn.commit()
     try:
         log_to_excel(match, league, bet_type, pick, odds, confidence, pick_date,
                      claude_prob=claude_prob, market_prob=market_prob,
-                     kickoff_utc=kickoff_utc, market_odds=market_odds)
+                     kickoff_utc=kickoff_utc, market_odds=market_odds,
+                     pick_tier=pick_tier)
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning("Excel log failed: %s", exc)

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from excel_tracker import _picks_ws, PICKS_HEADERS
+from excel_tracker import _core_rows, _picks_ws, PICKS_HEADERS
 
 log = logging.getLogger(__name__)
 
@@ -69,8 +69,14 @@ def _settled_prob_rows(ws_getter=_picks_ws) -> list[dict] | None:
         # Sheet pre-dates the prob columns entirely — nothing to evaluate yet
         return []
 
+    # CORE ONLY. calibration_report() and edge_report() both read through here,
+    # so this single filter keeps Extended (rank 6-10) picks out of both. The
+    # calibration series has to stay comparable with everything collected since
+    # 30 Jun 2026, and Extended picks are by construction lower-conviction —
+    # folding them in would drag the measured curve without the model having
+    # changed at all.
     out = []
-    for row in rows[1:]:
+    for row in _core_rows(rows[1:], header):
         result = row[result_col].strip().upper() if len(row) > result_col else ""
         if result not in ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"):
             continue
@@ -215,8 +221,10 @@ def clv_report(ws_getter=_picks_ws) -> dict | None:
         # Sheet pre-dates the Closing Odds column — nothing to evaluate yet
         return dict(_EMPTY_CLV_REPORT)
 
+    # CORE ONLY — closing odds ARE collected for Extended picks (so a tier-vs-tier
+    # CLV comparison stays possible later), but they must never enter this report.
     scored = []
-    for row in rows[1:]:
+    for row in _core_rows(rows[1:], header):
         result = row[result_col].strip().upper() if len(row) > result_col else ""
         if result not in ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"):
             continue

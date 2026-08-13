@@ -25,7 +25,63 @@ PICKS_HEADERS = [
     "Confidence", "Result", "Profit/Loss", "Running Total P&L", "Bankroll (€)",
     "Claude Prob %", "Market Prob %",
     "League", "Kickoff UTC", "Closing Odds", "Market Odds",
+    "Pick Tier",
 ]
+
+# ── Pick tiers (13 Aug 2026) ─────────────────────────────────────────────────
+# Football picks are ranked 1..MAX_PICKS_PER_RUN by conviction. Ranks 1-5 are
+# CORE — the continuous series that has been collected since 30 Jun 2026 and
+# the only rows that may reach calibration, edge and CLV. Ranks 6-10 are
+# EXTENDED — tracked and settled identically so their real P&L is measurable,
+# but excluded from every Core aggregation.
+#
+# A BLANK 'Pick Tier' means CORE, and that is load-bearing, not a convenience:
+# every row logged before this column existed keeps its exact meaning with no
+# backfill and no rewrite, so the baseline collected since 30 Jun cannot drift.
+# Never "migrate" old rows by filling this column in.
+PICK_TIER_CORE     = "Core"
+PICK_TIER_EXTENDED = "Extended"
+
+
+def _row_tier(row: list[str], tier_idx: int | None) -> str:
+    """This row's tier. Missing column, short row or blank cell all mean Core."""
+    if tier_idx is None or len(row) <= tier_idx:
+        return PICK_TIER_CORE
+    return (row[tier_idx] or "").strip() or PICK_TIER_CORE
+
+
+def _core_rows(rows: list[list[str]], header: list[str] | None = None) -> list[list[str]]:
+    """
+    Core-tier rows only — the single filter every Core aggregation goes through.
+
+    Deliberately ONE helper rather than an inline tier check per call site: the
+    Core series feeds calibration, CLV, edge, the Summary tab, the card footer
+    and the weekly card, and a site that silently forgot to filter would fold
+    Extended P&L into the baseline without anything visibly breaking.
+
+    `header` is optional so callers holding only the data rows (the common
+    `get_all_values()[1:]` shape) can still filter; without it the tier column
+    is located at its fixed position in PICKS_HEADERS. Rows shorter than that
+    index — i.e. every row logged before 13 Aug 2026 — are Core by definition.
+
+    NOT applied to settlement (`get_pending_picks_rows`) or closing-odds
+    collection (`get_unsettled_picks_with_kickoff`): both tiers must settle and
+    both collect closing odds. Only the reporting layer is Core-only.
+    """
+    if header:
+        tier_idx = _col(header, "Pick Tier")
+    else:
+        tier_idx = PICKS_HEADERS.index("Pick Tier")
+    return [r for r in rows if _row_tier(r, tier_idx) == PICK_TIER_CORE]
+
+
+def _extended_rows(rows: list[list[str]], header: list[str] | None = None) -> list[list[str]]:
+    """Extended-tier rows only — the mirror of _core_rows, for tier reporting."""
+    if header:
+        tier_idx = _col(header, "Pick Tier")
+    else:
+        tier_idx = PICKS_HEADERS.index("Pick Tier")
+    return [r for r in rows if _row_tier(r, tier_idx) == PICK_TIER_EXTENDED]
 
 STARTING_BANKROLL = 100.0    # € tracked bankroll (used for running P&L in the sheet)
 UNIT_STAKE        = 10.0     # € per pick (1 unit)
@@ -428,6 +484,7 @@ def log_to_excel(
     market_prob: float | None = None,
     kickoff_utc: str | None = None,
     market_odds: float | None = None,
+    pick_tier: str = PICK_TIER_CORE,
 ) -> None:
     dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
     date_str = dt.strftime("%d-%b-%Y")
@@ -479,6 +536,9 @@ def log_to_excel(
         # when no market line was matched — settlement then falls back to the
         # 'Odds' estimate.
         round(float(market_odds), 2) if market_odds is not None else "",
+        # Core (ranks 1-5) or Extended (ranks 6-10). Written explicitly on every
+        # new row; blank on historical rows, which _row_tier reads as Core.
+        pick_tier or PICK_TIER_CORE,
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
@@ -612,7 +672,16 @@ def update_closing_odds(sheet_row: int, closing_odds: float) -> None:
 # ── Recalculate running totals + Summary ──────────────────────────────────────
 
 def _recalculate_running_total(ws: gspread.Worksheet) -> None:
+    # CORE ONLY. The running total and bankroll columns (I/J) are the headline
+    # baseline series, so an Extended row must never move them — it is skipped
+    # here exactly as an unsettled row is, leaving I/J blank on its line while
+    # the Core accumulation carries straight past it. This is the single most
+    # important application of the tier filter: without it, doubling pick
+    # volume on 13 Aug 2026 would have silently doubled the tracked bankroll's
+    # inputs and broken continuity with everything logged since 30 Jun.
     rows = ws.get_all_values()
+    header = rows[0] if rows else []
+    tier_idx = _col(header, "Pick Tier")
     running_units = 0.0
     bankroll      = STARTING_BANKROLL
     updates  = []
@@ -622,7 +691,8 @@ def _recalculate_running_total(ws: gspread.Worksheet) -> None:
         result  = row[6] if len(row) > 6 else ""
         pnl_str = row[7] if len(row) > 7 else ""
         row_idx = i - 1  # 0-based for Sheets API
-        if result in _SETTLED_RESULTS and pnl_str:
+        is_core = _row_tier(row, tier_idx) == PICK_TIER_CORE
+        if is_core and result in _SETTLED_RESULTS and pnl_str:
             try:
                 pnl_units      = float(pnl_str)
                 running_units += pnl_units
@@ -657,7 +727,12 @@ def _recalculate_running_total(ws: gspread.Worksheet) -> None:
 
 
 def _refresh_summary(ss: gspread.Spreadsheet) -> None:
-    rows = ss.worksheet("Picks").get_all_values()[1:]
+    # CORE ONLY — this drives the Summary tab, which in turn feeds the picks
+    # card footer win rate. The Extended tier gets its own separate block,
+    # appended below by _append_tier_breakdown(), never mixed into these totals.
+    all_picks_rows = ss.worksheet("Picks").get_all_values()
+    picks_header   = all_picks_rows[0] if all_picks_rows else []
+    rows = _core_rows(all_picks_rows[1:], picks_header)
 
     def _pnl(row: list) -> float:
         try:
@@ -859,11 +934,77 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         [f"Win rate shown only at {_MIN_CELL_SAMPLE}+ decided picks "
          f"(wins + losses); smaller cells read 'insufficient data'", "", "", "", ""],
         ["League", "Bet Type", "Win Rate %", "Total P&L", "Picks"],
-    ] + xl_rows
+    ] + xl_rows + [
+        ["", ""],
+        ["PICK TIER BREAKDOWN", "", "", "", "", ""],
+        ["Core = ranks 1-5 (the baseline series, and the ONLY tier feeding "
+         "calibration / edge / CLV and every figure above). "
+         "Extended = ranks 6-10, tracked since 13 Aug 2026.", "", "", "", "", ""],
+        ["Tier", "Wins", "Losses", "Win Rate %", "Total P&L", "Picks"],
+    ] + _tier_breakdown_rows(all_picks_rows)
 
     ws_sum = ss.worksheet("Summary")
     ws_sum.clear()
     ws_sum.update("A1", data, value_input_option="RAW")
+
+
+def _tier_stats(rows: list[list[str]]) -> dict:
+    """Wins/losses/win rate/P&L/pick count for a set of Picks rows."""
+    def _pnl(row: list) -> float:
+        try:
+            return float(row[7]) if len(row) > 7 and row[7] else 0.0
+        except ValueError:
+            return 0.0
+
+    settled = [r for r in rows if len(r) > 6 and r[6] in _SETTLED_RESULTS]
+    wins    = [r for r in settled if r[6] == "WIN"]
+    losses  = [r for r in settled if r[6] == "LOSS"]
+    decided = len(wins) + len(losses)
+    return {
+        "picks":    len(rows),
+        "settled":  len(settled),
+        "wins":     len(wins),
+        "losses":   len(losses),
+        "win_rate": round(len(wins) / decided * 100, 1) if decided else 0.0,
+        "pnl":      round(sum(_pnl(r) for r in settled), 2),
+        "pnl_eur":  round(sum(_pnl(r) for r in settled) * UNIT_STAKE, 2),
+    }
+
+
+def _tier_breakdown_rows(all_rows: list[list[str]]) -> list[list]:
+    """Summary-tab rows comparing Core vs Extended P&L and win rate."""
+    header = all_rows[0] if all_rows else []
+    body   = all_rows[1:]
+    out = []
+    for label, subset in (
+        (PICK_TIER_CORE,     _core_rows(body, header)),
+        (PICK_TIER_EXTENDED, _extended_rows(body, header)),
+    ):
+        s = _tier_stats(subset)
+        out.append([label, s["wins"], s["losses"], f"{s['win_rate']:.1f}%",
+                    s["pnl"], s["picks"]])
+    return out
+
+
+def get_tier_breakdown() -> dict:
+    """
+    Core vs Extended performance, for the tier-comparison report.
+
+    Reads the Picks tab directly rather than reusing any Core-filtered helper —
+    this is the one reporting path that is deliberately allowed to see both
+    tiers, because comparing them is its entire purpose.
+    """
+    try:
+        rows = _picks_ws().get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return {}
+
+    header, body = (rows[0] if rows else []), rows[1:]
+    return {
+        PICK_TIER_CORE:     _tier_stats(_core_rows(body, header)),
+        PICK_TIER_EXTENDED: _tier_stats(_extended_rows(body, header)),
+    }
 
 
 def finalize_workbook(wb=None) -> None:
@@ -953,9 +1094,12 @@ def get_picks_for_date(dt: date) -> list[dict]:
         log.error("Sheets read failed: %s", exc)
         return []
 
+    # CORE ONLY — drives the results card and the per-pick result notifications.
+    # Extended results are reported through the tier breakdown instead, so the
+    # daily result posts keep showing the same 5-pick book they always have.
     header = rows[0] if rows else []
     result = []
-    for row in rows[1:]:
+    for row in _core_rows(rows[1:], header):
         if not row or not row[0]:
             continue
         try:
@@ -985,9 +1129,11 @@ def get_picks_for_date(dt: date) -> list[dict]:
 # ── Weekly data ───────────────────────────────────────────────────────────────
 
 def get_weekly_data() -> dict:
+    # CORE ONLY — feeds the weekly summary card and `update_result.py`'s recap.
     try:
         ws = _picks_ws()
-        rows = ws.get_all_values()[1:]
+        all_rows = ws.get_all_values()
+        rows = _core_rows(all_rows[1:], all_rows[0] if all_rows else [])
     except Exception as exc:
         log.error("Sheets read failed: %s", exc)
         return {}
@@ -1057,10 +1203,14 @@ def get_weekly_data() -> dict:
 
 
 def get_bet_type_breakdown() -> list[dict]:
-    """Return settled picks grouped by bet type, sorted by win rate descending."""
+    """
+    Settled CORE picks grouped by bet type, sorted by win rate descending.
+    Core-only: this feeds the weekly card, which reports the baseline book.
+    """
     try:
         ws = _picks_ws()
-        rows = ws.get_all_values()[1:]
+        all_rows = ws.get_all_values()
+        rows = _core_rows(all_rows[1:], all_rows[0] if all_rows else [])
     except Exception as exc:
         log.error("Sheets read failed: %s", exc)
         return []

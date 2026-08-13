@@ -33,6 +33,23 @@ football `results-cards` channel.
 `TELEGRAM_TENNIS_CHANNEL_ID` was removed on 10 Jul 2026; do not reintroduce
 it or add any Telegram send to the tennis pipeline.
 
+## Pick Tiers — Football Only (13 Aug 2026)
+
+Football returns up to 10 ranked picks per run (`MAX_PICKS_PER_RUN = 10`), split by
+`CORE_PICKS_PER_RUN = 5`: ranks 1-5 are **Core**, ranks 6-10 **Extended**. Both tiers
+are logged to the Picks tab, settled by the same `auto_results.py` path, and posted
+to their league's Discord channel (Extended embeds are labelled `· EXTENDED #n`).
+Only Core reaches the picks card, the Telegram post, the running total/bankroll
+columns, the Summary totals, and the calibration/edge/CLV reports.
+
+`excel_tracker._core_rows()` is the SINGLE filter enforcing that — route any new
+Core aggregation through it rather than writing an inline tier check. A **blank**
+`Pick Tier` cell means Core, which is what keeps every row logged before this date
+valid without a backfill: never fill that column in on historical rows.
+
+Tennis is untouched by all of this — no tiers, no ranking, `tennis_*` modules
+unchanged. Details in PROJECT_SUMMARY.md, "Ranked picks and the Core/Extended split".
+
 ## Working Rules
 
 - Load `.env` via `from env_loader import load_env; load_env()` — never call

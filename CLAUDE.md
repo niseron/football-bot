@@ -97,10 +97,17 @@ dedupes `(match, bet_type)` only *within one batch*, and the sheet writers'
 original guard was date-scoped — so the same bet was logged twice and one match
 settled both rows, booking P&L twice.
 
-`excel_tracker.log_to_excel` and `opus_tracker.log_opus_pick` now also skip when
-an **unsettled** row for the same `(match, bet_type)` exists on **any** date.
-Keep that key at `(match, bet_type)` — the narrower `(match, bet_type, pick)`
-lets opposite sides of one market through, which has already happened.
+`excel_tracker.log_to_excel` and `opus_tracker.log_opus_pick` skip when **any
+unsettled row exists for that fixture**, regardless of bet type — one fixture
+carries at most one open bet. Do not narrow this key: `(match, bet_type, pick)`
+let opposite sides of one market through (Canada vs Morocco BTTS Yes then No,
+3-4 Jul 2026) and `(match, bet_type)` still allowed two bet types on one
+fixture, which nothing downstream treats as correlated.
+
+A third tier value, `PICK_TIER_DUPLICATE = "Duplicate"`, marks rows excluded by
+the retroactive correction. Duplicate rows are neither Core nor Extended, so
+they drop out of every metric automatically — do not add them to `_core_rows`
+or `_extended_rows`, and do not "clean up" the tag: it is the audit trail.
 
 This is a **logging-level** guard on purpose: cards, Telegram and Discord all
 render the unfiltered `picks` list, so a repeated fixture still shows on the

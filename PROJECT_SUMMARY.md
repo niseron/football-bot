@@ -605,12 +605,22 @@ Cause, confirmed in code:
 `fetch_upcoming_matches` pulls today **and** tomorrow, so a fixture kicking off tomorrow is offered to
 Claude on both days. Nothing compared the new pick against already-logged, still-unsettled rows.
 
-**Fix:** `log_to_excel` and `opus_tracker.log_opus_pick` now also skip when an **unsettled** row for the
-same `(match, bet_type)` exists on **any** date. Deliberately keyed on `(match, bet_type)` and not the
-full `(match, bet_type, pick)`: on 3-4 Jul 2026 the same Canada vs Morocco BTTS market was logged
-`Yes` one day and `No` the next — opposite sides of one market, which the narrower key would have let
-through. Only unsettled rows block; once a row has a Result the fixture is over, so a later row on it
-is a data problem worth seeing rather than hiding.
+**Fix:** `log_to_excel` and `opus_tracker.log_opus_pick` now skip when **any unsettled row exists for
+that fixture**, regardless of bet type. **One fixture carries at most one open bet.**
+
+The key was widened twice, because each narrower version leaked:
+
+| Key | What it still let through |
+|---|---|
+| `(date, match, bet_type, pick)` — original | everything below; date-scoped, so any next-day repeat |
+| `(match, bet_type, pick)` | Canada vs Morocco BTTS logged `Yes` on 3 Jul and `No` on 4 Jul — opposite sides of one market |
+| `(match, bet_type)` | two different bet types on one fixture — two stakes riding on a single result |
+| **`(match)` — current** | — |
+
+The last case matters beyond bookkeeping: nothing downstream treats two bets on one fixture as
+correlated, so the sheet's P&L and calibration both read them as independent samples when they are
+not. Only unsettled rows block; once a row has a Result the fixture is over, so a later row on it is a
+data problem worth seeing rather than hiding.
 
 **This is a logging-level fix only.** Picks cards, the Telegram post and the Discord embeds all render
 the unfiltered `picks` list, so a repeated fixture still appears on the card exactly as before — only
@@ -632,14 +642,89 @@ Bohemian logged `Match Winner` on 12 Aug and `Asian Handicap` on 13 Aug). Those 
 bets rather than a duplicate, but they do concentrate two stakes on one result — the `(match)` row
 above quantifies that at a further 9 groups / 16 rows / +1.22u beyond the fix's key.
 
-**Existing rows were left untouched** — the numbers above are an audit, not a correction. Nothing has
-been deleted or re-settled.
+#### Retroactive correction (13 Aug 2026) — `Pick Tier = Duplicate`
+
+History was then corrected to match the go-forward rule: for every fixture logged on more than one
+date, the **first** pick keeps its tier and every later one is tagged `Pick Tier = Duplicate`.
+
+**Nothing was deleted.** A `Duplicate` row is neither Core nor Extended, so `_core_rows` and
+`_extended_rows` both drop it and it falls out of every metric — running total, bankroll, Summary,
+calibration, edge, CLV, weekly card — with no new filter anywhere. The bet, its odds and its settled
+result stay on the sheet, and reversing an exclusion is editing one cell back to `Core`.
+
+| | Before | After |
+|---|---|---|
+| Rows on the Picks tab | 223 | **223** (none deleted) |
+| Core picks / settled | 217 / 207 | **185 / 178** |
+| Core win rate | 67.0% | **65.7%** |
+| **Core settled P&L** | **+31.57u** | **+26.15u** |
+| calibration sample | 98 | **81** |
+| edge sample | 34 | **26** |
+| CLV sample | 27 | **20** |
+
+The 32 excluded rows went **21W / 7L, 75.0%, +5.42u** — a materially better record than the Core book
+they were inflating (65.7%). That is the shape you would expect from double-counting: a fixture the
+model liked enough to pick twice is one it was more often right about, so the duplicates skewed the
+headline upward rather than averaging out. The Summary tab now carries a `Duplicate` row in its Pick
+Tier Breakdown so the exclusion stays visible rather than silently missing.
+
+Three of the 32 were still PENDING when tagged (Shelbourne vs Ajax, Dinamo Minsk vs Braga, Midtjylland
+vs Bohemian, all 13 Aug). `get_pending_picks_rows` has no tier filter, so they will still **settle**
+normally tonight and carry a real Result and P&L — they simply will not enter Core. That is deliberate:
+settle for the record, exclude from the metrics.
 
 > Separately noted on 13 Aug 2026: the Picks tab's `A1` header cell had been blanked to `' '` instead
 > of `Date`. Harmless — no code indexes that column by name (every reader uses positional index 0) and
 > the row data was intact — but restored to `Date` so the header matches `PICKS_HEADERS` again. Cause
 > not established; `init_excel()` only appends missing *trailing* headers, so it would not have
 > repaired this on its own.
+
+### Canada vs Morocco: the bot bet both sides of one market (3-4 Jul 2026)
+
+Surfaced by the duplicate audit and worth its own entry, because the duplication is the *symptom* and
+the calibration signal underneath it is the finding.
+
+**What was logged — three rows on one fixture, not two:**
+
+| Date | Bet type | Pick | Odds | Claude Prob | Result | P&L |
+|---|---|---|---|---|---|---|
+| 03 Jul | Both Teams to Score | **Yes** | 2.10 | **55%** | LOSS | −1.00u |
+| 04 Jul | Match Winner | Morocco Win | 2.30 | 52% | WIN | +1.30u |
+| 04 Jul | Both Teams to Score | **No** | 1.85 | **55%** | WIN | +0.85u |
+
+**The mechanism.** Every daily run is independent. `analyse_with_claude` receives only the fixture
+payload — never the picks already logged — and nothing in `SYSTEM_PROMPT` or the enriched context
+mentions existing positions. The 48-hour window put this fixture in front of the model on both days,
+and the sheet guard was date-scoped, so the second day's contradictory pick was written as if it were
+a fresh, independent bet. No component was in a position to notice.
+
+**The part that isn't just a plumbing bug.** The model assigned **55% to `Yes` on one day and 55% to
+`No` on the next**, at the same `Medium` confidence. Those are mutually exclusive outcomes of one
+binary market: the two stated probabilities sum to 110%. This was not a considered update on new
+information — the form and H2H context were unchanged between runs, and the stated probability did not
+move at all. It is the same fixture being judged twice with no memory of the first judgement, and the
+number attached to whichever side came out.
+
+**What it cost.** Holding both sides at 2.10 and 1.85 is a 101.7% book: the position could only return
++0.10u (if BTTS hit) or −0.15u (if it didn't). It didn't, so the pair returned **−0.15u** — a
+directional bet accidentally converted into a flat position that pays the vig either way. Small in
+isolation; the point is that no part of the system could distinguish it from two genuine edges.
+
+**Is it prevented now?** At the logging layer, yes — the match-level guard means the 4 Jul run would
+find an unsettled Canada vs Morocco row and skip *both* of that day's picks before they reached the
+sheet. Two residual gaps, stated plainly:
+
+1. **The guard is at logging level by design, so the model still makes the contradictory pick**, and it
+   still reaches the picks card, Telegram and Discord. A reader of the card on 4 Jul would have seen
+   `BTTS No` on a fixture the previous day's card called `BTTS Yes`, with nothing marking the reversal.
+2. **Nothing feeds prior picks back into the prompt**, so the model has no way to be consistent across
+   runs even in principle. Fixing *that* means putting open positions into the payload — a real change
+   to the analysis contract, not a logging guard, and it is not done.
+
+A sweep for the same pattern across all 223 rows found only **two** fixtures with multiple picks on one
+market: this one, and Argentina vs Algeria (`Argentina -1.5` and `Argentina -2.5` — the same side at
+two lines, correlated rather than contradictory). So the contradiction is rare, not systemic — but it
+was undetectable before this audit, which is the reason to keep the `Duplicate` tag visible.
 
 ### Ranked picks and the Core/Extended split (13 Aug 2026)
 

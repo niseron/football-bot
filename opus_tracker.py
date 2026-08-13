@@ -127,9 +127,9 @@ def log_opus_pick(
         return
 
     # Same two guards as excel_tracker.log_to_excel — see the long comment there.
-    # (a) same-day exact repeat; (b) cross-day repeat of an UNSETTLED bet on the
-    # same (match, bet_type). The shadow analyses the same 48-hour window as
-    # production, so it has the identical exposure: a fixture kicking off
+    # (a) same-day exact repeat; (b) any UNSETTLED pick already logged for this
+    # MATCH, regardless of bet type. The shadow analyses the same 48-hour window
+    # as production, so it has the identical exposure: a fixture kicking off
     # tomorrow appears in today's run and tomorrow's, and without (b) one match
     # would settle two shadow rows and book its P&L twice.
     header = rows[0] if rows else []
@@ -149,10 +149,11 @@ def log_opus_pick(
             log.info("opus_tracker: skipping duplicate '%s — %s'", match, pick)
             return
         settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
-        if not settled and len(row) > 2 and row[1] == match and row[2] == bet_type:
+        if not settled and len(row) > 1 and row[1] == match:
             log.info(
-                "opus_tracker: skipping '%s — %s' — an UNSETTLED %s pick on this "
-                "match is already logged (%s)", match, pick, bet_type, row[0],
+                "opus_tracker: skipping '%s — %s [%s]' — this fixture already has "
+                "an UNSETTLED pick logged (%s: '%s')",
+                match, pick, bet_type, row[0], row[3] if len(row) > 3 else "?",
             )
             return
 

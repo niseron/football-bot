@@ -42,6 +42,19 @@ PICKS_HEADERS = [
 PICK_TIER_CORE     = "Core"
 PICK_TIER_EXTENDED = "Extended"
 
+# A third tier, added 13 Aug 2026 for the retroactive duplicate correction.
+# Rows tagged Duplicate are neither Core nor Extended, so _core_rows and
+# _extended_rows both drop them and they fall out of EVERY metric — running
+# total, bankroll, Summary, calibration, edge, CLV, the weekly card — without a
+# single new filter anywhere.
+#
+# Chosen over deleting the rows because it is reversible and auditable: the bet,
+# its odds and its settled result stay on the sheet, and undoing an exclusion is
+# editing one cell back to 'Core'. Applied to fixtures that were logged on more
+# than one date before the match-level guard existed; the FIRST pick on a
+# fixture keeps its tier, every later one is tagged.
+PICK_TIER_DUPLICATE = "Duplicate"
+
 
 def _row_tier(row: list[str], tier_idx: int | None) -> str:
     """This row's tier. Missing column, short row or blank cell all mean Core."""
@@ -522,11 +535,17 @@ def log_to_excel(
     #     calibration. Measured on 13 Aug 2026: 16 duplicated groups across 223
     #     rows, +4.20u double-counted, 13.3% of reported Core P&L.
     #
-    # Keyed on (match, bet_type) rather than the full (match, bet_type, pick):
-    # on 3-4 Jul 2026 the same BTTS market was logged 'Yes' one day and 'No' the
-    # next — opposite sides of one market, which the narrower key would let
-    # through. Only UNSETTLED rows block: once a row has a Result the fixture is
-    # over, so a later row on it is a data problem to see, not one to hide.
+    # Keyed on MATCH ALONE (widened from (match, bet_type) on 13 Aug 2026).
+    # One fixture gets at most one unsettled bet, full stop. The narrower keys
+    # both leaked: (match, bet_type, pick) let the 3-4 Jul Canada vs Morocco
+    # BTTS market through as 'Yes' one day and 'No' the next — opposite sides of
+    # one market — and (match, bet_type) still allowed two different bet types
+    # on one fixture, which is two stakes riding on a single result. Nothing
+    # downstream treats those as correlated, so the sheet's P&L and calibration
+    # both read them as independent samples when they are not.
+    #
+    # Only UNSETTLED rows block: once a row has a Result the fixture is over, so
+    # a later row on it is a data problem to see, not one to hide.
     result_idx = _col(header, "Result")
     result_idx = 6 if result_idx is None else result_idx
     for row in rows[1:]:
@@ -546,17 +565,13 @@ def log_to_excel(
             log.info("Sheets: skipping duplicate '%s — %s'", match, pick)
             return
         settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
-        if (
-            not settled
-            and len(row) > 2
-            and row[1] == match
-            and row[2] == bet_type
-        ):
+        if not settled and len(row) > 1 and row[1] == match:
             log.info(
-                "Sheets: skipping '%s — %s' — an UNSETTLED %s pick on this match is "
-                "already logged (%s, '%s'). Same fixture inside the 48h window on a "
-                "second day; logging it again would settle and book P&L twice.",
-                match, pick, bet_type, row[0], row[3] if len(row) > 3 else "?",
+                "Sheets: skipping '%s — %s [%s]' — this fixture already has an "
+                "UNSETTLED pick logged (%s: '%s' [%s]). One fixture carries at most "
+                "one open bet; a second would settle off the same result.",
+                match, pick, bet_type, row[0],
+                row[3] if len(row) > 3 else "?", row[2] if len(row) > 2 else "?",
             )
             return
 
@@ -1011,9 +1026,14 @@ def _tier_breakdown_rows(all_rows: list[list[str]]) -> list[list]:
     header = all_rows[0] if all_rows else []
     body   = all_rows[1:]
     out = []
+    tier_idx = _col(header, "Pick Tier")
     for label, subset in (
         (PICK_TIER_CORE,     _core_rows(body, header)),
         (PICK_TIER_EXTENDED, _extended_rows(body, header)),
+        # Shown so the retroactive duplicate correction is visible in the sheet
+        # rather than silently missing from the totals above.
+        (PICK_TIER_DUPLICATE,
+         [r for r in body if _row_tier(r, tier_idx) == PICK_TIER_DUPLICATE]),
     ):
         s = _tier_stats(subset)
         out.append([label, s["wins"], s["losses"], f"{s['win_rate']:.1f}%",
@@ -1036,9 +1056,15 @@ def get_tier_breakdown() -> dict:
         return {}
 
     header, body = (rows[0] if rows else []), rows[1:]
+    tier_idx = _col(header, "Pick Tier")
     return {
         PICK_TIER_CORE:     _tier_stats(_core_rows(body, header)),
         PICK_TIER_EXTENDED: _tier_stats(_extended_rows(body, header)),
+        # Reported alongside the live tiers so the retroactive duplicate
+        # correction stays visible instead of just missing from the totals.
+        PICK_TIER_DUPLICATE: _tier_stats(
+            [r for r in body if _row_tier(r, tier_idx) == PICK_TIER_DUPLICATE]
+        ),
     }
 
 

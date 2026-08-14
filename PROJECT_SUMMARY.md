@@ -507,14 +507,69 @@ polling 40/day + tennis enrichment 12/day were the difference.)
 > it is now a calendar artefact rather than a signal. Replacing it with a burn-rate projection
 > (warn when projected month-end usage exceeds the limit) is the real fix and is **not yet done**.
 
-### Form & H2H enrichment (added)
-- Before calling Claude, `enrich_with_context()` fetches from RapidAPI:
-  - Last 5 matches for the home team (W/D/L form string + score details + home/away venue)
-  - Last 5 matches for the away team
-  - Last 5 head-to-head meetings between the two teams
-- Data is injected into the JSON payload sent to Claude so it can factor in recent form
-- Team results are cached within a run so the same team across multiple fixtures only hits the API once
-- All enrichment calls are individually try/except'd — any failure is logged and skipped without affecting pick generation
+### Form & H2H enrichment (added 29 Jun 2026 — **dead on arrival, repaired 14 Aug 2026**)
+
+Before calling Claude, `enrich_with_context()` adds per-fixture `home_form` /
+`away_form` (W/D/L, oldest → newest), `home_recent` / `away_recent` (scorelines
+with H/A venue), `h2h` (recent meetings with dates and scores) and `h2h_record`
+(the all-time tally, labelled by team name). Data is injected into the JSON
+payload so Claude can weigh recent form.
+
+**It produced nothing at all for its first 46 days.** Both endpoints it called
+answered `404 Endpoint does not exist` — `football-get-team-matches` has no
+equivalent on this host under any name, and the H2H route is really
+`football-get-head-to-head`. The failures were logged at `log.debug` while
+`basicConfig` sets `INFO`, so nothing was ever emitted, and the summary line
+printed a healthy-looking `home=N/A away=N/A h2h=0` at INFO. Confirmed by three
+independent lines: the strings were introduced in `4077b69` and never edited;
+every recorded run 5-14 Aug billed 37-100 input tokens per fixture where
+enrichment costs ~505; and of 64 archived Discord pick embeds none cite form or
+H2H while three (14, 15, 19 Jul) explicitly say the data was unavailable. So
+**every football pick from 29 Jun to 14 Aug 2026 was made on team names alone** —
+which is what the calibration/edge/CLV series over that period actually measures.
+
+How the two feeds work now:
+
+| | Source | Cost |
+|---|---|---|
+| Form | `football-get-matches-by-date` walked backwards from yesterday, capped at `FORM_LOOKBACK_DAYS = 35`, stopping early once every team has `FORM_MATCHES = 5` | 1 call per **date**, shared by every team in the pool — 35 on a cold start, **1/day** thereafter |
+| H2H | `football-get-head-to-head?eventid=` per fixture | 1 call per fixture, cached by event id; the 48-hour window offers each fixture twice, so only its first appearance pays |
+
+Projected RapidAPI football cost: **40-73 calls on a cold-start day** (35 + pool
+size) and **3-20/day in steady state**. A cold start is a *deploy*, not a
+calendar day — the caches live for the process lifetime and Railway redeploys on
+every push to `main`. Worst case (a redeploy every day plus 38-fixture pools) is
+~2,200/month, **11% of the 20,000 tier**; realistic steady state is under 3%.
+Measured baseline before this change was ~47 calls/day.
+
+- **The H2H payload sits under `response.lineup`, not `response.matches`** like
+  every other endpoint here, and its rows carry their own shape: names under
+  `home.name` (not `longName`) and the score as one `status.scoreStr` string.
+  `_summarize_h2h_match` exists for exactly that reason — do not point
+  `_summarize_match` at these rows. The list also contains future fixtures, so
+  it is filtered on `status.finished` first.
+- `lineup.summary` is `[home wins, draws, away wins]` **oriented on the queried
+  fixture** — verified against Cercle Brugge vs St.Truiden, where `[14, 6, 7]`
+  reproduced the home side's W14/D6/L7 across all 27 played meetings. It is
+  emitted with team names spelled out so the orientation cannot be misread.
+- `_day_feed_cache` is permanent (past results never change) and is deliberately
+  **not** `auto_results._matches_cache`, which wraps the same endpoint behind a
+  30-minute TTL because it settles in-progress fixtures. Same endpoint, opposite
+  lifetime.
+- A form string may hold fewer than 5 results, or none — near a season start a
+  club genuinely has not played five matches. Measured on the 14 Aug pool: 35
+  days gave 5 matches for 6 of 16 teams and 3+ for 11 of 16, and widening to 42
+  recovered one more, so the limit is the calendar rather than the window.
+  SYSTEM_PROMPT tells Claude to read the field as "up to 5" and to lower
+  conviction rather than invent form it was not given.
+- **Failures are logged at WARNING, never below**, a fixture that retrieved
+  nothing logs `Context EMPTY` instead of a success line, and a run where
+  nothing at all was retrieved logs at ERROR. This is the guard against a repeat:
+  the original bug was invisible precisely because its only log statement was
+  the one that made it look fine.
+- The three `time.sleep(1)` calls per fixture were removed with the rewrite —
+  they paced requests that were failing anyway, costing ~23s per run for no
+  data. Verified safe: 10 back-to-back calls return 200 with no 429.
 
 ### Asian Handicap half results (added)
 - Quarter-line handicaps (±0.25, ±0.75, ±1.25, ±1.75 …) are detected automatically
@@ -1181,8 +1236,8 @@ Completion estimates per area — update these percentages whenever a related ch
 | Area | Done | Status |
 |---|---|---|
 | Bot core | 98% | Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026) |
-| Data quality | 90% | Picks-per-run hard-capped at `MAX_PICKS_PER_RUN` in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + form/H2H + closing odds (CLV) live since 4 Jul 2026; knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
-| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change |
+| Data quality | 90% | Picks-per-run hard-capped at `MAX_PICKS_PER_RUN` in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + closing odds (CLV) live since 4 Jul 2026. **Form/H2H enrichment was NOT live despite this line previously claiming it was** — both its endpoints 404'd from 29 Jun to 14 Aug 2026 and the failures were logged at DEBUG under an INFO root logger, so every football pick in that window was made on team names alone; repaired 14 Aug 2026 onto `football-get-matches-by-date` (form) + `football-get-head-to-head` (H2H) with failures now at WARNING/ERROR. Knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
+| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change. **Regime break at 14 Aug 2026:** every pick logged before that date was made with no form and no H2H (see "Form & H2H enrichment"), so the pre-14-Aug rows measure the model reasoning from team names alone. Treat the series as two samples rather than one when the verdict is read, and do not attribute a change in calibration after this date to model drift |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |

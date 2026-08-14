@@ -540,36 +540,166 @@ def _api_headers() -> dict:
     return {"x-rapidapi-host": RAPIDAPI_HOST, "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY", "")}
 
 
-def _fetch_team_recent(team_id: int, n: int = 5) -> list[dict]:
-    """Return last n finished matches for a team. Empty list on any error."""
+# Matches per team fed to Claude as recent form, and how far back the by-date
+# feed is walked to find them.
+#
+# 35 days is a CAP, not a fixed cost: the walk stops as soon as every team in
+# the pool has FORM_MATCHES finished matches. Mid-season a club plays 5 matches
+# in ~21 days. The cap matters at the edges of a season — measured on the
+# 14 Aug 2026 pool, 35 days covered 5 matches for only 6 of 16 teams and 3+ for
+# 11 of 16, because the 2026-27 season had just started and Jun-Jul was the
+# World Cup break. Widening it to 42 recovered one more team, so the limit there
+# is the calendar, not the window. A short form string is therefore normal and
+# correct near a season start; SYSTEM_PROMPT tells Claude to read it as "up to 5".
+FORM_LOOKBACK_DAYS = 35
+FORM_MATCHES = 5
+
+# 'YYYYMMDD' -> that date's matches, for STRICTLY PAST dates only. A past date's
+# results never change, so entries live for the process lifetime; main.py runs as
+# a long-lived scheduler, which is what makes the trailing window cost one sweep
+# per deploy and exactly one new call on each following day.
+#
+# Deliberately NOT auto_results._matches_cache, which wraps the same endpoint:
+# that one carries a 30-minute TTL because it settles in-progress fixtures.
+# Same endpoint, opposite lifetime — sharing it would either re-fetch immutable
+# history every half hour or make settlement read stale scores.
+_day_feed_cache: dict[str, list[dict]] = {}
+
+# match_id -> parsed H2H payload. fetch_upcoming_matches covers 48 hours, so a
+# fixture is offered on two consecutive days; caching by event id means only its
+# first appearance costs a call.
+_h2h_cache: dict[int, dict] = {}
+
+
+def _fetch_day_matches(day: date) -> list[dict]:
+    """
+    Every match on one PAST date, cached for the process lifetime.
+    Empty list on any error — and a failure is NOT cached, so the next run
+    retries it rather than pinning a hole in the form window.
+    """
+    key = day.strftime("%Y%m%d")
+    if key in _day_feed_cache:
+        return _day_feed_cache[key]
     try:
         resp = requests.get(
-            f"https://{RAPIDAPI_HOST}/football-get-team-matches",
+            f"https://{RAPIDAPI_HOST}/football-get-matches-by-date",
             headers=_api_headers(),
-            params={"teamId": team_id, "matchType": "previous", "limit": n},
+            params={"date": key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        matches = resp.json().get("response", {}).get("matches", [])
+    except Exception as exc:
+        log.warning("form: by-date fetch failed for %s — form will be thinner: %s", key, exc)
+        return []
+    _day_feed_cache[key] = matches
+    return matches
+
+
+def _build_form_index(team_ids: set[int], today: date) -> dict[int, list[dict]]:
+    """
+    Recent finished matches per team, NEWEST FIRST, by walking the by-date feed
+    backwards from yesterday.
+
+    One call per DATE serves every team in the pool, because the feed is global.
+    That is the whole reason this is affordable: the per-team endpoint this
+    replaced (football-get-team-matches) would have cost one call per team, and
+    it never existed on this host anyway — it answered 404 from the day the
+    enrichment shipped (29 Jun 2026) until it was replaced on 14 Aug 2026.
+    """
+    found: dict[int, list[dict]] = {tid: [] for tid in team_ids}
+    days_used = 0
+    for back in range(1, FORM_LOOKBACK_DAYS + 1):
+        if all(len(v) >= FORM_MATCHES for v in found.values()):
+            break
+        days_used = back
+        for m in _fetch_day_matches(today - timedelta(days=back)):
+            if not (m.get("status") or {}).get("finished"):
+                continue
+            for side in ("home", "away"):
+                tid = (m.get(side) or {}).get("id")
+                if tid in found and len(found[tid]) < FORM_MATCHES:
+                    found[tid].append(m)
+
+    covered = sum(1 for v in found.values() if len(v) >= FORM_MATCHES)
+    empty = [tid for tid, v in found.items() if not v]
+    log.info(
+        "form: walked %d day(s) for %d team(s) — %d with a full %d-match history, %d with none",
+        days_used, len(team_ids), covered, FORM_MATCHES, len(empty),
+    )
+    if empty:
+        log.warning("form: no recent matches found for team id(s): %s", sorted(empty))
+    return found
+
+
+def _summarize_h2h_match(match: dict) -> dict:
+    """
+    One head-to-head row.
+
+    The H2H payload has its OWN shape, unlike every other endpoint here: team
+    names live under home.name (not longName) and the score is a single
+    status.scoreStr string ("2 - 1") rather than per-side score fields. So
+    _summarize_match does not apply to these rows.
+    """
+    try:
+        status = match.get("status") or {}
+        return {
+            "date":  (status.get("utcTime") or "")[:10],
+            "match": f"{match['home']['name']} vs {match['away']['name']}",
+            "score": (status.get("scoreStr") or "").replace(" ", ""),
+        }
+    except Exception:
+        return {}
+
+
+def _fetch_h2h(match_id: int, home_name: str, away_name: str) -> dict:
+    """
+    Head-to-head for one fixture, keyed on the fixture's own event id.
+
+    Two traps, both live: the endpoint is football-get-head-to-head (NOT
+    football-get-h2h, which 404s), and its payload sits under
+    response.lineup — not response.matches like the rest of this API.
+
+    Returns {} when a pairing has no history; a first-ever meeting answers 200
+    with an empty lineup, which is a normal outcome and not a failure.
+    """
+    if match_id in _h2h_cache:
+        return _h2h_cache[match_id]
+    try:
+        resp = requests.get(
+            f"https://{RAPIDAPI_HOST}/football-get-head-to-head",
+            headers=_api_headers(),
+            params={"eventid": match_id},
             timeout=10,
         )
         resp.raise_for_status()
-        return resp.json().get("response", {}).get("matches", [])[:n]
+        lineup = (resp.json().get("response") or {}).get("lineup") or {}
     except Exception as exc:
-        log.debug("fetch_team_recent(%s) skipped: %s", team_id, exc)
-        return []
+        log.warning("h2h: fetch failed for %s vs %s (match %s): %s",
+                    home_name, away_name, match_id, exc)
+        return {}
 
+    # The list carries future fixtures too (a 2027 league meeting showed up in
+    # testing), so filter to played matches before taking the most recent five.
+    finished = [m for m in lineup.get("matches", []) if (m.get("status") or {}).get("finished")]
+    finished.sort(key=lambda m: (m.get("status") or {}).get("utcTime") or "", reverse=True)
+    parsed: dict = {"meetings": [_summarize_h2h_match(m) for m in finished[:FORM_MATCHES]]}
 
-def _fetch_h2h(home_id: int, away_id: int, n: int = 5) -> list[dict]:
-    """Return last n H2H meetings between two teams. Empty list on any error."""
-    try:
-        resp = requests.get(
-            f"https://{RAPIDAPI_HOST}/football-get-h2h",
-            headers=_api_headers(),
-            params={"firstTeamId": home_id, "secondTeamId": away_id, "limit": n},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json().get("response", {}).get("matches", [])[:n]
-    except Exception as exc:
-        log.debug("fetch_h2h(%s, %s) skipped: %s", home_id, away_id, exc)
-        return []
+    # summary is [home wins, draws, away wins] oriented on the QUERIED fixture.
+    # Verified 14 Aug 2026 against Cercle Brugge vs St.Truiden, where [14, 6, 7]
+    # reproduced Cercle's (the home side's) W14 D6 L7 across all 27 played
+    # meetings exactly. Emitted with the team names spelled out so the
+    # orientation cannot be misread downstream.
+    summary = lineup.get("summary")
+    if isinstance(summary, list) and len(summary) == 3:
+        parsed["record"] = {
+            f"{home_name} wins": summary[0],
+            "draws": summary[1],
+            f"{away_name} wins": summary[2],
+        }
+
+    _h2h_cache[match_id] = parsed
+    return parsed
 
 
 def _result_for_team(match: dict, team_id: int) -> str:
@@ -608,46 +738,86 @@ def _summarize_match(match: dict, team_id: int | None = None) -> dict:
 def enrich_with_context(fixtures_by_league: dict[str, list[dict]]) -> None:
     """
     Mutates each fixture in-place, adding recent form and H2H context.
-    All network calls are individually try/except'd — failure leaves the
-    fixture unchanged and the rest of the job continues normally.
+
+    Form is built once for the whole pool by walking the by-date feed backwards
+    (one call per date, shared by every team); H2H is one call per fixture.
+    Every network call is individually guarded, so a failure thins that fixture
+    and the run continues — but it is reported at WARNING, never swallowed.
+
+    That last point is the reason this function was rewritten on 14 Aug 2026.
+    Both endpoints it used to call had answered 404 since the enrichment shipped
+    on 29 Jun, and the failures were logged at DEBUG while basicConfig sets
+    INFO — so nothing was ever emitted, and the summary line below printed
+    "home=N/A away=N/A h2h=0" in a healthy-looking INFO line for 46 days. Never
+    log an enrichment failure below WARNING, and never let the summary line
+    render a fixture that retrieved nothing as if it had succeeded.
     """
-    team_cache: dict[int, list[dict]] = {}
+    fixtures = [f for fx in fixtures_by_league.values() for f in fx]
+    team_ids = {
+        tid
+        for f in fixtures
+        for tid in (f.get("home_id"), f.get("away_id"))
+        if tid
+    }
+    if not team_ids:
+        log.warning("Enrichment skipped — no team ids on any of %d fixture(s)", len(fixtures))
+        return
 
-    for league, fixtures in fixtures_by_league.items():
-        for fixture in fixtures:
-            home_id = fixture.get("home_id")
-            away_id = fixture.get("away_id")
-            if not home_id or not away_id:
-                continue
+    form_index = _build_form_index(team_ids, date.today())
 
-            # Fetch (or reuse cached) recent matches for each team
-            if home_id not in team_cache:
-                time.sleep(1)
-                team_cache[home_id] = _fetch_team_recent(home_id)
-            home_matches = team_cache[home_id]
+    enriched = 0
+    for fixture in fixtures:
+        home_id = fixture.get("home_id")
+        away_id = fixture.get("away_id")
+        if not home_id or not away_id:
+            log.warning("Context skipped: %s vs %s — missing team id(s)",
+                        fixture.get("home"), fixture.get("away"))
+            continue
 
-            if away_id not in team_cache:
-                time.sleep(1)
-                team_cache[away_id] = _fetch_team_recent(away_id)
-            away_matches = team_cache[away_id]
+        # _build_form_index returns newest-first; _form_string reads oldest → newest.
+        home_matches = form_index.get(home_id, [])[::-1]
+        away_matches = form_index.get(away_id, [])[::-1]
 
-            # Head-to-head
-            time.sleep(1)
-            h2h_matches = _fetch_h2h(home_id, away_id)
+        h2h = _fetch_h2h(fixture["match_id"], fixture["home"], fixture["away"])
+        meetings = h2h.get("meetings", [])
 
-            fixture["home_form"]   = _form_string(home_matches, home_id)
-            fixture["away_form"]   = _form_string(away_matches, away_id)
-            fixture["home_recent"] = [_summarize_match(m, home_id) for m in home_matches]
-            fixture["away_recent"] = [_summarize_match(m, away_id) for m in away_matches]
-            fixture["h2h"]         = [_summarize_match(m) for m in h2h_matches]
+        fixture["home_form"]   = _form_string(home_matches, home_id)
+        fixture["away_form"]   = _form_string(away_matches, away_id)
+        fixture["home_recent"] = [_summarize_match(m, home_id) for m in home_matches]
+        fixture["away_recent"] = [_summarize_match(m, away_id) for m in away_matches]
+        fixture["h2h"]         = meetings
+        if h2h.get("record"):
+            fixture["h2h_record"] = h2h["record"]
 
+        if home_matches or away_matches or meetings:
+            enriched += 1
             log.info(
-                "Context enriched: %s vs %s | home=%s away=%s h2h=%d",
+                "Context enriched: %s vs %s | home=%s (%d) away=%s (%d) h2h=%d",
                 fixture["home"], fixture["away"],
-                fixture["home_form"] or "N/A",
-                fixture["away_form"] or "N/A",
-                len(h2h_matches),
+                fixture["home_form"] or "-", len(home_matches),
+                fixture["away_form"] or "-", len(away_matches),
+                len(meetings),
             )
+        else:
+            log.warning(
+                "Context EMPTY: %s vs %s — no form and no H2H retrieved; this "
+                "fixture goes to Claude on team names alone",
+                fixture["home"], fixture["away"],
+            )
+
+    if not fixtures:
+        return
+    if enriched == 0:
+        log.error(
+            "Enrichment produced NOTHING for all %d fixture(s) — form and H2H are "
+            "both unavailable, so picks will be made on team names alone. Check "
+            "that the RapidAPI endpoints still exist before trusting this run.",
+            len(fixtures),
+        )
+    elif enriched < len(fixtures):
+        log.warning("Enrichment covered %d of %d fixture(s)", enriched, len(fixtures))
+    else:
+        log.info("Enrichment covered all %d fixture(s)", len(fixtures))
 
 
 # ── Real odds (The Odds API) ─────────────────────────────────────────────────
@@ -907,12 +1077,18 @@ marked "knockout": true, bet on the 90 minutes of THIS leg only — a two-legged
 normal 3-way match, not an elimination game.
 
 Each fixture may include the following enriched context — use it to sharpen your analysis:
-- home_form / away_form: last 5 results for each team as W/D/L (oldest → newest). venue field: H=home, A=away.
-- home_recent / away_recent: score details for those last 5 matches.
-- h2h: last 5 head-to-head meetings between the two teams with scores.
+- home_form / away_form: UP TO 5 recent results per team as W/D/L (oldest → newest). venue field: H=home, A=away.
+- home_recent / away_recent: score details for those matches.
+- h2h: up to 5 most recent head-to-head meetings between the two teams, each with a date and score.
+- h2h_record: the all-time W/D/L tally between the two clubs, with the counts labelled by team name.
 - knockout: true — an elimination match (e.g. World Cup knockout rounds) that goes to extra time
   and penalties if level after 90 minutes.
 When this data is present, weight recent form and H2H trends heavily in your reasoning.
+
+A form string may hold FEWER than 5 results, or be absent entirely — most often near the start of a
+season, when a club genuinely has not played five competitive matches yet. Read it for what it is: two
+results are two results, not a five-match trend, and they deserve correspondingly less weight. A short
+or missing form string is a reason to lower conviction, never a reason to invent form you were not given.
 
 Your knowledge of player rosters, retirements, transfers, injuries, and international squad selections
 may be outdated — squads (especially international ones) change up to matchday due to injuries, form,

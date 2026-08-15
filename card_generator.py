@@ -237,13 +237,20 @@ def generate_picks_card(
     f_sub   = _font(60)
     f_conf  = _font(44, bold=True)
 
-    # Backstop only. The authoritative cap is main.MAX_PICKS_PER_RUN, applied in
-    # analyse_with_claude() before anything is logged — so by the time picks get
-    # here the list is already <= 5 and this slice is a no-op. Kept so a caller
-    # that bypasses that path still cannot render an off-brand card; it must
-    # never become the *only* cap again, or the sheet and the card diverge and
-    # P&L counts picks nobody saw (the 29-30 Jun 2026 gap).
-    shown  = picks[:5]
+    # Backstop only. The card is handed the CORE picks explicitly (at most
+    # main.CORE_PICKS_PER_RUN = 5, selected in analyse_with_claude() before
+    # anything is logged), so this filter is a no-op on that path. Kept so a
+    # caller that bypasses it still cannot render an off-brand card.
+    #
+    # It filters on TIER and sorts on rank rather than slicing the first five,
+    # because since 15 Aug 2026 a run's pick list is 30+ long and league-grouped:
+    # a positional [:5] handed the full list would silently render the first
+    # competition's picks as the day's card. A blank tier means Core, matching
+    # excel_tracker._row_tier, so nothing that predates tiers is filtered out.
+    shown  = sorted(
+        [p for p in picks if (p.get("pick_tier") or "Core") == "Core"],
+        key=lambda p: p.get("rank") or 99,
+    )[:5]
     text_w = IW - 90                    # content width right of the pick number
     tag_w  = 240                        # right-hand room for the confidence tag
 

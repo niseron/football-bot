@@ -14,7 +14,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Bot
 
 from env_loader import load_env
-from tracker import log_pick, picks_exist_for_session
+from tracker import log_picks_batch, picks_exist_for_session
 from excel_tracker import PICK_TIER_CORE, PICK_TIER_EXTENDED, calculate_kelly_stake
 from card_generator import generate_picks_card, generate_picks_card_ig
 from discord_bot import build_pick_embed, send_to_discord
@@ -174,16 +174,22 @@ _roster_cache: dict[int, set[int]] = {}
 # can never blow out the RapidAPI budget.
 MAX_PARENT_LOOKUPS_PER_RUN = 12
 
-# Hard cap on picks per run. The SYSTEM_PROMPT asks for a ranked list, but that
-# is only an instruction — it has been exceeded in practice (16 Jun 2026: 8 picks
-# in one run; 14 Jun: 14). Enforced once, in analyse_with_claude(), so every
-# downstream consumer — sheet, Telegram, card, Discord embeds — sees the
-# identical list.
+# Hard cap on picks per COMPETITION per run (15 Aug 2026). The prompt asks for a
+# ranked list of at most this many, but that is only an instruction — it has been
+# exceeded in practice (16 Jun 2026: 8 picks in one run; 14 Jun: 14). Enforced
+# once, in _analyse_one_league(), so every downstream consumer — sheet, Telegram,
+# card, Discord embeds — sees the identical list.
 #
-# Raised 5 -> 10 on 13 Aug 2026, when picks became ranked and split into tiers.
-MAX_PICKS_PER_RUN = 10
+# History: 5 globally, raised to 10 globally on 13 Aug 2026 when picks became
+# ranked and tiered, and made PER-LEAGUE on 15 Aug 2026. A day with eight
+# competitions in the 48h window can therefore produce 30+ picks where it used to
+# produce 10. The cap is a ceiling and nothing more: the prompt forbids padding,
+# a competition with nothing worth backing returns an empty list, and a short
+# list is the expected outcome, never a fault to be corrected.
+MAX_PICKS_PER_LEAGUE = 10
 
-# Ranks 1..CORE_PICKS_PER_RUN are CORE, the rest EXTENDED. Core is the baseline
+# Core stays GLOBAL and unchanged at 5 a day: the best 5 bets across the whole
+# slate, whatever it costs the individual competitions. Core is the baseline
 # series running unbroken since 30 Jun 2026 — it keeps the card, the Telegram
 # post, the running total, the Summary tab and every calibration/edge/CLV report
 # to itself. Extended picks are logged, settled and posted to their league's
@@ -192,6 +198,10 @@ MAX_PICKS_PER_RUN = 10
 #
 # This split is a REPORTING boundary, not a quality gate: an Extended pick is
 # still a bet Claude judged worth making, just a lower-conviction one.
+#
+# Because the per-league calls each see only their own competition, the global
+# ordering that used to fall out of one ranked list no longer exists — Core is
+# selected explicitly by _select_core_picks() instead.
 CORE_PICKS_PER_RUN = 5
 
 # Regex to identify youth-team suffixes  e.g. "U19", "U-21", "U 23"
@@ -230,6 +240,10 @@ ODDS_API_SPORT_KEYS: dict[str, str | tuple[str, ...]] = {
     # None and the caller falls back) until the league phase makes this live.
     "Conference League": "soccer_uefa_europa_conference_league",
 }
+
+# Seconds between individual pick embeds. Discord's per-channel ceiling is about
+# one sustained message per second; a competition can now send 10 in a row.
+DISCORD_PICK_SEND_DELAY = 1.0
 
 # Maps competition names to Discord channel-mapping keys (discord_bot.py).
 # A league missing here (or a key missing from DISCORD_CHANNELS_JSON) is
@@ -935,12 +949,16 @@ def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | 
     call fails, or the fixture can't be found — callers must treat None as
     "no real odds available" and fall back to Claude's estimated odds only.
     """
-    sport_key = ODDS_API_SPORT_KEYS.get(competition)
-    events = _fetch_odds_events(sport_key)
+    events = _fetch_odds_events(ODDS_API_SPORT_KEYS.get(competition))
     if events is None:
         return None
+    event = _find_odds_event(events, home_team, away_team)
+    return _parse_odds_event(event) if event else None
 
-    event = next(
+
+def _find_odds_event(events: list[dict], home_team: str, away_team: str) -> dict | None:
+    """This fixture's event inside an already-fetched list. No network call."""
+    return next(
         (
             e for e in events
             if _team_match(e.get("home_team", ""), home_team)
@@ -948,10 +966,6 @@ def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | 
         ),
         None,
     )
-    if event is None:
-        return None
-
-    return _parse_odds_event(event)
 
 
 _OU_RE = re.compile(r"(over|under)\s*([\d.]+)", re.IGNORECASE)
@@ -1014,8 +1028,16 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
     probability exceeds the market's by at least 5 percentage points.
     Any failure (missing ODDS_API_KEY, API down, fixture/market not found)
     leaves that pick unchanged — existing behaviour continues silently.
+
+    The cache is keyed by COMPETITION, not by fixture. /odds returns every event
+    in a competition in one billed 3-unit request, so one fetch serves all of
+    that competition's picks and the rest is matched client-side, exactly as
+    closing_odds.py already does. Keyed per fixture (as it was until 15 Aug
+    2026) the same league-wide response was bought once per pick: harmless at 5
+    picks a day, but 10 picks in one competition meant 10 identical requests and
+    30 units for data already in hand.
     """
-    odds_cache: dict[tuple[str, str, str], dict | None] = {}
+    events_cache: dict[str, list[dict] | None] = {}
 
     for pick in picks:
         try:
@@ -1025,10 +1047,13 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
             home, away = match.split(" vs ", 1)
             league = pick.get("league", "")
 
-            cache_key = (home, away, league)
-            if cache_key not in odds_cache:
-                odds_cache[cache_key] = fetch_real_odds(home, away, league)
-            real_odds = odds_cache[cache_key]
+            if league not in events_cache:
+                events_cache[league] = _fetch_odds_events(ODDS_API_SPORT_KEYS.get(league))
+            events = events_cache[league]
+            if not events:
+                continue
+            event = _find_odds_event(events, home, away)
+            real_odds = _parse_odds_event(event) if event else None
             if not real_odds:
                 continue
 
@@ -1048,7 +1073,18 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
 
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are a professional football betting analyst with deep expertise in the Premier League,
+# ── System prompts ───────────────────────────────────────────────────────────
+#
+# One shared BODY, two HEADs. Everything that describes the data, the bet
+# formats and the JSON contract is identical for both and lives in _PROMPT_BODY;
+# only the paragraph that states the scope and the cap differs.
+#
+# SYSTEM_PROMPT (global head + body) is byte-identical to the single-call prompt
+# used before 15 Aug 2026 and is now sent ONLY by the Opus 5 shadow, which keeps
+# the old whole-slate shape on purpose — see opus_shadow.py. Production sends
+# LEAGUE_SYSTEM_PROMPT, once per competition. Edit _PROMPT_BODY when a change
+# should reach both; edit a head only when it genuinely applies to one scope.
+_PROMPT_HEAD_GLOBAL = """You are a professional football betting analyst with deep expertise in the Premier League,
 Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Champions League, the UEFA
 Europa League, the UEFA Conference League, and international tournament football including the FIFA World Cup.
 You receive upcoming fixtures for the next 48 hours and must identify the best value bets across all
@@ -1064,7 +1100,32 @@ RANKING — read this carefully:
   reward for a long one — being asked for up to 10 is permission, not a quota.
 - Do not reorder to spread picks across competitions or bet types. Conviction is the only ranking
   criterion; if your five best bets are all in one competition, rank them 1-5 anyway.
+"""
 
+_PROMPT_HEAD_LEAGUE = """You are a professional football betting analyst with deep expertise in the Premier League,
+Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Champions League, the UEFA
+Europa League, the UEFA Conference League, and international tournament football including the FIFA World Cup.
+You receive the next 48 hours of fixtures for ONE competition, named in the message, and must identify the
+best value bets in that competition, ranked from best to worst — UP TO 10, in strict order of conviction.
+
+RANKING — read this carefully:
+- Rank 1 is your single highest-conviction bet in this competition; rank 10 is the weakest bet you would
+  still genuinely place. Order the "picks" array by that ranking, best first.
+- Return ONLY bets you actually believe are worth placing. If you find 3 genuinely good bets, return 3.
+  If you find none, return an empty array — a competition with nothing worth backing today is a normal
+  and expected answer, not a failure, and an empty list costs you nothing.
+- NEVER pad the list to reach 10. A padded pick is worse than a missing one: every pick returned is
+  staked and settled for real, so filler costs money. There is no penalty for a short list, and no
+  reward for a long one — being asked for up to 10 is permission, not a quota. You are judged on the
+  strike rate of what you return, never on how much of the allowance you used.
+- You are seeing this competition on its own, and other competitions are being analysed separately.
+  Judge every bet against the market price on its own merits — never against the other bets in this
+  list, and never against how many picks a competition "ought" to produce. A 24-fixture qualifying
+  round does not owe you more picks than a 4-fixture matchday.
+- Do not reorder to spread picks across bet types or match days. Conviction is the only ranking criterion.
+"""
+
+_PROMPT_BODY = """
 Champions League, Europa League and Conference League fixtures are European club ties. Qualifying rounds and the
 knockout phase are played over two legs, so the h2h data for such a fixture often contains the first leg
 of the very same tie — when it does, treat it as the single most informative data point you have, and
@@ -1140,6 +1201,33 @@ same market. Non-knockout fixtures cannot go to extra time — keep the plain fo
 
 Return ONLY the JSON block, no other text."""
 
+SYSTEM_PROMPT        = _PROMPT_HEAD_GLOBAL + _PROMPT_BODY
+LEAGUE_SYSTEM_PROMPT = _PROMPT_HEAD_LEAGUE + _PROMPT_BODY
+
+# Chooses the day's Core five out of the per-league winners. It re-ranks, it
+# never re-analyses: the candidates are already bets each league call judged
+# worth placing, so this call sees no fixtures, no form and no H2H — only the
+# picks themselves — and answers with ids. Returning ids rather than picks is
+# what makes it impossible for this step to reword a selection, move a price or
+# invent a bet that no league call made.
+CORE_SELECTION_PROMPT = """You are a professional football betting analyst assembling the day's headline card.
+
+Below are the value bets already selected as the best available in each competition on today's slate,
+grouped by competition and already ranked within it. Every one of them is a bet worth placing — none of
+them needs vetting again, and you are not being asked to find anything new.
+
+Your only job is to choose the {n} you would put in the headline book for the day, ranked 1 (best) to
+{n}, judging conviction across the whole slate as if you had seen every fixture at once. A competition's
+rank-1 bet is NOT automatically stronger than another competition's rank-2 — weigh the size of the edge
+against the quoted price, the stated probability and the confidence. Do not spread the selection across
+competitions for balance: if the five strongest bets on the slate are all in one competition, take all
+five.
+
+Do not invent, reword, re-price or re-rank anything else. Return ids only.
+
+Return ONLY this JSON, no other text:
+{{"core": [<id>, <id>, ...]}}   — exactly {n} ids, best first, no duplicates, all drawn from the list above."""
+
 
 def _strip_code_fences(text: str) -> str:
     # Claude sometimes prefaces the JSON with a sentence of prose before the
@@ -1169,32 +1257,12 @@ def _notify_picks_failed(reason: str) -> None:
         log.error("Failed to send picks-failed Telegram alert: %s", exc)
 
 
-def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
-    # Strip internal team/match IDs — not useful to Claude
-    _STRIP = {"home_id", "away_id"}
-    clean = {
-        league: [{k: v for k, v in f.items() if k not in _STRIP} for f in fixtures]
-        for league, fixtures in fixtures_by_league.items()
-    }
-    payload = json.dumps(clean, indent=2, default=str)
-    message = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        temperature=0,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"Upcoming fixtures (next 48 hours):\n\n{payload}"}],
-    )
-    # Record token usage before anything can raise on the parse below —
-    # the call is billed whether or not we manage to read the JSON.
-    try:
-        from usage_tracker import record_anthropic_usage
-        record_anthropic_usage("football-picks", message.model, message.usage)
-    except Exception as exc:
-        log.debug("usage recording skipped: %s", exc)
-
-    raw = message.content[0].text.strip()
-    log.info("Claude raw response (%d chars):\n%s", len(raw), raw)
-
+def _parse_picks_response(raw: str, scope: str) -> list[dict]:
+    """
+    The picks array out of one model response. Raises ValueError if the text is
+    not JSON even after the code-fence fallback — the caller decides whether
+    that kills the run (all leagues failed) or just loses one competition.
+    """
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -1203,16 +1271,79 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
             data = json.loads(_strip_code_fences(raw))
         except json.JSONDecodeError as exc:
             log.error(
-                "Claude response is not valid JSON, even after stripping code fences. "
+                "%s: response is not valid JSON, even after stripping code fences. "
                 "Full raw response:\n%s",
-                raw,
+                scope, raw,
             )
-            # Reason text is relayed verbatim into a Telegram alert — keep it
-            # free of model names (the log line above keeps the detail).
-            _notify_picks_failed("the analysis returned an unparseable response")
-            raise ValueError(f"Could not parse Claude response as JSON: {exc}") from exc
+            raise ValueError(f"Could not parse response as JSON ({scope}): {exc}") from exc
+    return data.get("picks", []) or []
 
-    picks = data.get("picks", [])
+
+def _analyse_one_league(
+    league: str,
+    fixtures: list[dict],
+    *,
+    cache_system_prompt: bool = False,
+) -> list[dict]:
+    """
+    Up to MAX_PICKS_PER_LEAGUE conviction-ranked picks for ONE competition.
+
+    Each competition gets its own call so it is judged on its own merits: a
+    24-fixture Conference League qualifying round and a 4-fixture matchday are
+    no longer competing for slots in a single global list of 10, which is what
+    the per-league cap exists to fix.
+
+    `cache_system_prompt` marks the ~1.8k-token system prompt as cacheable. It
+    is identical across every league call in a run and the calls are seconds
+    apart, so on a multi-league slate the first call writes the cache (billed at
+    1.25x) and every later one reads it (0.1x). Off for a one-league run, where
+    the write premium would be pure loss. usage_tracker prices both.
+    """
+    # Strip internal team/match IDs — not useful to Claude
+    _STRIP = {"home_id", "away_id"}
+    clean = [{k: v for k, v in f.items() if k not in _STRIP} for f in fixtures]
+    payload = json.dumps(clean, indent=2, default=str)
+
+    system: object = LEAGUE_SYSTEM_PROMPT
+    if cache_system_prompt:
+        system = [{
+            "type": "text",
+            "text": LEAGUE_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    message = claude.messages.create(
+        model="claude-sonnet-4-6",
+        # 10 picks with 2-3 sentences of reasoning each ran to 1,999 output
+        # tokens on 13 Aug 2026 — 97% of the old 2,048 ceiling, i.e. one verbose
+        # run away from a truncated, unparseable response. max_tokens is a
+        # ceiling, not a charge: unused headroom costs nothing.
+        max_tokens=4096,
+        temperature=0,
+        system=system,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Competition: {league}\n\n"
+                f"Upcoming {league} fixtures (next 48 hours):\n\n{payload}"
+            ),
+        }],
+    )
+    # Record token usage before anything can raise on the parse below —
+    # the call is billed whether or not we manage to read the JSON. Every league
+    # call keeps the same 'football-picks' job label so the daily usage summary
+    # still reports one comparable line for the picks run.
+    try:
+        from usage_tracker import record_anthropic_usage
+        record_anthropic_usage("football-picks", message.model, message.usage)
+    except Exception as exc:
+        log.debug("usage recording skipped: %s", exc)
+
+    raw = message.content[0].text.strip()
+    log.info("Claude raw response for %s (%d chars):\n%s", league, len(raw), raw)
+
+    picks = _parse_picks_response(raw, league)
+
     seen: set[tuple] = set()
     deduped: list[dict] = []
     for pick in picks:
@@ -1221,45 +1352,258 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
             seen.add(key)
             deduped.append(pick)
 
-    # Single enforcement point for MAX_PICKS_PER_RUN — upstream of logging, so a
-    # pick can never reach the sheet (and therefore P&L) without also reaching
-    # the card. Never silent: the dropped picks are logged in full.
-    if len(deduped) > MAX_PICKS_PER_RUN:
-        dropped = deduped[MAX_PICKS_PER_RUN:]
+    # Single enforcement point for MAX_PICKS_PER_LEAGUE — upstream of logging, so
+    # a pick can never reach the sheet (and therefore P&L) without also reaching
+    # delivery. Never silent: the dropped picks are logged in full.
+    if len(deduped) > MAX_PICKS_PER_LEAGUE:
+        dropped = deduped[MAX_PICKS_PER_LEAGUE:]
         log.warning(
-            "Analysis returned %d picks, capping at %d — dropping %d: %s",
-            len(deduped), MAX_PICKS_PER_RUN, len(dropped),
+            "%s returned %d picks, capping at %d — dropping %d: %s",
+            league, len(deduped), MAX_PICKS_PER_LEAGUE, len(dropped),
             "; ".join(f"{p.get('match')} [{p.get('bet_type')} · {p.get('pick')}]"
                       for p in dropped),
         )
-        deduped = deduped[:MAX_PICKS_PER_RUN]
+        deduped = deduped[:MAX_PICKS_PER_LEAGUE]
 
-    # Rank and tier are assigned HERE, from array position, and deliberately not
-    # taken from Claude's own "rank" field: position is what dedup and the cap
-    # above already operate on, so trusting a returned number could tier a pick
-    # differently from where it actually sits in the list (or collide after a
-    # duplicate is removed). Claude's ordering is respected; its numbering is not
-    # load-bearing.
+    # league_rank comes from array POSITION, never from the model's own "rank"
+    # field: position is what dedup and the cap above already operate on, so a
+    # returned number could disagree with where the pick actually sits (or
+    # collide after a duplicate is removed). The model's ordering is respected;
+    # its numbering is not load-bearing.
+    #
+    # The league is overwritten rather than read from the response. This call
+    # was handed exactly one competition, so its name is known for certain here
+    # — and it drives Discord channel routing, the Odds API sport key and the
+    # sheet's League column, none of which should depend on the model echoing a
+    # label back correctly.
     for i, pick in enumerate(deduped, 1):
-        pick["rank"] = i
-        pick["pick_tier"] = PICK_TIER_CORE if i <= CORE_PICKS_PER_RUN else PICK_TIER_EXTENDED
+        pick["league_rank"] = i
+        pick["league"] = league
 
-    n_core = sum(1 for p in deduped if p["pick_tier"] == PICK_TIER_CORE)
-    log.info(
-        "Analysis returned %d pick(s): %d Core, %d Extended",
-        len(deduped), n_core, len(deduped) - n_core,
-    )
-    # A short list is the expected, correct outcome when Claude finds fewer good
-    # bets — SYSTEM_PROMPT forbids padding. Logged at INFO, never warned about:
-    # treating it as a fault is exactly what would pressure the list back toward
-    # filler picks.
-    if len(deduped) < MAX_PICKS_PER_RUN:
-        log.info(
-            "Fewer than %d picks returned — no padding applied (this is expected "
-            "when the slate offers fewer genuine value bets)", MAX_PICKS_PER_RUN,
+    log.info("%s: %d pick(s) returned", league, len(deduped))
+    return deduped
+
+
+def _pick_edge(pick: dict) -> float:
+    """
+    Stated probability minus the probability its own price implies. Used only to
+    break ties in the deterministic Core ordering — never to select picks.
+    """
+    try:
+        prob = float(pick.get("probability") or 0) / 100.0
+        odds = float(pick.get("odds") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return prob - _implied_prob(odds)
+
+
+def _deterministic_core_order(picks: list[dict]) -> list[dict]:
+    """
+    Fallback global ordering: every league's rank-1 pick first (best edge
+    first), then every rank-2, and so on. Used when the Core selection call
+    fails, and whenever there are so few candidates that asking is pointless.
+    """
+    return sorted(picks, key=lambda p: (p.get("league_rank", 99), -_pick_edge(p)))
+
+
+def _render_core_candidates(picks: list[dict]) -> str:
+    """The candidate list the Core selection call reads. Ids are list indices."""
+    by_league: dict[str, list[tuple[int, dict]]] = {}
+    for i, p in enumerate(picks):
+        by_league.setdefault(p.get("league", "?"), []).append((i, p))
+
+    blocks: list[str] = []
+    for league, entries in by_league.items():
+        lines = [f"## {league}"]
+        for i, p in entries:
+            lines.append(
+                f"[id {i}] rank {p.get('league_rank', '?')} of {len(entries)} in this competition"
+                f" — {p.get('match', '?')}\n"
+                f"    {p.get('bet_type', '?')}: {p.get('pick', '?')} @ {p.get('odds', '?')}"
+                f" | probability {p.get('probability', '?')}%"
+                f" | confidence {p.get('confidence', 'N/A')}\n"
+                f"    {p.get('reasoning', '') or '(no reasoning given)'}"
+            )
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def _select_core_with_claude(picks: list[dict], n: int) -> list[dict] | None:
+    """
+    The n highest-conviction picks across every competition, best first, or None
+    if the call fails. Returns the SAME dict objects that were passed in — the
+    model answers with ids, so nothing it says can alter a pick.
+    """
+    payload = _render_core_candidates(picks)
+    try:
+        message = claude.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=512,
+            temperature=0,
+            system=CORE_SELECTION_PROMPT.format(n=n),
+            messages=[{"role": "user", "content": payload}],
+        )
+        try:
+            from usage_tracker import record_anthropic_usage
+            record_anthropic_usage("football-core-select", message.model, message.usage)
+        except Exception as exc:
+            log.debug("usage recording skipped: %s", exc)
+
+        raw = message.content[0].text.strip()
+        log.info("Core selection response (%d chars):\n%s", len(raw), raw)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = json.loads(_strip_code_fences(raw))
+
+        chosen: list[dict] = []
+        seen_ids: set[int] = set()
+        for raw_id in data.get("core", []):
+            idx = int(raw_id)
+            if idx in seen_ids or not (0 <= idx < len(picks)):
+                log.warning("Core selection returned an unusable id %r — ignored", raw_id)
+                continue
+            seen_ids.add(idx)
+            chosen.append(picks[idx])
+        if len(chosen) != n:
+            # Short or malformed answers are recoverable: keep what came back in
+            # the order it came back, and fill from the deterministic order.
+            log.warning(
+                "Core selection returned %d usable id(s), expected %d — filling "
+                "the remainder deterministically", len(chosen), n,
+            )
+            for p in _deterministic_core_order(picks):
+                if len(chosen) >= n:
+                    break
+                if p not in chosen:
+                    chosen.append(p)
+        return chosen[:n]
+    except Exception as exc:
+        log.warning(
+            "Core selection call failed (%s) — falling back to the deterministic "
+            "order. The run continues: this decides ordering only, never which "
+            "bets exist.", exc,
+        )
+        return None
+
+
+def _select_core_picks(picks: list[dict]) -> list[dict]:
+    """
+    Tag every pick Core or Extended and return them in delivery order: the Core
+    five first (rank 1-5), then the Extended picks grouped by competition.
+
+    Core is GLOBAL — the best CORE_PICKS_PER_RUN bets on the whole slate — while
+    each league call only ever saw its own competition. So the global comparison
+    that used to fall out of one ranked list is made explicitly here.
+
+    Core is deliberately ordered first: excel_tracker's logging guard allows one
+    open bet per fixture, so if a fixture somehow carries two picks, the Core one
+    is the one that reaches the sheet.
+    """
+    if not picks:
+        return []
+
+    n_core = min(CORE_PICKS_PER_RUN, len(picks))
+    if len(picks) <= CORE_PICKS_PER_RUN:
+        # Every pick is Core anyway — the only open question is their order, and
+        # that is not worth a model call.
+        core = _deterministic_core_order(picks)
+    else:
+        core = _select_core_with_claude(picks, n_core) or _deterministic_core_order(picks)[:n_core]
+
+    core_ids = {id(p) for p in core}
+    for i, pick in enumerate(core, 1):
+        pick["rank"] = i
+        pick["pick_tier"] = PICK_TIER_CORE
+    extended = [p for p in picks if id(p) not in core_ids]
+    for pick in extended:
+        # No global rank: an Extended pick's standing is its rank inside its own
+        # competition, and pretending otherwise would invite a reader to compare
+        # numbers that were never compared.
+        pick["rank"] = None
+        pick["pick_tier"] = PICK_TIER_EXTENDED
+
+    return core + extended
+
+
+def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
+    """
+    One Claude call per competition (up to MAX_PICKS_PER_LEAGUE picks each), then
+    one global selection call that names the Core five.
+
+    A competition whose call fails costs that competition only — the rest of the
+    slate is still delivered, and only a run where EVERY competition failed
+    raises and alerts, which is the behaviour the single-call version had.
+    """
+    picks_by_league: dict[str, list[dict]] = {}
+    failed: list[str] = []
+    # Cache the shared system prompt only when more than one league will use it.
+    cache_prompt = len(fixtures_by_league) > 1
+
+    for league, fixtures in fixtures_by_league.items():
+        if not fixtures:
+            continue
+        try:
+            picks_by_league[league] = _analyse_one_league(
+                league, fixtures, cache_system_prompt=cache_prompt,
+            )
+        except Exception as exc:
+            failed.append(league)
+            log.error("Analysis failed for %s — that competition is skipped: %s", league, exc)
+
+    if failed and not any(picks_by_league.values()):
+        # Nothing survived: same outcome as a failed single call, so alert and
+        # raise exactly as before. Reason text is relayed verbatim into a
+        # Telegram alert — keep it free of model names.
+        _notify_picks_failed("the analysis returned no usable picks")
+        raise ValueError(
+            f"Analysis failed for every competition attempted ({', '.join(failed)})"
+        )
+    if failed:
+        log.warning(
+            "%d of %d competition(s) failed and were skipped: %s",
+            len(failed), len(failed) + len(picks_by_league), ", ".join(failed),
         )
 
-    return deduped
+    # Dedupe ACROSS competitions on the same (match, bet_type) key the single
+    # call used to apply to its whole output. Each league call already deduped
+    # its own response, so this only fires if one fixture reached two buckets —
+    # partition_fixtures is built not to do that, but the leagueId sets it
+    # matches on are discovered at runtime, and the cost of being wrong here is
+    # two stakes on one result.
+    all_picks: list[dict] = []
+    seen: set[tuple] = set()
+    for league_picks in picks_by_league.values():
+        for p in league_picks:
+            key = (p.get("match"), p.get("bet_type"))
+            if key in seen:
+                log.warning(
+                    "Dropping %s [%s] from %s — the same bet came back from another "
+                    "competition, so one fixture reached two buckets",
+                    p.get("match"), p.get("bet_type"), p.get("league"),
+                )
+                continue
+            seen.add(key)
+            all_picks.append(p)
+
+    ordered = _select_core_picks(all_picks)
+
+    n_core = sum(1 for p in ordered if p.get("pick_tier") == PICK_TIER_CORE)
+    log.info(
+        "Analysis returned %d pick(s) across %d competition(s): %d Core, %d Extended (%s)",
+        len(ordered), len(picks_by_league), n_core, len(ordered) - n_core,
+        ", ".join(f"{lg} {len(ps)}" for lg, ps in picks_by_league.items()) or "none",
+    )
+    # A short list — per league or overall — is the expected, correct outcome
+    # when Claude finds fewer good bets; the prompt forbids padding. Logged at
+    # INFO, never warned about: treating it as a fault is exactly what would
+    # pressure the lists back toward filler picks.
+    log.info(
+        "Cap is %d per competition; no padding is applied to reach it",
+        MAX_PICKS_PER_LEAGUE,
+    )
+
+    return ordered
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -1324,18 +1668,42 @@ def _discord_pick_embed(p: dict) -> dict:
     """
     One pick as a Discord embed; the league renders as the author line.
 
-    Extended (rank 6-10) picks are labelled in that author line and carry their
-    rank, so a reader can tell at a glance that they sit outside the tracked
-    5-pick book — they are real bets, but not part of the headline P&L, and an
+    Extended picks are labelled in that author line and carry their rank WITHIN
+    THEIR OWN COMPETITION (since 15 Aug 2026 — each competition is analysed
+    separately, so there is no global rank to show and "#3" means third-best in
+    this league, not third-best on the slate). The label matters: an Extended
+    pick is a real bet but sits outside the tracked 5-pick book, and an
     unlabelled embed would imply otherwise.
     """
     league = p.get("league", "")
-    rank   = p.get("rank")
+    rank   = p.get("league_rank")
     if p.get("pick_tier") == PICK_TIER_EXTENDED:
-        context = f"{league} · EXTENDED #{rank}" if rank else f"{league} · EXTENDED"
+        # "league rank 3", never a bare "#3": several picks a day now carry the
+        # same number in different channels, and a bare one would read as a
+        # position on the whole slate.
+        context = f"{league} · EXTENDED · league rank {rank}" if rank else f"{league} · EXTENDED"
     else:
         context = league
     return build_pick_embed(p, context=context)
+
+
+def _pick_log_entry(pick: dict, kickoff_lookup: dict[str, str]) -> dict:
+    """One pick as a tracker.log_picks_batch entry."""
+    claude_prob = pick.get("probability")
+    return {
+        "match": pick["match"],
+        "league": pick["league"],
+        "bet_type": pick["bet_type"],
+        "pick": pick["pick"],
+        "odds": float(pick["odds"]),
+        "confidence": pick.get("confidence", "N/A"),
+        "claude_prob": float(claude_prob) if claude_prob is not None else None,
+        "market_prob": pick.get("market_prob"),
+        "kickoff_utc": kickoff_lookup.get(pick["match"], ""),
+        # The price the card shows and settlement pays out at.
+        "market_odds": pick.get("market_odds"),
+        "pick_tier": pick.get("pick_tier", PICK_TIER_CORE),
+    }
 
 
 async def _send_photo(path, chat_id: str | None = None) -> None:
@@ -1413,32 +1781,27 @@ async def daily_picks_job():
         log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
 
     # BOTH tiers are logged and settled — the tier travels with the row so the
-    # reporting layer can filter on it (excel_tracker._core_rows).
-    for pick in picks:
-        try:
-            claude_prob = pick.get("probability")
-            log_pick(
-                match=pick["match"],
-                league=pick["league"],
-                bet_type=pick["bet_type"],
-                pick=pick["pick"],
-                odds=float(pick["odds"]),
-                confidence=pick.get("confidence", "N/A"),
-                session="morning",
-                claude_prob=float(claude_prob) if claude_prob is not None else None,
-                market_prob=pick.get("market_prob"),
-                kickoff_utc=kickoff_lookup.get(pick["match"], ""),
-                # The price the card shows and settlement pays out at.
-                market_odds=pick.get("market_odds"),
-                pick_tier=pick.get("pick_tier", PICK_TIER_CORE),
-            )
-        except Exception as exc:
-            log.warning("Failed to log pick: %s", exc)
+    # reporting layer can filter on it (excel_tracker._core_rows). Written as
+    # ONE batch: `picks` is Core-first, and a 30-pick run logged one at a time
+    # costs ~120 Sheets calls and 30 full-sheet repaints.
+    try:
+        written = log_picks_batch(
+            [_pick_log_entry(p, kickoff_lookup) for p in picks], session="morning",
+        )
+        log.info("Logged %d of %d pick(s) to the sheet", written, len(picks))
+    except Exception as exc:
+        log.warning("Failed to log picks: %s", exc)
 
     # From here on the CARD and TELEGRAM surfaces see Core only, so the daily
     # post stays the same 5-pick book it has been since 30 Jun 2026. Extended
     # picks reach Discord's league channels below, and the Sheet above.
-    core_picks     = [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE]
+    # Sorted by rank rather than trusting list order: the renderers number the
+    # picks 1..5 by position, so conviction order has to be a guarantee here,
+    # not something that happens to hold.
+    core_picks     = sorted(
+        [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE],
+        key=lambda p: p.get("rank") or 99,
+    )
     extended_picks = [p for p in picks if p.get("pick_tier") == PICK_TIER_EXTENDED]
 
     message = format_telegram_message(core_picks, header="Football Picks")
@@ -1461,13 +1824,23 @@ async def daily_picks_job():
 
     # Discord delivery — additive; send_to_discord never raises.
     # Both tiers post to their league channel; the embed marks which is which.
+    #
+    # Paced deliberately. Discord allows roughly one sustained message per second
+    # per channel, and since 15 Aug 2026 a single competition can send 10 embeds
+    # back to back. send_to_discord retries a 429 exactly once, so an unpaced
+    # burst would spend that retry immediately and then start dropping picks.
     try:
         if card is not None:
             send_to_discord("picks-cards", image_path=card)
+        sent = 0
         for pick in picks:
             channel_key = DISCORD_LEAGUE_CHANNEL_KEYS.get(pick.get("league", ""))
-            if channel_key:
-                send_to_discord(channel_key, embed=_discord_pick_embed(pick))
+            if not channel_key:
+                continue
+            if sent:
+                await asyncio.sleep(DISCORD_PICK_SEND_DELAY)
+            send_to_discord(channel_key, embed=_discord_pick_embed(pick))
+            sent += 1
     except Exception as exc:
         log.warning("Discord picks delivery failed (non-fatal): %s", exc)
 

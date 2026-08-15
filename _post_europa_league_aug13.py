@@ -66,7 +66,8 @@ from excel_tracker import (                                       # noqa: E402
 )
 from main import (                                                # noqa: E402
     CORE_PICKS_PER_RUN,
-    MAX_PICKS_PER_RUN,
+    # MAX_PICKS_PER_RUN was imported here and never used; it ceased to exist on
+    # 15 Aug 2026 when the cap became per-league (main.MAX_PICKS_PER_LEAGUE).
     _discord_pick_embed,
     _kickoff_lookup,
     analyse_with_claude,

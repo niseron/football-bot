@@ -82,6 +82,57 @@ def log_pick(
         logging.getLogger(__name__).warning("Excel log failed: %s", exc)
 
 
+def log_picks_batch(entries: list[dict], session: str = "morning") -> int:
+    """
+    Log a whole run's picks: one local SQLite insert each, then ONE Google
+    Sheets batch for the lot. Returns the number written to the sheet.
+
+    Same guards and same defaults as log_pick — the only difference is the
+    number of sheet round-trips, which is what made this necessary once a run
+    could produce 30+ picks instead of 10 (per-league cap, 15 Aug 2026).
+    log_pick costs a full sheet read plus a full repaint PER PICK.
+
+    Entries are written in list order, so pass Core first: excel_tracker's
+    fixture guard then resolves any collision in Core's favour.
+    """
+    import logging as _logging
+    from excel_tracker import log_picks_batch as _sheet_batch
+
+    _log = _logging.getLogger(__name__)
+    init_db()
+    today = date.today().isoformat()
+
+    accepted: list[dict] = []
+    with sqlite3.connect(DB_PATH) as conn:
+        for e in entries:
+            pick_date = e.get("pick_date") or today
+            existing = conn.execute(
+                "SELECT id FROM picks WHERE date = ? AND match = ? AND bet_type = ? "
+                "AND pick = ? AND session = ?",
+                (pick_date, e["match"], e["bet_type"], e["pick"], session),
+            ).fetchone()
+            if existing:
+                _log.info("Skipping duplicate pick (already in DB): %s — %s",
+                          e["match"], e["pick"])
+                continue
+            conn.execute(
+                "INSERT INTO picks (date, match, league, bet_type, pick, odds, session, pick_tier) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (pick_date, e["match"], e.get("league", ""), e["bet_type"], e["pick"],
+                 e["odds"], session, e.get("pick_tier", "Core")),
+            )
+            accepted.append({**e, "pick_date": pick_date})
+        conn.commit()
+
+    if not accepted:
+        return 0
+    try:
+        return _sheet_batch(accepted)
+    except Exception as exc:
+        _log.warning("Excel batch log failed: %s", exc)
+        return 0
+
+
 def picks_exist_for_today() -> bool:
     init_db()
     today = date.today().isoformat()

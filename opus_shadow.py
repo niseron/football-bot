@@ -2,10 +2,16 @@
 opus_shadow.py — Claude Opus 5 shadow experiment for the football pipeline.
 
 Runs the production Sonnet pipeline's OWN enriched fixture pool through
-`claude-opus-5` so the model is the only variable. Same fixtures, same form and
-H2H context, same SYSTEM_PROMPT, same 10-pick ranked format and Core/Extended
-tiers, same never-pad rule — nothing is re-fetched from RapidAPI, so the
-comparison is clean and the fixture-side API cost is exactly zero.
+`claude-opus-5`. Same fixtures, same form and H2H context, same SYSTEM_PROMPT,
+same 10-pick ranked format and Core/Extended tiers, same never-pad rule —
+nothing is re-fetched from RapidAPI, so the comparison is clean and the
+fixture-side API cost is exactly zero.
+
+Since 15 Aug 2026 the shadow is one call over the WHOLE slate while production
+is one call per competition, so the harness is no longer identical — what stays
+comparable is the question both models answer from the same pool: which are the
+best 5 bets here. See OPUS_MAX_PICKS_PER_RUN for why the shadow was not fanned
+out with it.
 
 Design mirrors the Fable 5 shadow (12-18 Jul 2026, removed 19 Jul in 35846c9),
 which is why the generic hooks it left behind — `run_auto_results`'s
@@ -57,6 +63,25 @@ OPUS_MAX_TOKENS = 16000
 # The API default. See the cost note above for why the shadow is not throttled.
 OPUS_EFFORT = "high"
 
+# The shadow's own caps, owned here since 15 Aug 2026. Production moved that day
+# from ONE call over the whole slate capped at 10 picks to one call PER
+# COMPETITION capped at 10 each, and the shadow deliberately did NOT follow:
+#
+#   * Cost. Opus 5 at $5/$25 with adaptive thinking is ~5x Sonnet per token.
+#     Fanning the shadow out per league would have taken it from ~$4.29/month to
+#     roughly $17-25/month for a side experiment — a decision to take
+#     deliberately, not to inherit from a production constant.
+#   * Comparability. What the shadow is for is Core: 5 bets from this slate,
+#     Opus's versus Sonnet's. Both models still answer that same question from
+#     the same enriched pool, and the shadow keeps the exact prompt production
+#     used until 14 Aug (main.SYSTEM_PROMPT, unchanged and byte-identical).
+#
+# So these are frozen numbers, not a copy of main's — main.MAX_PICKS_PER_LEAGUE
+# is per competition and means something different. To make the shadow mirror
+# production, fan out here on purpose and re-cost it first.
+OPUS_MAX_PICKS_PER_RUN = 10
+OPUS_CORE_PICKS_PER_RUN = 5
+
 # Discord channel key. Also the master gate: while this key is absent from
 # DISCORD_CHANNELS_JSON the entire experiment is inert — no model call (so no
 # cost), no sheet writes, no Odds API usage. Turning it on or off is a pure
@@ -84,8 +109,6 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
     # Imported inside the function: main.py imports this module lazily from
     # daily_picks_job, so a module-level back-import would be circular.
     from main import (
-        CORE_PICKS_PER_RUN,
-        MAX_PICKS_PER_RUN,
         SYSTEM_PROMPT,
         _strip_code_fences,
         claude,
@@ -148,16 +171,16 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
             seen.add(key)
             deduped.append(pick)
 
-    if len(deduped) > MAX_PICKS_PER_RUN:
+    if len(deduped) > OPUS_MAX_PICKS_PER_RUN:
         log.warning(
             "opus_shadow: %d picks returned, capping at %d",
-            len(deduped), MAX_PICKS_PER_RUN,
+            len(deduped), OPUS_MAX_PICKS_PER_RUN,
         )
-        deduped = deduped[:MAX_PICKS_PER_RUN]
+        deduped = deduped[:OPUS_MAX_PICKS_PER_RUN]
 
     for i, pick in enumerate(deduped, 1):
         pick["rank"] = i
-        pick["pick_tier"] = PICK_TIER_CORE if i <= CORE_PICKS_PER_RUN else PICK_TIER_EXTENDED
+        pick["pick_tier"] = PICK_TIER_CORE if i <= OPUS_CORE_PICKS_PER_RUN else PICK_TIER_EXTENDED
 
     n_core = sum(1 for p in deduped if p["pick_tier"] == PICK_TIER_CORE)
     log.info("opus_shadow: %d pick(s) — %d Core, %d Extended",

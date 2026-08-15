@@ -18,10 +18,11 @@ from main import (
     format_telegram_message,
     send_to_telegram,
     _kickoff_lookup,
+    _pick_log_entry,
     _send_photo,
 )
 from excel_tracker import PICK_TIER_CORE, calculate_kelly_stake
-from tracker import log_pick, picks_exist_for_session
+from tracker import log_picks_batch, picks_exist_for_session
 
 
 async def run():
@@ -72,36 +73,30 @@ async def run():
         log.warning("Kickoff lookup build failed (non-fatal): %s", exc)
         kickoff_lookup = {}
 
-    # pick_tier, kickoff_utc and market_odds must all be passed through here.
-    # Before 13 Aug 2026 this script omitted them, which was harmless while a
-    # run produced 5 picks and every pick was Core. Once MAX_PICKS_PER_RUN rose
-    # to 10, omitting pick_tier meant tracker.log_pick's "Core" default labelled
-    # ranks 6-10 as Core too — so a single `python _run_now.py` would have fed
-    # Extended picks straight into the running total, the Summary tab and the
-    # calibration / edge / CLV baseline that the tier split exists to protect.
-    for pick in picks:
-        try:
-            claude_prob = pick.get("probability")
-            log_pick(
-                match=pick["match"],
-                league=pick["league"],
-                bet_type=pick["bet_type"],
-                pick=pick["pick"],
-                odds=float(pick["odds"]),
-                confidence=pick.get("confidence", "N/A"),
-                session=session,
-                claude_prob=float(claude_prob) if claude_prob is not None else None,
-                market_prob=pick.get("market_prob"),
-                kickoff_utc=kickoff_lookup.get(pick["match"], ""),
-                market_odds=pick.get("market_odds"),
-                pick_tier=pick.get("pick_tier", PICK_TIER_CORE),
-            )
-        except Exception as exc:
-            log.warning("Failed to log pick: %s", exc)
+    # pick_tier, kickoff_utc and market_odds must all be passed through here —
+    # _pick_log_entry is the same builder daily_picks_job uses, so this script
+    # cannot drift from it. Before 13 Aug 2026 this script omitted those fields,
+    # which was harmless while a run produced 5 picks and every pick was Core.
+    # Once a run could return more, omitting pick_tier meant the "Core" default
+    # labelled Extended picks as Core too — so a single `python _run_now.py`
+    # would have fed them straight into the running total, the Summary tab and
+    # the calibration / edge / CLV baseline that the tier split exists to
+    # protect. Written as one batch for the same reason daily_picks_job is: a
+    # per-league run can produce 30+ picks.
+    try:
+        written = log_picks_batch(
+            [_pick_log_entry(p, kickoff_lookup) for p in picks], session=session,
+        )
+        log.info("Logged %d of %d pick(s) to the sheet", written, len(picks))
+    except Exception as exc:
+        log.warning("Failed to log picks: %s", exc)
 
     # Telegram and the card carry CORE only, matching daily_picks_job — this
     # script is a stand-in for that job, so it must not publish a different book.
-    core_picks = [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE]
+    core_picks = sorted(
+        [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE],
+        key=lambda p: p.get("rank") or 99,
+    )
     extended = len(picks) - len(core_picks)
 
     await send_to_telegram(format_telegram_message(core_picks, header="Football Picks"))

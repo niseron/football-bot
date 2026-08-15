@@ -29,11 +29,17 @@ PICKS_HEADERS = [
 ]
 
 # ── Pick tiers (13 Aug 2026) ─────────────────────────────────────────────────
-# Football picks are ranked 1..MAX_PICKS_PER_RUN by conviction. Ranks 1-5 are
-# CORE — the continuous series that has been collected since 30 Jun 2026 and
-# the only rows that may reach calibration, edge and CLV. Ranks 6-10 are
-# EXTENDED — tracked and settled identically so their real P&L is measurable,
-# but excluded from every Core aggregation.
+# Football picks are conviction-ranked within their own competition (up to
+# main.MAX_PICKS_PER_LEAGUE each), and a global selection step then marks the
+# best 5 of the day CORE — the continuous series collected since 30 Jun 2026 and
+# the only rows that may reach calibration, edge and CLV. Every other pick is
+# EXTENDED — tracked and settled identically so its real P&L is measurable, but
+# excluded from every Core aggregation.
+#
+# Tier does NOT follow from a rank number. It did until 15 Aug 2026 (one global
+# list of 10: ranks 1-5 Core, 6-10 Extended); since then a league's rank-1 pick
+# is Extended whenever it loses the global cut, and Extended volume is several
+# times Core's. Read the column, never infer the tier.
 #
 # A BLANK 'Pick Tier' means CORE, and that is load-bearing, not a convenience:
 # every row logged before this column existed keeps its exact meaning with no
@@ -485,6 +491,185 @@ def init_excel() -> None:
 
 # ── Write a new pick ──────────────────────────────────────────────────────────
 
+def _migrate_picks_header(ws: gspread.Worksheet, header: list[str]) -> None:
+    """Widen the sheet and fill in headers if it pre-dates the newer columns."""
+    try:
+        if len(header) < len(PICKS_HEADERS):
+            if ws.col_count < len(PICKS_HEADERS):
+                ws.resize(cols=len(PICKS_HEADERS))
+            for idx in range(len(header), len(PICKS_HEADERS)):
+                ws.update_cell(1, idx + 1, PICKS_HEADERS[idx])
+    except Exception as exc:
+        log.warning("Picks header migration failed (non-fatal): %s", exc)
+
+
+def _duplicate_skip_reason(
+    body_rows: list[list[str]],
+    header: list[str],
+    match: str,
+    bet_type: str,
+    pick: str,
+    target_date: date,
+) -> str | None:
+    """
+    Why this pick must NOT be written, or None if it may be. Two guards, and the
+    second is the one that matters.
+
+    (a) SAME-DAY exact repeat — a re-run of the same job. Date-scoped.
+
+    (b) CROSS-DAY repeat of an UNSETTLED bet on the same fixture, added
+        13 Aug 2026. fetch_upcoming_matches pulls a 48-hour window, so a fixture
+        kicking off tomorrow appears in today's run AND tomorrow's. The analysis
+        dedupes (match, bet_type) but only WITHIN one batch, and guard (a) is
+        keyed on the date — so the second day's pick sailed through and the
+        fixture was logged twice. One match then settled both rows: P&L booked
+        twice and the pick counted twice in calibration. Measured on 13 Aug 2026:
+        16 duplicated groups across 223 rows, +4.20u double-counted, 13.3% of
+        reported Core P&L.
+
+    Keyed on MATCH ALONE (widened from (match, bet_type) on 13 Aug 2026). One
+    fixture gets at most one unsettled bet, full stop. The narrower keys both
+    leaked: (match, bet_type, pick) let the 3-4 Jul Canada vs Morocco BTTS market
+    through as 'Yes' one day and 'No' the next — opposite sides of one market —
+    and (match, bet_type) still allowed two different bet types on one fixture,
+    which is two stakes riding on a single result. Nothing downstream treats
+    those as correlated, so the sheet's P&L and calibration both read them as
+    independent samples when they are not.
+
+    Only UNSETTLED rows block: once a row has a Result the fixture is over, so a
+    later row on it is a data problem to see, not one to hide.
+
+    `body_rows` must exclude the header. Callers writing several picks in one
+    pass append each accepted row to that list, so the guards see picks staged
+    earlier in the same batch exactly as if they were already on the sheet.
+    """
+    result_idx = _col(header, "Result")
+    result_idx = 6 if result_idx is None else result_idx
+    for row in body_rows:
+        if not row or not row[0]:
+            continue
+        try:
+            existing = datetime.strptime(row[0], "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        if (
+            existing == target_date
+            and len(row) > 3
+            and row[1] == match
+            and row[2] == bet_type
+            and row[3] == pick
+        ):
+            return "already logged today (exact duplicate)"
+        settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
+        if not settled and len(row) > 1 and row[1] == match:
+            return (
+                f"this fixture already has an UNSETTLED pick logged ({row[0]}: "
+                f"'{row[3] if len(row) > 3 else '?'}' [{row[2] if len(row) > 2 else '?'}]). "
+                "One fixture carries at most one open bet; a second would settle "
+                "off the same result."
+            )
+    return None
+
+
+def _build_pick_row(
+    date_str: str,
+    match: str,
+    league: str,
+    bet_type: str,
+    pick: str,
+    odds: float,
+    confidence: str,
+    claude_prob: float | None,
+    market_prob: float | None,
+    kickoff_utc: str | None,
+    market_odds: float | None,
+    pick_tier: str,
+) -> list:
+    """One Picks row, in PICKS_HEADERS order."""
+    return [
+        date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", "", "",
+        round(float(claude_prob), 1) if claude_prob is not None else "",
+        round(float(market_prob), 1) if market_prob is not None else "",
+        league or "",
+        kickoff_utc or "",
+        "",  # Closing Odds — populated later by the closing-odds job, if at all
+        # The price shown on the picks card and paid out at settlement. Empty
+        # when no market line was matched — settlement then falls back to the
+        # 'Odds' estimate.
+        round(float(market_odds), 2) if market_odds is not None else "",
+        # Core or Extended. Written explicitly on every new row; blank on
+        # historical rows, which _row_tier reads as Core.
+        pick_tier or PICK_TIER_CORE,
+    ]
+
+
+def log_picks_batch(entries: list[dict]) -> int:
+    """
+    Log a whole run's picks in ONE round-trip. Returns the number written.
+
+    Same guards, same row shape and same ordering as log_to_excel — the only
+    difference is that the sheet is read once, appended to once and repainted
+    once for the entire batch instead of once PER PICK. That mattered from
+    15 Aug 2026, when the per-league cap took a busy run from 10 picks to 30+:
+    log_to_excel costs ~4 API calls per pick and _apply_formatting repaints
+    every row of the sheet each time, so a 30-pick run would have made ~120
+    calls and 30 full repaints in a couple of minutes — comfortably into Sheets'
+    per-minute quota, where the failure mode is a pick delivered to Discord but
+    missing from the sheet.
+
+    Entries are written in list order, so pass Core first: the fixture-level
+    guard then resolves any collision in Core's favour.
+    """
+    if not entries:
+        return 0
+
+    try:
+        ws = _picks_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return 0
+
+    header = rows[0] if rows else []
+    _migrate_picks_header(ws, header)
+
+    known: list[list[str]] = list(rows[1:])
+    staged: list[list] = []
+    for e in entries:
+        try:
+            dt = datetime.fromisoformat(e["pick_date"]) if e.get("pick_date") else datetime.now()
+            match, bet_type, pick = e["match"], e["bet_type"], e["pick"]
+            reason = _duplicate_skip_reason(known, header, match, bet_type, pick, dt.date())
+            if reason:
+                log.info("Sheets: skipping '%s — %s [%s]' — %s", match, pick, bet_type, reason)
+                continue
+            row = _build_pick_row(
+                dt.strftime("%d-%b-%Y"), match, e.get("league", ""), bet_type, pick,
+                e["odds"], e.get("confidence", "N/A"),
+                e.get("claude_prob"), e.get("market_prob"), e.get("kickoff_utc"),
+                e.get("market_odds"), e.get("pick_tier", PICK_TIER_CORE),
+            )
+        except Exception as exc:
+            log.error("Sheets: could not build row for %r (skipped): %s", e.get("match"), exc)
+            continue
+        staged.append(row)
+        known.append([str(c) for c in row])
+
+    if not staged:
+        log.info("Sheets: nothing to log — all %d pick(s) were skipped", len(entries))
+        return 0
+
+    try:
+        ws.append_rows(staged, value_input_option="USER_ENTERED")
+        log.info("Sheets: logged %d pick(s) in one batch", len(staged))
+    except Exception as exc:
+        log.error("Sheets batch write failed: %s", exc)
+        return 0
+
+    _apply_formatting(_get_spreadsheet())
+    return len(staged)
+
+
 def log_to_excel(
     match: str,
     league: str,
@@ -510,86 +695,18 @@ def log_to_excel(
         log.error("Sheets read failed: %s", exc)
         return
 
-    # Self-migrate: widen the sheet and fill in headers if it pre-dates the prob columns
-    try:
-        header = rows[0] if rows else []
-        if len(header) < len(PICKS_HEADERS):
-            if ws.col_count < len(PICKS_HEADERS):
-                ws.resize(cols=len(PICKS_HEADERS))
-            for idx in range(len(header), len(PICKS_HEADERS)):
-                ws.update_cell(1, idx + 1, PICKS_HEADERS[idx])
-    except Exception as exc:
-        log.warning("Picks header migration failed (non-fatal): %s", exc)
+    header = rows[0] if rows else []
+    _migrate_picks_header(ws, header)
 
-    # Two separate guards, and the second is the one that matters.
-    #
-    # (a) SAME-DAY exact repeat — a re-run of the same job. Date-scoped.
-    #
-    # (b) CROSS-DAY repeat of an UNSETTLED bet on the same (match, bet_type),
-    #     added 13 Aug 2026. fetch_upcoming_matches pulls a 48-hour window, so a
-    #     fixture kicking off tomorrow appears in today's run AND tomorrow's.
-    #     analyse_with_claude dedupes (match, bet_type) but only WITHIN one
-    #     batch, and guard (a) is keyed on the date — so the second day's pick
-    #     sailed through and the fixture was logged twice. One match then
-    #     settled both rows: P&L booked twice and the pick counted twice in
-    #     calibration. Measured on 13 Aug 2026: 16 duplicated groups across 223
-    #     rows, +4.20u double-counted, 13.3% of reported Core P&L.
-    #
-    # Keyed on MATCH ALONE (widened from (match, bet_type) on 13 Aug 2026).
-    # One fixture gets at most one unsettled bet, full stop. The narrower keys
-    # both leaked: (match, bet_type, pick) let the 3-4 Jul Canada vs Morocco
-    # BTTS market through as 'Yes' one day and 'No' the next — opposite sides of
-    # one market — and (match, bet_type) still allowed two different bet types
-    # on one fixture, which is two stakes riding on a single result. Nothing
-    # downstream treats those as correlated, so the sheet's P&L and calibration
-    # both read them as independent samples when they are not.
-    #
-    # Only UNSETTLED rows block: once a row has a Result the fixture is over, so
-    # a later row on it is a data problem to see, not one to hide.
-    result_idx = _col(header, "Result")
-    result_idx = 6 if result_idx is None else result_idx
-    for row in rows[1:]:
-        if not row or not row[0]:
-            continue
-        try:
-            existing = datetime.strptime(row[0], "%d-%b-%Y").date()
-        except ValueError:
-            continue
-        if (
-            existing == target_date
-            and len(row) > 3
-            and row[1] == match
-            and row[2] == bet_type
-            and row[3] == pick
-        ):
-            log.info("Sheets: skipping duplicate '%s — %s'", match, pick)
-            return
-        settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
-        if not settled and len(row) > 1 and row[1] == match:
-            log.info(
-                "Sheets: skipping '%s — %s [%s]' — this fixture already has an "
-                "UNSETTLED pick logged (%s: '%s' [%s]). One fixture carries at most "
-                "one open bet; a second would settle off the same result.",
-                match, pick, bet_type, row[0],
-                row[3] if len(row) > 3 else "?", row[2] if len(row) > 2 else "?",
-            )
-            return
+    reason = _duplicate_skip_reason(rows[1:], header, match, bet_type, pick, target_date)
+    if reason:
+        log.info("Sheets: skipping '%s — %s [%s]' — %s", match, pick, bet_type, reason)
+        return
 
-    new_row = [
-        date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "", "", "",
-        round(float(claude_prob), 1) if claude_prob is not None else "",
-        round(float(market_prob), 1) if market_prob is not None else "",
-        league or "",
-        kickoff_utc or "",
-        "",  # Closing Odds — populated later by the closing-odds job, if at all
-        # The price shown on the picks card and paid out at settlement. Empty
-        # when no market line was matched — settlement then falls back to the
-        # 'Odds' estimate.
-        round(float(market_odds), 2) if market_odds is not None else "",
-        # Core (ranks 1-5) or Extended (ranks 6-10). Written explicitly on every
-        # new row; blank on historical rows, which _row_tier reads as Core.
-        pick_tier or PICK_TIER_CORE,
-    ]
+    new_row = _build_pick_row(
+        date_str, match, league, bet_type, pick, odds, confidence,
+        claude_prob, market_prob, kickoff_utc, market_odds, pick_tier,
+    )
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
         log.info("Sheets: logged '%s — %s'", match, pick)
@@ -987,9 +1104,13 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
     ] + xl_rows + [
         ["", ""],
         ["PICK TIER BREAKDOWN", "", "", "", "", ""],
-        ["Core = ranks 1-5 (the baseline series, and the ONLY tier feeding "
-         "calibration / edge / CLV and every figure above). "
-         "Extended = ranks 6-10, tracked since 13 Aug 2026.", "", "", "", "", ""],
+        ["Core = the 5 highest-conviction picks across all competitions that day "
+         "(the baseline series, and the ONLY tier feeding calibration / edge / CLV "
+         "and every figure above). Extended = every other pick, up to 10 per "
+         "competition per day; tracked since 13 Aug 2026. Extended was ranks 6-10 "
+         "of a single 10-pick list until 15 Aug 2026, so it accrues far faster "
+         "from that date and the two tiers are no longer similar in size.",
+         "", "", "", "", ""],
         ["Tier", "Wins", "Losses", "Win Rate %", "Total P&L", "Picks"],
     ] + _tier_breakdown_rows(all_picks_rows)
 

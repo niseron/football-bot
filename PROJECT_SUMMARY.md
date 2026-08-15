@@ -217,7 +217,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 
 | Tab | Columns |
 |---|---|
-| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds, Market Odds, **Pick Tier** (added 13 Aug 2026). **'Odds' is Claude's estimate; 'Market Odds' is the matched market price and is what settlement pays out at** (see 'Settlement pays the market price', 9 Aug 2026). **'Pick Tier' is `Core` (ranks 1-5) or `Extended` (ranks 6-10); BLANK MEANS CORE and the 217 rows logged before 13 Aug 2026 are deliberately left blank — never backfill them** (see 'Ranked picks and the Core/Extended split'). Running Total P&L and Bankroll are Core-only and stay blank on Extended rows. |
+| Picks | Date, Match, Bet Type, Pick, Odds, Confidence, Result, Profit/Loss, Running Total P&L, Bankroll (€), Claude Prob %, Market Prob %, League, Kickoff UTC, Closing Odds, Market Odds, **Pick Tier** (added 13 Aug 2026). **'Odds' is Claude's estimate; 'Market Odds' is the matched market price and is what settlement pays out at** (see 'Settlement pays the market price', 9 Aug 2026). **'Pick Tier' is `Core` (the 5 highest-conviction picks across all competitions that day) or `Extended` (every other pick; up to 10 per competition per day — it was `Core` = ranks 1-5 / `Extended` = ranks 6-10 of one 10-pick list until 15 Aug 2026); BLANK MEANS CORE and the 217 rows logged before 13 Aug 2026 are deliberately left blank — never backfill them** (see 'Ranked picks and the Core/Extended split'). Running Total P&L and Bankroll are Core-only and stay blank on Extended rows. |
 | Summary | **Core-tier only** (13 Aug 2026) apart from the final tier block — every figure below is computed from Core rows, so Extended picks never move the headline win rate, P&L or bankroll. A **Pick Tier Breakdown** table is appended at the bottom (wins / losses / win rate / total P&L / picks for Core vs Extended) — the one section that deliberately sees both tiers. Auto-calculated stats: win rate, total P&L, bankroll, ROI, best bet type, best confidence level, Bet Type Breakdown table, and (4 Aug 2026) a **League Breakdown** table — wins / losses / win rate / total P&L / picks per competition, sorted by P&L descending. Built from the Picks tab's League column; deliberately one section in this tab, never per-league tabs, so calibration data stays unified. Every tracked competition gets a row even at zero picks (most open their 2026-27 season mid-to-late August — zeros are expected, not a bug), leagues found in the sheet but not in `TRACKED_LEAGUES` are appended rather than dropped, and the 119 picks logged before the League column existed group under `(no league recorded)` so the section's P&L reconciles exactly with the headline total. Note `Picks` here counts every logged pick incl. pending/void, unlike Bet Type Breakdown's `Total Picks` (settled wins + losses only). Below it sits a **Bet Type × League Breakdown** (4 Aug 2026) — win rate, P&L and pick count for every league/bet-type cell, leagues ordered by P&L to match the section above. A cell shows a win rate only at `_MIN_CELL_SAMPLE` (10) or more **decided** picks and otherwise reads `insufficient data`; the gate is on the rate's own denominator (wins + losses), not on settled count, because 10 settled picks that are 8 VOIDs and 2 decided would otherwise print exactly the 2-sample rate the rule exists to hide. P&L and pick count always show — only the rate is unsafe at low n. Only leagues with ≥1 settled pick appear, so not-yet-started competitions add no rows here (they stay visible at zero in the League Breakdown). On 4 Aug 2026, 11 of 18 cells read `insufficient data` — slicing two ways splits an already-small sample hard, and that is the honest state, not a gap to fill. |
 | Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier ('Top 150' / 'Lower Ranked', for future per-tier calibration), Stake € (SIM), Running P&L (u), Bankroll € (SIM), Player IDs. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 | Tennis Summary | **Tennis system only** — mirror of football's Summary tab, rebuilt by `_refresh_tennis_summary()` whenever a tennis result settles (`finalize_tennis_workbook()`, called from auto-results and the manual override): overall record, win rate, units P&L, simulated bankroll + ROI, best bet type / confidence level, Bet Type Breakdown (win-rate-desc), plus a tennis-only Rank Tier Breakdown (Top 150 vs Lower Ranked; pre-10-Jul rows show as '(untracked)'). Header labels the staking as SIMULATED. |
@@ -240,9 +240,10 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 ## 7. Current Bot Features
 
 ### Core picks pipeline
-- Up to **10** ranked value picks per day across all tracked competitions, split into
-  **Core (ranks 1-5)** and **Extended (ranks 6-10)** — see "Ranked picks and the Core/Extended
-  split" below. Was a flat top 5 until 13 Aug 2026.
+- Up to **10** ranked value picks **per competition** per day (so 30+ on a busy slate across up to
+  10 competitions), of which the **best 5 across the whole slate are Core** and every other pick is
+  **Extended** — see "Per-league picks and global Core selection" below. Was up to 10 globally
+  13-15 Aug 2026, and a flat top 5 before that.
 - Picks use actual team names (never generic "Home Win" / "Away Win")
 - Supported bet types: Match Winner, Both Teams to Score, Over/Under Goals, Asian Handicap, Double Chance
 - Knockout Match Winner picks carry an explicit time scope (since 12 Jul 2026): "(90 min)" =
@@ -489,13 +490,18 @@ the previous figure understated enrichment because it predated two changes on th
 | Opus 5 shadow enrichment (separate pick set) | 0-10 | **0-30** |
 | **Worst case** | 80 | **240 ≈ 7,300/month, ~36% of the tier** |
 
-**Enrichment is one billed `/odds` call per unique FIXTURE, not per league** — the cache in
-`enrich_picks_with_real_odds` is keyed `(home, away, league)` and lives only for that one call, so
-two picks on different fixtures in the same competition each fire a full league-wide request. That
-makes the picks-run cost scale with `MAX_PICKS_PER_RUN`, which rose 5 → 10 on 13 Aug 2026: the old
-"~5 requests/day ≈ 195 units/day, ~30%" line was written for a 5-pick run and is superseded by the
-table above. (The closing-odds job *does* batch per competition — `closing_odds.py` — so only the
-picks path has this shape.)
+**Enrichment is one billed `/odds` call per COMPETITION, not per pick** (15 Aug 2026). `/odds`
+returns every event in a competition in one 3-unit request, so `enrich_picks_with_real_odds` fetches
+once per competition and matches each pick client-side — the same shape `closing_odds.py` has always
+had. Its cache used to be keyed `(home, away, league)`, i.e. per fixture, which bought the identical
+league-wide response once per pick.
+
+That re-key is why the table above still holds after the per-league cap took a busy run from 10 picks
+to 30+: the picks-run cost now scales with the number of **competitions** with fixtures (10 at the
+absolute most, and 4.3 on the measured average day), not with the pick count. Under the old
+per-fixture key the same change would have taken enrichment to ~100 requests / ~300 units a day and
+the worst case to ~510 units/day ≈ 15,500/month ≈ 78% of the tier. The Opus shadow row is unaffected —
+it makes its own enrichment pass over its own (still ≤10) picks.
 
 Live meter on 13 Aug 2026: **150 units used of 20,000** since the 6 Aug reset — actual burn sits far
 under the worst case, because the 60-request polling cap is rarely reached. (Before tennis was
@@ -714,7 +720,7 @@ Cause, confirmed in code:
 
 | Layer | Dedupe key | Why it missed this |
 |---|---|---|
-| `main.analyse_with_claude` | `(match, bet_type)` | **within a single batch only** — it never sees yesterday's picks |
+| `main.analyse_with_claude` | `(match, bet_type)` | **within a single run only** — it never sees yesterday's picks. (Since 15 Aug 2026 it is applied per competition response *and* once across the merged list, so the key's reach within a run is unchanged.) |
 | `excel_tracker.log_to_excel` | `(date, match, bet_type, pick)` | **date-scoped** — a repeat on the next day is a different key |
 | `tracker.log_pick` (picks.db) | `(date, match, bet_type, pick, session)` | same, date-scoped |
 
@@ -842,13 +848,17 @@ market: this one, and Argentina vs Algeria (`Argentina -1.5` and `Argentina -2.5
 two lines, correlated rather than contradictory). So the contradiction is rare, not systemic — but it
 was undetectable before this audit, which is the reason to keep the `Duplicate` tag visible.
 
-### Ranked picks and the Core/Extended split (13 Aug 2026)
+### Ranked picks and the Core/Extended split (13 Aug 2026 — cap superseded 15 Aug, see below)
 
 **Pick volume doubles from this date: 5 per run → up to 10.** Claude now returns picks *ranked*
 best-to-worst — rank 1 the highest-conviction bet, rank 10 the weakest it would still genuinely
 place — and `MAX_PICKS_PER_RUN` rose 5 → 10 (`CORE_PICKS_PER_RUN = 5` marks the tier boundary).
 
-| Tier | Ranks | Sheet / settlement | Card + Telegram | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
+> The rank ranges in the table below describe **13-15 Aug 2026 only**. From 15 Aug the cap is per
+> competition and tier is decided by an explicit global selection step, not by a rank number — see
+> "Per-league picks and global Core selection". Every other column in the table still holds exactly.
+
+| Tier | Ranks (13-15 Aug 2026) | Sheet / settlement | Card + Telegram | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
 |---|---|---|---|---|---|---|
 | **Core** | 1-5 | logged + settled | **yes** | league channel | **yes** | **yes** |
 | **Extended** | 6-10 | logged + settled | no | league channel, labelled `· EXTENDED #n` | **no** | **no** |
@@ -895,15 +905,21 @@ Deliberately **not** filtered: `get_pending_picks_rows` (both tiers must settle)
 `PICK TIER BREAKDOWN` block is appended to the Summary tab. This is the one reporting path allowed to
 see both tiers — comparing them is its purpose.
 
-**Never pad.** The prompt states that returning fewer than 10 is correct when fewer genuine value bets
-exist, that there is no penalty for a short list, and that a padded pick is worse than a missing one
-because every returned pick is staked for real. A short list logs at INFO, never as a warning —
-treating it as a fault is what would pressure the list back toward filler.
+**Never pad.** The prompt states that returning fewer than the cap is correct when fewer genuine value
+bets exist, that there is no penalty for a short list, and that a padded pick is worse than a missing
+one because every returned pick is staked for real. A short list logs at INFO, never as a warning —
+treating it as a fault is what would pressure the list back toward filler. *(From 15 Aug 2026 this is
+per competition, and most competitions returning 0-3 picks against an allowance of 10 is the expected
+shape, not a fault. The rule binds the Core selection step too: Core is capped at 5, never padded up
+to 5.)*
 
 **Rank is assigned from array position, not from Claude's `rank` field.** Dedup and the cap already
 operate on position, so a returned number could tier a pick differently from where it actually sits
 (or collide after a duplicate is dropped). Claude's *ordering* is respected; its *numbering* is not
 load-bearing. Verified with a duplicate injected at rank 1: it was removed and ranks stayed dense 1-10.
+*(From 15 Aug 2026 that position is `league_rank` — dense 1-10 **within one competition's response**,
+with no global sequence at all. Tier no longer follows from it: it is set by the global selection
+step, and Core carries a separate `rank` 1-5 while Extended carries none.)*
 
 #### ⚠️ Prompt regime change — forward series only (13 Aug 2026)
 
@@ -917,7 +933,122 @@ order its best five differently than when asked for five outright.
   behaviour after this date could be the prompt change rather than model drift. Note it before
   concluding anything about calibration.
 - The alternative — two separate Claude calls to keep the Core prompt byte-identical — was rejected:
-  it doubles token cost and can return the same fixture in both tiers.
+  it doubles token cost and can return the same fixture in both tiers. *(Superseded 15 Aug 2026: the
+  run now makes one call per competition plus a selection call. The duplicate-fixture objection does
+  not apply to that shape — a fixture belongs to exactly one competition — and the cost was measured
+  rather than assumed. See below.)*
+
+### Per-league picks and global Core selection (15 Aug 2026)
+
+**The cap moved from 10 per run to 10 per competition per run.** `MAX_PICKS_PER_LEAGUE = 10`
+replaces `MAX_PICKS_PER_RUN`; `CORE_PICKS_PER_RUN = 5` is unchanged and still **global**. A busy slate
+therefore produces 30+ picks where it produced at most 10 — measured on the real fixture feed, the
+next 21 run windows average 4.3 competitions and 21 fixtures, peaking at 8 competitions / 47 fixtures
+on 27 Aug.
+
+**Why the shape changed.** One call over the whole slate makes competitions compete for ten slots, so
+a 24-fixture Conference League qualifying round and a 4-fixture La Liga matchday were ranked against
+each other for space. Each competition now gets its own call and is judged on its own merits.
+
+**How a run works now** (`main.analyse_with_claude`):
+
+1. **One call per competition** — `_analyse_one_league()` sends `LEAGUE_SYSTEM_PROMPT` plus that
+   competition's fixtures only, and returns up to 10 conviction-ranked picks. `league_rank` is
+   assigned from array position *within that competition*, and the pick's `league` is **overwritten**
+   with the competition actually sent (the call was handed one league, so the name is known for
+   certain — and it drives Discord routing, the Odds API sport key and the sheet's League column).
+2. **Merge + dedupe** on `(match, bet_type)`, restoring the cross-competition dedupe the single call
+   used to give for free. It should never fire — a fixture belongs to one competition — but the
+   leagueId sets `partition_fixtures` matches on are discovered at runtime.
+3. **Global Core selection** — `_select_core_picks()` marks the day's best 5 across every
+   competition. Above 5 candidates it asks Claude once more (`CORE_SELECTION_PROMPT`), passing the
+   candidate picks only — no fixtures, no form, no H2H — and taking back **ids**, so that step can
+   re-rank but can never reword a pick, move a price or invent a bet. At 5 or fewer candidates it
+   skips the call entirely and orders deterministically.
+4. **Tier assignment** — the 5 selected are Core with `rank` 1-5; everything else is Extended with
+   `rank = None`. **Tier is never inferred from a rank number any more:** a league's rank-1 pick is
+   Extended whenever it loses the global cut.
+
+| Tier | How it is chosen | Volume | Sheet / settlement | Card + Telegram | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
+|---|---|---|---|---|---|---|---|
+| **Core** | best 5 on the whole slate, selected globally each run | exactly 5/day (fewer if the slate offers fewer) | logged + settled | **yes** | league channel | **yes** | **yes** |
+| **Extended** | every other returned pick | up to 10 per competition per day | logged + settled | no | league channel, labelled `· EXTENDED · league rank n` | **no** | **no** |
+
+**Core is unchanged in every respect that matters.** Still 5, still global, still the only tier
+reaching the card, the Telegram post, the running total, the bankroll, the Summary figures and every
+calibration/edge/CLV report — `excel_tracker._core_rows()` remains the single filter. Core picks are
+also logged **first**, so where a fixture somehow carries two picks the sheet's one-open-bet-per-
+fixture guard resolves it in Core's favour.
+
+**Never pad — more important here, not less.** Ten leagues each allowed 10 picks is an allowance, not
+a target. `LEAGUE_SYSTEM_PROMPT` states that an empty list for a competition is a normal and expected
+answer, that a short list costs nothing, and that the model is judged on the strike rate of what it
+returns rather than on how much of the allowance it used; it also tells the model explicitly that it
+is seeing one competition in isolation and must not measure it against how many picks a competition
+"ought" to produce. Confirmed on the first live run: a 12-fixture, 2-competition slate returned 8
+picks against an allowance of 20 (La Liga 3, Jupiler Pro League 5).
+
+**Cost — measured, not estimated.** The system prompt is 1,765 tokens and the enriched payload runs
+~655 tokens per fixture (`count_tokens`, 15 Aug 2026). Per-league fan-out repeats the system prompt
+per call, so it is **cached**: identical across every call in a run and only seconds apart, the first
+call writes it at 1.25× and the rest read it at 0.1×, and `usage_tracker` already prices both. On
+single-competition days the cache is skipped, since the write premium would be pure loss.
+
+| Slate | Before (1 call) | After (N+1 calls) | Picks |
+|---|---|---|---|
+| 15 Aug live run — 2 competitions, 12 fixtures | $0.047 | **$0.060** (measured: 3 calls, 1,877 tokens cached and re-read) | 6-8 |
+| Typical — 4-5 competitions, ~21 fixtures | ~$0.08 | ~$0.11 | 10-12 |
+| Peak — 8 competitions, 47 fixtures | ~$0.12 | ~$0.20 | 20-25 |
+| Cap-bound worst case — 8 competitions × 10 picks | — | $0.36 in one run | 80 |
+
+**≈$1.90 → ≈$2.90 a month** at the measured slate mix (+~50%, ~+$1). Output tokens, not input, are
+what scale: each pick costs ~175 output tokens, so the bill tracks how many bets the model actually
+finds. `max_tokens` per league call rose 2,048 → 4,096 — a 10-pick response measured 1,999 tokens on
+13 Aug 2026, i.e. one verbose run away from truncating into an unparseable response.
+
+**Odds API cost went DOWN, despite 3× the picks.** `enrich_picks_with_real_odds` now caches by
+**competition** instead of by fixture: `/odds` returns every event in a competition in one billed
+3-unit request, so one fetch serves all of that competition's picks and the rest is matched
+client-side (exactly what `closing_odds.py` already did). Keyed per fixture it bought the same
+league-wide response once per pick — harmless at 5 picks/day, but 10 picks in one competition would
+have meant 10 identical requests and 30 units for data already in hand. Picks-run enrichment is now
+**3 units per competition** (≤30/day at 10 competitions) rather than 3 units per pick (up to 240/day).
+
+**Failure isolation.** A competition whose call fails costs that competition only: it is logged at
+ERROR, skipped, and the rest of the slate is still analysed and delivered. Only a run where *every*
+competition failed raises and fires the picks-failed Telegram alert — one alert, never one per
+league. If the Core selection call fails the run continues on a deterministic fallback order (each
+competition's rank-1 pick first, best edge first), because that step decides ordering only, never
+which bets exist.
+
+**Two volume fixes that the pick count forced:**
+
+- **Sheet writes are batched** (`excel_tracker.log_picks_batch`, `tracker.log_picks_batch`). Writing
+  picks one at a time costs ~4 Sheets API calls each *and* repaints every row of the sheet per pick,
+  so a 30-pick run would have made ~120 calls and 30 full repaints inside a couple of minutes — into
+  Sheets' per-minute quota, where the failure mode is a pick delivered to Discord but missing from
+  the sheet. The batch reads once, appends once and repaints once, with the identical duplicate
+  guards (staged rows are checked against each other exactly as if already written). `log_to_excel`
+  is unchanged for single-pick callers and now shares the guard and row builder with the batch path.
+- **Discord sends are paced** at `DISCORD_PICK_SEND_DELAY = 1.0s`. A single competition can now post
+  10 embeds back to back, and `send_to_discord` retries a 429 exactly once — an unpaced burst would
+  spend that retry immediately and start dropping picks.
+
+**The Opus 5 shadow deliberately did NOT follow.** It keeps one global call capped at 10, on its own
+frozen constants (`OPUS_MAX_PICKS_PER_RUN` / `OPUS_CORE_PICKS_PER_RUN`) and the unchanged
+`main.SYSTEM_PROMPT`, which is byte-identical to the pre-change prompt (verified by hash). Fanning it
+out would take a side experiment from ~$4.29/month to roughly $17-25 at Opus pricing. The consequence
+is recorded honestly below: the model is **no longer the only variable**.
+
+#### ⚠️ Second prompt regime boundary — forward series only (15 Aug 2026)
+
+Core is now produced by a **different mechanism** again: per-competition prompts plus a selection
+call, instead of one cross-competition ranking. Historical rows are untouched, so the stored baseline
+is unaffected — but when the October calibration report is read, treat **both 13 Aug and 15 Aug 2026**
+as soft regime boundaries before concluding anything about model drift. The 14 Aug form/H2H repair is
+a third. Extended also stops being comparable to Core as a sample: it accrues roughly 5× faster from
+this date and spans every competition, so the Summary's tier breakdown compares "the globally
+selected 5" against "everything else", not two adjacent rank bands.
 
 ### Probability calibration engine (added — `calibration.py`)
 - Claude must now output a `probability` field per pick (0-100, its estimated true win probability), logged to the 'Claude Prob %' column; the market implied probability (100 / market odds) is logged to 'Market Prob %' when real odds were found
@@ -1029,7 +1160,7 @@ cell with `pnl_for_result(result, market_odds_from_row(row, header))` and call
 - Each pick's kickoff time is captured from the RapidAPI fixture data at pick-log time and stored in the 'Kickoff UTC' column (plus 'League', for odds-batching)
 - `closing_odds_job` polls every 15 minutes; for any unsettled pick whose kickoff is 5-65 minutes away, it fetches current market odds from The Odds API and overwrites the 'Closing Odds' column — the last write before kickoff becomes the closing price
 - Odds API calls are batched per competition (one request covers every due match in that league that cycle), not one request per match
-- Self-imposed cap of **60** Odds API requests/day (raised from 12 on 6 Aug 2026 with the paid tier); polling is skipped with a warning if exceeded. Sizing: a pick's closing window is 5-65 min and the poller runs every 15 min, so covering one competition's kickoff wave costs 4 requests — 60/day buys ~15 competition-waves, i.e. real coverage across staggered kickoff blocks rather than a token single poll
+- Self-imposed cap of **60** Odds API requests/day (raised from 12 on 6 Aug 2026 with the paid tier); polling is skipped with a warning if exceeded. Sizing: a pick's closing window is 5-65 min and the poller runs every 15 min, so covering one competition's kickoff wave costs 4 requests — 60/day buys ~15 competition-waves, i.e. real coverage across staggered kickoff blocks rather than a token single poll. **Re-check this against the per-league cap (15 Aug 2026):** the poller is tier-BLIND by design (both tiers collect closing odds) and now chases 30+ unsettled picks spread over up to 10 competitions, each with several kickoff waves, so 15 waves/day is no longer comfortable headroom. When the cap trips, polling stops for the rest of the day — and since the job takes rows in sheet order rather than Core-first, the skipped waves can be the ones carrying Core picks, which is the only tier CLV is scored on. Not yet changed: the two candidate fixes are raising the cap (the picks-run enrichment re-key freed ~210 units/day of worst-case budget, so there is room) or ordering `get_unsettled_picks_with_kickoff` Core-first
 - `calibration.py`'s `clv_report()` computes CLV = (original odds / closing odds − 1) × 100 for every settled pick with both values — average CLV, % of picks with positive CLV, and ROI split between positive- and negative-CLV picks
 - Appended to the existing monthly calibration Telegram message, with the same below-300-picks sample size warning
 - Purely additive measurement: never touches pick generation, Kelly staking, or the calibration engine's existing reports; every step fails silently on error
@@ -1088,8 +1219,19 @@ date-gated shut (`WC_2026_END`, 19 Jul 2026) so it cannot fire again as written.
 
 Runs `claude-opus-5` over the **exact same enriched fixture pool** `daily_picks_job` just used for
 its production Sonnet picks — same fixtures, same form/H2H context, same `SYSTEM_PROMPT`, same
-10-pick ranked format, same Core/Extended tiers, same never-pad rule. **The model is the only
-variable, and no fixture data is re-fetched** (zero extra RapidAPI cost). Same design as the Fable 5
+10-pick ranked format, same Core/Extended tiers, same never-pad rule, and **no fixture data
+re-fetched** (zero extra RapidAPI cost).
+
+> **The model stopped being the only variable on 15 Aug 2026.** Production moved to one call per
+> competition capped at 10 each; the shadow deliberately stayed a single whole-slate call capped at
+> 10, on its own frozen `OPUS_MAX_PICKS_PER_RUN` / `OPUS_CORE_PICKS_PER_RUN` and the unchanged
+> `main.SYSTEM_PROMPT` (byte-identical to the pre-change prompt, verified by hash). Fanning the
+> shadow out per league would take it from ~$4.29/month to roughly $17-25 at Opus pricing — a
+> decision worth taking deliberately rather than inheriting from a production constant. What stays
+> comparable is the question both models answer from the same pool: **which are the best 5 bets
+> here**. What is no longer comparable is the harness — Sonnet's Core is chosen by a per-league
+> prompt plus a selection call, Opus's by one cross-competition ranking. Treat that as a known
+> confound in any Core-vs-Core read, and re-cost before changing it. Same design as the Fable 5
 shadow (12-18 Jul 2026, removed in `35846c9`) — which is why the generic hooks that experiment left
 behind are reused rather than a second engine being written.
 
@@ -1196,8 +1338,10 @@ output MTok** (confirmed against the live models reference on the day, not recal
 | **`high`** (API default, what it runs at) | 6,010 | 4,441 | **$0.141** | **$4.29** | 56s |
 
 `high` deliberately: throttling the shadow would understate Opus and make the comparison misleading.
-For reference the production Sonnet football call is ~$0.026/run. `OPUS_MAX_TOKENS = 16000` because
-`max_tokens` caps thinking **plus** response text on Opus 5 — production's 2048 would truncate.
+For reference the production Sonnet football run is ~$0.06 on a light slate and ~$0.20 at peak since
+it went per-league (it was ~$0.026/run when this table was written). `OPUS_MAX_TOKENS = 16000`
+because `max_tokens` caps thinking **plus** response text on Opus 5 — the 2,048 production used then
+would truncate (production itself now sends 4,096 per league call).
 
 **Two Opus 5 API specifics this code depends on.** Thinking blocks precede the text block, so the
 parser takes the first `type == "text"` block rather than `content[0]` (the exact bug that broke the
@@ -1235,9 +1379,9 @@ Completion estimates per area — update these percentages whenever a related ch
 
 | Area | Done | Status |
 |---|---|---|
-| Bot core | 98% | Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026) |
-| Data quality | 90% | Picks-per-run hard-capped at `MAX_PICKS_PER_RUN` in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + closing odds (CLV) live since 4 Jul 2026. **Form/H2H enrichment was NOT live despite this line previously claiming it was** — both its endpoints 404'd from 29 Jun to 14 Aug 2026 and the failures were logged at DEBUG under an INFO root logger, so every football pick in that window was made on team names alone; repaired 14 Aug 2026 onto `football-get-matches-by-date` (form) + `football-get-head-to-head` (H2H) with failures now at WARNING/ERROR. Knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
-| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change. **Regime break at 14 Aug 2026:** every pick logged before that date was made with no form and no H2H (see "Form & H2H enrichment"), so the pre-14-Aug rows measure the model reasoning from team names alone. Treat the series as two samples rather than one when the verdict is read, and do not attribute a change in calibration after this date to model drift |
+| Bot core | 98% | Picks analysed **one competition per Claude call** since 15 Aug 2026, with a global selection step naming the day's Core 5 — the sheet write path batched and Discord sends paced to carry the resulting 30+ picks a day. Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026) |
+| Data quality | 91% | Picks-per-run hard-capped in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). That cap became **per competition** (`MAX_PICKS_PER_LEAGUE = 10`) on 15 Aug 2026, so card and sheet now diverge *by design*: the sheet carries 30+ picks and the card the 5 Core ones, and it is the tier split — not the cap — that keeps them consistent. The card's backstop was re-cut as a tier filter rather than a positional `[:5]` in the same change, and picks-run Odds API enrichment was re-keyed per competition instead of per fixture, which cut its worst case from ~300 to ~30 units/day. Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + closing odds (CLV) live since 4 Jul 2026. **Form/H2H enrichment was NOT live despite this line previously claiming it was** — both its endpoints 404'd from 29 Jun to 14 Aug 2026 and the failures were logged at DEBUG under an INFO root logger, so every football pick in that window was made on team names alone; repaired 14 Aug 2026 onto `football-get-matches-by-date` (form) + `football-get-head-to-head` (H2H) with failures now at WARNING/ERROR. Knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
+| Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change. **Regime break at 14 Aug 2026:** every pick logged before that date was made with no form and no H2H (see "Form & H2H enrichment"), so the pre-14-Aug rows measure the model reasoning from team names alone. Treat the series as two samples rather than one when the verdict is read, and do not attribute a change in calibration after this date to model drift. **Second break at 15 Aug 2026:** Core is selected by a different mechanism from that date — one call per competition plus a global selection call, instead of one cross-competition ranking (see "Per-league picks and global Core selection"), so it is the third boundary in the series alongside 13 and 14 Aug |
 | Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |

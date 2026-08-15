@@ -70,11 +70,13 @@ def _settled_prob_rows(ws_getter=_picks_ws) -> list[dict] | None:
         return []
 
     # CORE ONLY. calibration_report() and edge_report() both read through here,
-    # so this single filter keeps Extended (rank 6-10) picks out of both. The
-    # calibration series has to stay comparable with everything collected since
-    # 30 Jun 2026, and Extended picks are by construction lower-conviction —
-    # folding them in would drag the measured curve without the model having
-    # changed at all.
+    # so this single filter keeps Extended picks out of both. The calibration
+    # series has to stay comparable with everything collected since 30 Jun 2026,
+    # and Extended picks are by construction lower-conviction — folding them in
+    # would drag the measured curve without the model having changed at all.
+    # This got sharper on 15 Aug 2026, when the per-league cap took Extended from
+    # at most 5 picks a day to 25+: unfiltered, Extended would outnumber the
+    # baseline within weeks.
     out = []
     for row in _core_rows(rows[1:], header):
         result = row[result_col].strip().upper() if len(row) > result_col else ""

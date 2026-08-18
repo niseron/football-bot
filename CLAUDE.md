@@ -4,6 +4,19 @@ Read `PROJECT_SUMMARY.md` for the full project overview: architecture, file
 structure, environment variables, deployment (Railway), Google Sheets layout,
 current features, and known limitations.
 
+## Delivery — Discord ONLY (18 Aug 2026)
+
+**Telegram was removed from the entire repo on 18 Aug 2026.** There is no
+`python-telegram-bot` dependency, no `TELEGRAM_*` env var, and no `telegram`
+import anywhere — do not reintroduce one. Discord is the only delivery surface
+for football and tennis alike, which changes how a failed send must be read: it
+is no longer "the mirror missed one", it is the delivery failing. Two pieces of
+content were TELEGRAM-ONLY and were ported rather than dropped — the weekly
+summary text and the monthly calibration report (both now `weekly-cards`) — and
+one, the Kelly stake, moved from the picks digest into the Core pick embed. The
+Telegram picks digest itself is gone with no replacement: the per-pick embeds
+already carry the same picks in richer form.
+
 ## Discord Delivery
 
 `discord_bot.py` handles all Discord delivery (send-only, REST via
@@ -14,24 +27,31 @@ current features, and known limitations.
 `ligue-1`, `champions-league`, `europa-league`, `conference-league`, `tennis-picks`, `tennis-picks-lower`,
 `tennis-results`, `usage` to Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
 missing token/key skips that piece without touching the rest of the flow.
-For football, Discord is purely additive (mirrors Telegram). Individual pick
-messages (league channels + `tennis-picks`) are Discord EMBEDS built by
-`discord_bot.py`'s `build_pick_embed()` — never plain text; card and result
-sends stay plain text/images. Test all configured channels with
+Individual pick messages (league channels + `tennis-picks`) are Discord EMBEDS
+built by `discord_bot.py`'s `build_pick_embed()` — never plain text; card and
+result sends stay plain text/images. A **Core** football embed also carries a
+`Stake` field (the Kelly figure, which lived only in the removed Telegram
+digest); Extended embeds deliberately do not, because a stake on a pick outside
+the tracked book would read as a claim on a bankroll it is excluded from.
+
+Long text — the weekly summary, the monthly calibration report — must go through
+`send_long_to_discord()`, which splits on line boundaries. Plain
+`send_to_discord()` **truncates** at 2000 characters, which would silently eat
+the tail of a report. Test all configured channels with
 `python discord_bot.py --test`. Details in PROJECT_SUMMARY.md section 5b.
 
 ## Tennis Delivery — Discord-ONLY
 
-The tennis system never posts to Telegram, unlike football's Telegram +
-Discord pattern. Reason: user preference — Discord is easier to view. Tennis
-picks are split by rank tier: both players inside `TENNIS_RANK_THRESHOLD`
+Tennis has always been Discord-only; since 18 Aug 2026 so is football, so this
+is no longer a difference between the two pipelines — what remains specific to
+tennis is WHICH channels it uses. Tennis picks are split by rank tier: both players inside `TENNIS_RANK_THRESHOLD`
 (default 150) → `tennis-picks`; either player outside or unranked →
 `tennis-picks-lower` (the tier is also logged to the Sheet's 'Rank Tier'
 column). The picks-failed alert goes to `tennis-picks`. Settled results go
 to `tennis-results` (`run_all.py` `tennis_live_results_check`) — never the
 football `results-cards` channel.
-`TELEGRAM_TENNIS_CHANNEL_ID` was removed on 10 Jul 2026; do not reintroduce
-it or add any Telegram send to the tennis pipeline.
+`TELEGRAM_TENNIS_CHANNEL_ID` was removed on 10 Jul 2026 and every remaining
+`TELEGRAM_*` variable on 18 Aug 2026; do not reintroduce any of them.
 
 Sheet writers in this pipeline return `bool` and their callers gate on it
 (fixed 13 Aug 2026): `update_tennis_row_result` and `update_tennis_closing_odds`
@@ -49,8 +69,9 @@ busy day yields 30+ picks across up to 10 competitions. A global selection step
 **Core**; every other pick is **Extended** (so at most 10 per competition per day).
 Both tiers are logged to the Picks tab, settled by the same `auto_results.py` path, and
 posted to their league's Discord channel (Extended embeds are labelled
-`· EXTENDED · league rank n`). Only Core reaches the picks card, the Telegram post, the
-running total/bankroll columns, the Summary totals, and the calibration/edge/CLV reports.
+`· EXTENDED · league rank n`). Only Core reaches the picks card, the `Stake` embed
+field, the running total/bankroll columns, the Summary totals, and the
+calibration/edge/CLV reports.
 
 **Tier does not follow from a rank number.** It did until 15 Aug 2026 (ranks 1-5 Core,
 6-10 Extended of one global list); now `league_rank` is the pick's position *inside its
@@ -67,17 +88,17 @@ of the slate still delivers. Only a run where every competition failed raises an
 the picks-failed alert — never one alert per league. A failed Core selection call
 falls back to a deterministic order; it decides ordering only, never which bets exist.
 
-**The picks-failed alert goes to BOTH Telegram and Discord `picks-cards`, independently**
-(18 Aug 2026). It was Telegram-only, behind a missing-token guard that returned early, so
-nothing reached the surface the outage is actually noticed on: an exhausted API credit
-balance killed three consecutive whole slates (16-18 Aug 2026) in silence. Neither surface
-may gate the other. The alert also carries the first upstream error as a `Reason:` line —
-every competition failing almost always has ONE shared cause, and naming it is what turns
-a three-day outage into a same-morning fix. Both channels are subscriber-facing, so that
-text is scrubbed of model AND vendor names (`_scrub_model_names`) and truncated to
-`ALERT_DETAIL_MAX_CHARS`. `tennis_main._notify_tennis_picks_failed` took the same detail
-argument and was finally wired to the API-failure path, which had been silent on every
-surface since it was written.
+**The picks-failed alert goes to Discord `picks-cards` and must never fail quietly**
+(18 Aug 2026). It was Telegram-only behind a missing-token guard that returned early, so
+an exhausted API credit balance killed three consecutive whole slates (16-18 Aug 2026)
+in silence and went unnoticed for three days. `_notify_picks_failed` therefore CHECKS the
+return value of `send_to_discord` and logs an error when delivery did not land — keep that
+check. The alert carries the first upstream error as a `Reason:` line: every competition
+failing almost always has ONE shared cause, and naming it is what turns a three-day outage
+into a same-morning fix. The channel is subscriber-facing, so that text is scrubbed of
+model AND vendor names (`_scrub_model_names`) and truncated to `ALERT_DETAIL_MAX_CHARS`.
+`tennis_main._notify_tennis_picks_failed` takes the same `detail` argument and is wired to
+the API-failure path, which had been silent on every surface since it was written.
 
 **Volume plumbing that must stay batched/paced.** Sheet writes go through
 `log_picks_batch` (one read, one append, one repaint — `log_to_excel` costs ~4 API calls
@@ -163,8 +184,8 @@ the retroactive correction. Duplicate rows are neither Core nor Extended, so
 they drop out of every metric automatically — do not add them to `_core_rows`
 or `_extended_rows`, and do not "clean up" the tag: it is the audit trail.
 
-This is a **logging-level** guard on purpose: cards, Telegram and Discord all
-render the unfiltered `picks` list, so a repeated fixture still shows on the
+This is a **logging-level** guard on purpose: the card and the Discord embeds
+both render the unfiltered `picks` list, so a repeated fixture still shows on the
 card. Do not push this filter up into `analyse_with_claude` or the delivery
 path.
 
@@ -177,6 +198,15 @@ path.
   found (VS Code kept re-adding it on save). Claude Code hooks in the
   workspace `.claude/settings.json` do the same fix at session start and
   after every Edit/Write, so a BOM in `.env` never needs manual attention.
+
+- **Never let a credential reach the logs.** `httpx` logs the full request URL at
+  INFO, so any SDK that puts a secret in the URL leaks it into Railway's log
+  stream — `python-telegram-bot` did exactly that with its bot token (5 plaintext
+  copies before 18 Aug 2026). `httpx`/`httpcore` are pinned to WARNING in both
+  `main.py` and `tennis_main.py` (the standalone entry point that never imports
+  `main`). The Anthropic SDK is httpx-backed but sends its key as a header, and
+  RapidAPI/Odds API go through `requests`, which never logs URLs — so no key
+  leaks today. Re-check this whenever an httpx-backed SDK is added.
 
 - Always commit and push after completing any code change — never leave changes uncommitted at the end of a task.
 - When a shipped change affects a Roadmap area in `PROJECT_SUMMARY.md`, update that area's completion percentage in the same commit.

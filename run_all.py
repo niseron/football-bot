@@ -26,7 +26,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from auto_results import (
     _format_pending_notification,
     _format_result_notification,
-    _telegram_send,
     run_auto_results,
 )
 from closing_odds import run_closing_odds_check
@@ -58,8 +57,6 @@ async def live_results_check() -> None:
             continue
         msg = _format_result_notification(r)
         log.info("Sending result notification: %s | %s", r["match"], r["result"])
-        await asyncio.to_thread(_telegram_send, msg)
-        # Discord mirror — same trigger, same text; send_to_discord never raises
         await asyncio.to_thread(send_to_discord, "results-cards", msg)
         _notified.add(key)
 

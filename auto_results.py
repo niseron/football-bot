@@ -4,7 +4,7 @@ Automatic result checker for the football betting bot.
 Usage:
     python auto_results.py              # run once immediately and exit
     python auto_results.py --schedule   # nightly daemon at 00:15 Brussels
-    python auto_results.py --live       # check every 30 min + Telegram alerts
+    python auto_results.py --live       # check every 30 min + Discord alerts
 """
 from __future__ import annotations
 
@@ -67,45 +67,6 @@ _pending_followed_up: set[tuple] = set()
 PENDING_FOLLOWUP_HOURS = 24
 
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
-
-def _telegram_send(text: str) -> None:
-    token   = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHANNEL_ID")
-    if not token or not chat_id:
-        log.warning("Telegram not configured — skipping notification")
-        return
-    try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=10,
-        )
-        r.raise_for_status()
-        log.info("Telegram notification sent")
-    except Exception as exc:
-        log.error("Telegram send failed: %s", exc)
-
-
-def _telegram_send_photo(path) -> None:
-    token   = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHANNEL_ID")
-    if not token or not chat_id:
-        return
-    try:
-        with open(path, "rb") as f:
-            r = requests.post(
-                f"https://api.telegram.org/bot{token}/sendPhoto",
-                data={"chat_id": chat_id},
-                files={"photo": f},
-                timeout=30,
-            )
-        r.raise_for_status()
-        log.info("Telegram photo sent: %s", path)
-    except Exception as exc:
-        log.error("Telegram photo send failed: %s", exc)
-
-
 def _score_description(
     bet_type: str,
     pick: str,
@@ -114,7 +75,7 @@ def _score_description(
     home_score: int,
     away_score: int,
 ) -> str:
-    """Human-readable result line for a Telegram notification."""
+    """Human-readable result line for a Discord result notification."""
     bt    = bet_type.lower()
     total = home_score + away_score
     score = f"{home_score}-{away_score}"
@@ -759,8 +720,7 @@ if __name__ == "__main__":
                     continue
                 msg = _format_result_notification(r)
                 print(f"\nSending notification:\n{msg}")
-                _telegram_send(msg)
-                send_to_discord("results-cards", message=msg)  # same trigger as Telegram
+                send_to_discord("results-cards", message=msg)
                 notified.add(key)
 
         _live_check()
@@ -836,15 +796,15 @@ if __name__ == "__main__":
         print(sep)
         _print_stats(stats)
 
-        # ── Per-pick Telegram notifications for yesterday ─────────────────────
+        # ── Per-pick Discord notifications for yesterday ─────────────────────
         yesterday = date.today() - timedelta(days=1)
         yesterday_picks = get_picks_for_date(yesterday)
         settled = [p for p in yesterday_picks if p["result"] in ("WIN", "HALF WIN", "HALF LOSS", "LOSS")]
 
         if not settled:
-            print(f"\nNo settled picks for {yesterday} — skipping Telegram notifications.")
+            print(f"\nNo settled picks for {yesterday} — skipping notifications.")
         else:
-            print(f"\nSending {len(settled)} individual result notification(s) to Telegram...")
+            print(f"\nSending {len(settled)} individual result notification(s) to Discord...")
             total_pnl = 0.0
             for p in settled:
                 key = (p["match"], p["bet_type"], p["pick"])
@@ -867,21 +827,28 @@ if __name__ == "__main__":
                         "away_score": 0,
                     }
                 total_pnl += notif["pnl"] if notif.get("pnl") is not None else 0.0
-                _telegram_send(_format_result_notification(notif))
+                # Discord-only since 18 Aug 2026. Both of these sends were
+                # Telegram-only before that — the ONLY two in the repo with no
+                # Discord equivalent at all, so removing Telegram without adding
+                # them here would have silently deleted the manual settlement
+                # report rather than moved it.
+                send_to_discord("results-cards", message=_format_result_notification(notif))
 
             total_str = f"+{total_pnl:.2f}" if total_pnl >= 0 else f"{total_pnl:.2f}"
-            _telegram_send(
-                f"Results {yesterday.strftime('%d %b %Y')} — "
-                f"{total_str} units P&L ({len(settled)} settled picks)"
+            send_to_discord(
+                "results-cards",
+                message=(
+                    f"Results {yesterday.strftime('%d %b %Y')} — "
+                    f"{total_str} units P&L ({len(settled)} settled picks)"
+                ),
             )
             print("Done.")
 
             try:
                 from card_generator import generate_results_card
                 card_path = generate_results_card(settled, card_date=yesterday)
-                _telegram_send_photo(card_path)
-                log.info("Results card sent: %s", card_path.name)
                 send_to_discord("results-cards", image_path=card_path)
+                log.info("Results card sent: %s", card_path.name)
             except Exception as exc:
                 log.warning("Results card failed (non-fatal): %s", exc)
 

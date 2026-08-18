@@ -1,4 +1,4 @@
-"""Manual one-shot trigger — fetch fixtures, run Claude, send to Telegram, log picks."""
+"""Manual one-shot trigger — fetch fixtures, run Claude, log picks, post to Discord."""
 import asyncio
 import logging
 import sys
@@ -15,11 +15,8 @@ from main import (
     enrich_with_context,
     enrich_picks_with_real_odds,
     analyse_with_claude,
-    format_telegram_message,
-    send_to_telegram,
     _kickoff_lookup,
     _pick_log_entry,
-    _send_photo,
     _discord_pick_embed,
     DISCORD_LEAGUE_CHANNEL_KEYS,
     DISCORD_PICK_SEND_DELAY,
@@ -103,28 +100,25 @@ async def run():
     )
     extended = len(picks) - len(core_picks)
 
-    await send_to_telegram(format_telegram_message(core_picks, header="Football Picks"))
-    log.info("Sent %d Core pick(s) to Telegram (%d Extended logged, not sent)",
+    log.info("%d Core pick(s), %d Extended — Core goes on the card",
              len(core_picks), extended)
 
     card = None
     try:
         from card_generator import generate_picks_card
         card = generate_picks_card(core_picks, session=session)
-        await _send_photo(card)
-        log.info("Picks card sent: %s", card.name)
+        log.info("Picks card generated: %s", card.name)
     except Exception as exc:
         log.warning("Picks card failed (non-fatal): %s", exc)
 
-    # Discord delivery — mirrors daily_picks_job exactly. Omitted until
-    # 18 Aug 2026, which meant a manual recovery run published a DIFFERENT book
-    # to a different audience than the job it stands in for: the Sheet and
-    # Telegram got the picks, the league channels got nothing. That is the
-    # surface the outage is noticed on, so a recovery that skips it is not a
-    # recovery. Both tiers post to their league channel; the embed marks which
-    # is which, and the send is paced for the same reason it is in the job —
-    # one competition can send 10 embeds back to back and send_to_discord
-    # retries a 429 exactly once. send_to_discord never raises.
+    # Discord delivery — mirrors daily_picks_job exactly, and is now the whole
+    # of delivery. Omitted until 18 Aug 2026, which meant a manual recovery run
+    # published a DIFFERENT book to a different audience than the job it stands
+    # in for: the Sheet got the picks, the league channels got nothing. Both
+    # tiers post to their league channel; the embed marks which is which, and
+    # the send is paced for the same reason it is in the job — one competition
+    # can send 10 embeds back to back and send_to_discord retries a 429 exactly
+    # once. send_to_discord never raises.
     try:
         if card is not None:
             send_to_discord("picks-cards", image_path=card)

@@ -1,11 +1,12 @@
 """
-discord_bot.py — Discord delivery layer for the football AND tennis pipelines.
+discord_bot.py — THE delivery layer for the football AND tennis pipelines.
 
-For football this is purely additive: it mirrors the same picks/results/weekly
-content that already goes to Telegram. For TENNIS it is the ONLY delivery
-channel — tennis never posts to Telegram (user preference: Discord is easier
-to view). Send-only, so it talks to Discord's REST API directly via requests —
-no discord.py client, no gateway connection, no event loop of its own.
+Discord is the only delivery surface. Telegram was removed entirely on
+18 Aug 2026 (tennis never used it); nothing in this repo posts anywhere else,
+so a send that fails here is not "additive" or "a mirror" — it is the delivery
+failing, and every caller should read it that way. Send-only, so it talks to
+Discord's REST API directly via requests — no discord.py client, no gateway
+connection, no event loop of its own.
 
 Config (both must be set for any send to happen):
     DISCORD_BOT_TOKEN     — bot token from the Discord Developer Portal
@@ -32,7 +33,14 @@ Channel keys used by the pipeline (any key may be omitted — it is skipped):
                         TENNIS_RANK_THRESHOLD), Discord-only  (tennis_main.py)
     tennis-picks-lower  TENNIS lower-tier per-pick embed (either player
                         outside the threshold or unranked)    (tennis_main.py)
-    tennis-results      TENNIS settled result text, Discord-only (run_all.py)
+    tennis-results      TENNIS settled result text               (run_all.py)
+    usage               daily API usage / cost summary        (usage_tracker.py)
+
+Long reports (the weekly summary, the monthly calibration report) go through
+send_long_to_discord(), which splits on line boundaries. send_to_discord()
+TRUNCATES at 2000 characters, which is right for a stray oversized pick embed
+and wrong for a report — a silently half-posted performance report is exactly
+the kind of quiet failure this pipeline keeps getting bitten by.
 
 Individual pick messages are Discord EMBEDS built by build_pick_embed()
 (title = match, colour by confidence, inline Bet Type / Odds / Confidence
@@ -40,8 +48,11 @@ fields, reasoning as description, 🔥 VALUE footer). Card and result sends
 are unchanged plain text/images.
 
 send_to_discord() NEVER raises: missing token/mapping/key, a bad image path,
-or a Discord API failure all log a line and return False, so the existing
-Telegram flow can never be broken from here.
+or a Discord API failure all log a line and return False. That contract predates
+Discord being the only surface and is kept deliberately — one unreachable
+channel must not abort a run that still has other channels to deliver to. The
+trade-off is that callers who need to KNOW whether delivery happened have to
+check the return value; the picks-failed alert does exactly that.
 
 Test all configured channels (sends a text + image to each):
     python discord_bot.py --test
@@ -187,6 +198,55 @@ def send_to_discord(
     except Exception as exc:
         log.warning("Discord send to '%s' failed (non-fatal): %s", channel_key, exc)
         return False
+
+
+def send_long_to_discord(channel_key: str, text: str) -> bool:
+    """
+    Post text of any length, split across as many messages as it takes.
+
+    send_to_discord() truncates at _MAX_CONTENT_LEN. For a pick embed that is a
+    sane guard; for the weekly summary or the monthly calibration report it
+    would silently drop the tail, and a report that quietly loses its last
+    section is worse than one that never posted. Splits on line boundaries so a
+    table row or a stat line is never cut in half, and falls back to a hard
+    character split only for a single line longer than the limit.
+
+    Returns True only if EVERY chunk was delivered.
+    """
+    if not text:
+        return False
+
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        while len(line) > _MAX_CONTENT_LEN:
+            # Pathological single line — hard-split it.
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.append(line[:_MAX_CONTENT_LEN])
+            line = line[_MAX_CONTENT_LEN:]
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) > _MAX_CONTENT_LEN:
+            chunks.append(current)
+            current = line
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+
+    ok = True
+    for i, chunk in enumerate(chunks):
+        if i:
+            # Same pacing rationale as the pick embeds: Discord allows roughly
+            # one sustained message per second per channel and send_to_discord
+            # spends its single 429 retry immediately.
+            time.sleep(1)
+        if not send_to_discord(channel_key, message=chunk):
+            ok = False
+    if len(chunks) > 1:
+        log.info("Discord: '%s' report sent as %d message(s)", channel_key, len(chunks))
+    return ok
 
 
 # ── Channel test ──────────────────────────────────────────────────────────────

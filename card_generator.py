@@ -2,7 +2,7 @@
 card_generator.py — Branded PNG cards for thepicksai.
 
 Four card types:
-  generate_picks_card()    — daily / evening picks, 1080×(dynamic), up to 5 picks (Telegram)
+  generate_picks_card()    — daily / evening picks, 1080×(dynamic), up to 5 picks (Core)
   generate_picks_card_ig() — Instagram-feed variant, 1080×1350 max, up to 3 picks
   generate_results_card()  — daily settled results
   generate_weekly_card()   — Monday weekly summary
@@ -374,7 +374,7 @@ def generate_picks_card_ig(
 
     Font sizes shrink in small steps (never below 70% of the base size) if 3
     picks would overflow 1350px — e.g. long match names or bet descriptions
-    that wrap to extra lines. generate_picks_card() (the 5-pick Telegram
+    that wrap to extra lines. generate_picks_card() (the 5-pick Core
     card) is untouched by this function.
     """
     CARDS_DIR.mkdir(parents=True, exist_ok=True)

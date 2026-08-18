@@ -8,8 +8,9 @@ Europe/Brussels, 30 min after football's daily picks). It imports nothing
 from main.py / excel_tracker.py / tracker.py and shares no calibration data
 or sheet columns with football.
 
-Delivery is Discord-ONLY — unlike football, which posts to Telegram and
-mirrors to Discord, tennis never touches Telegram (user preference: Discord
+Delivery is Discord-ONLY. That was once the difference from football, which
+also posted to Telegram; since 18 Aug 2026 Telegram is gone repo-wide and every
+pipeline is Discord-only (user preference: Discord
 is easier to view). Each pick's text is posted to the 'tennis-picks' Discord
 channel key via discord_bot.py's send_to_discord.
 
@@ -48,6 +49,12 @@ from tennis_excel_tracker import (
 load_env()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# httpx logs the full request URL at INFO. No key leaks through it here (the
+# Anthropic SDK sends its key as a header, RapidAPI/Odds go via `requests`), but
+# tennis_main is a standalone entry point that never imports main.py, so it has
+# to silence httpx itself rather than inherit main's setting.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -753,13 +760,14 @@ def _strip_code_fences(text: str) -> str:
 # coupling. See the module docstring.
 _MODEL_NAME_RE = re.compile(r"\bclaude[\w.\-]*|\b(?:opus|sonnet|haiku)[\w.\-]*", re.I)
 _VENDOR_NAME_RE = re.compile(r"\banthropic\s*", re.I)
+_DANGLING_SEP_RE = re.compile(r"([(\[])\s*[,;]\s*")
 
 ALERT_DETAIL_MAX_CHARS = 300
 
 
 def _notify_tennis_picks_failed(reason: str, detail: str = "") -> None:
     """
-    Tennis is Discord-only — the alert goes to the picks channel, never Telegram.
+    The alert goes to the tennis picks channel, never the football one.
 
     `detail` carries the underlying error, scrubbed of model names and truncated
     because the channel is subscriber-facing. Added 18 Aug 2026: this was only
@@ -769,9 +777,9 @@ def _notify_tennis_picks_failed(reason: str, detail: str = "") -> None:
     """
     text = f"⚠️ Tennis picks failed today — {reason}."
     if detail:
-        clean = " ".join(
-            _VENDOR_NAME_RE.sub("", _MODEL_NAME_RE.sub("the model", detail)).split()
-        )
+        stripped = _VENDOR_NAME_RE.sub("", _MODEL_NAME_RE.sub("the model", detail))
+        stripped = _DANGLING_SEP_RE.sub(r"\1", stripped)
+        clean = " ".join(stripped.split())
         if len(clean) > ALERT_DETAIL_MAX_CHARS:
             clean = clean[:ALERT_DETAIL_MAX_CHARS] + "…"
         text += f"\nReason: {clean}"

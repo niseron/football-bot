@@ -10,7 +10,7 @@ can send Discord notifications from the identical trigger.
 Fully independent of the football data path: reads/writes only via
 tennis_excel_tracker. Notifications are Discord-ONLY — each settled pick's
 result text goes to the 'tennis-results' Discord channel key (tennis never
-touches Telegram, unlike football's Telegram + Discord delivery).
+posts to the tennis channels, never football's results-cards).
 
 Bet type settlement (units: WIN = odds−1, LOSS = −1, VOID = 0):
 - Match Winner     — picked player won the match

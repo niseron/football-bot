@@ -11,7 +11,6 @@ from datetime import date, datetime, timedelta, timezone
 import anthropic
 import requests
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Bot
 
 from env_loader import load_env
 from tracker import log_picks_batch, picks_exist_for_session
@@ -25,9 +24,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID")
-TELEGRAM_IG_CHANNEL_ID = os.environ.get("TELEGRAM_IG_CHANNEL_ID")
+
+# httpx logs "METHOD <full URL> HTTP/1.1 200 OK" at INFO for every request its
+# clients make. The Anthropic SDK is built on httpx and its URL is harmless
+# (the key travels in a header), but python-telegram-bot put its bot TOKEN in
+# the URL PATH, so five plaintext credentials went into the Railway logs before
+# 18 Aug 2026. Telegram is gone now and the leak with it; this stays as
+# defence-in-depth, because the next httpx-backed SDK added here should not be
+# able to reintroduce it. RapidAPI and The Odds API are unaffected either way:
+# both go through `requests`, which never logs URLs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Single-ID domestic leagues.
 #
@@ -177,8 +184,8 @@ MAX_PARENT_LOOKUPS_PER_RUN = 12
 # Hard cap on picks per COMPETITION per run (15 Aug 2026). The prompt asks for a
 # ranked list of at most this many, but that is only an instruction — it has been
 # exceeded in practice (16 Jun 2026: 8 picks in one run; 14 Jun: 14). Enforced
-# once, in _analyse_one_league(), so every downstream consumer — sheet, Telegram,
-# card, Discord embeds — sees the identical list.
+# once, in _analyse_one_league(), so every downstream consumer — sheet, card,
+# Discord embeds — sees the identical list.
 #
 # History: 5 globally, raised to 10 globally on 13 Aug 2026 when picks became
 # ranked and tiered, and made PER-LEAGUE on 15 Aug 2026. A day with eight
@@ -190,9 +197,9 @@ MAX_PICKS_PER_LEAGUE = 10
 
 # Core stays GLOBAL and unchanged at 5 a day: the best 5 bets across the whole
 # slate, whatever it costs the individual competitions. Core is the baseline
-# series running unbroken since 30 Jun 2026 — it keeps the card, the Telegram
-# post, the running total, the Summary tab and every calibration/edge/CLV report
-# to itself. Extended picks are logged, settled and posted to their league's
+# series running unbroken since 30 Jun 2026 — it keeps the card, the running
+# total, the Summary tab and every calibration/edge/CLV report to itself.
+# Extended picks are logged, settled and posted to their league's
 # Discord channel, but are excluded from all of the above (excel_tracker's
 # _core_rows is the single filter enforcing that).
 #
@@ -1245,31 +1252,33 @@ def _strip_code_fences(text: str) -> str:
 # that carries one.
 _MODEL_NAME_RE = re.compile(r"\bclaude[\w.\-]*|\b(?:opus|sonnet|haiku)[\w.\-]*", re.I)
 _VENDOR_NAME_RE = re.compile(r"\banthropic\s*", re.I)
+_DANGLING_SEP_RE = re.compile(r"([(\[])\s*[,;]\s*")
 
 ALERT_DETAIL_MAX_CHARS = 300
 
 
 def _scrub_model_names(text: str) -> str:
     """Strip the AI stack out of text bound for a subscriber-facing channel."""
-    return " ".join(
-        _VENDOR_NAME_RE.sub("", _MODEL_NAME_RE.sub("the model", text)).split()
-    )
+    stripped = _VENDOR_NAME_RE.sub("", _MODEL_NAME_RE.sub("the model", text))
+    # Dropping the vendor name can strand the separator that followed it:
+    # "(Anthropic, claude-x)" would otherwise read "(, the model)".
+    stripped = _DANGLING_SEP_RE.sub(r"\1", stripped)
+    return " ".join(stripped.split())
 
 
 def _notify_picks_failed(reason: str, detail: str = "") -> None:
     """
-    Announce a total picks failure on BOTH surfaces, independently.
+    Announce a total picks failure on Discord, the only delivery surface.
 
-    Telegram-only until 18 Aug 2026, and the missing-token guard returned early,
-    so an unconfigured Telegram could silence the alert entirely. Discord is the
-    surface an outage is actually noticed on: three consecutive whole-slate
-    failures (16-18 Aug 2026, an exhausted API credit balance) produced nothing
-    there and went unseen for three days. Neither surface may gate the other —
-    that is the whole point of this function, so do not merge the two sends back
-    into one try block or reinstate an early return between them.
+    Three consecutive whole-slate failures (16-18 Aug 2026, an exhausted API
+    credit balance) went unseen for three days because this alert was
+    Telegram-only behind a guard that returned early when Telegram was
+    unconfigured. Telegram was removed entirely on 18 Aug 2026; the lesson that
+    outlives it is that this function must never again fail quietly, so it
+    checks delivery and logs an error when the send did not land.
 
     `detail` carries the underlying error so the alert says WHY, not just THAT.
-    It is scrubbed of model names and truncated: both channels are
+    It is scrubbed of model AND vendor names and truncated: the channel is
     subscriber-facing, and an upstream error is arbitrary third-party text.
     """
     text = f"⚠️ Picks failed today — {reason}."
@@ -1280,20 +1289,10 @@ def _notify_picks_failed(reason: str, detail: str = "") -> None:
         text += f"\nReason: {clean}"
     text += "\nCheck logs."
 
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID:
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text},
-                timeout=10,
-            )
-        except Exception as exc:
-            log.error("Failed to send picks-failed Telegram alert: %s", exc)
-    else:
-        log.error("Cannot send picks-failed Telegram alert — bot token/channel not configured")
-
-    # Discord — the football picks hub, mirroring how tennis alerts into its own
-    # picks channel. send_to_discord never raises and returns False on any skip.
+    # The football picks hub, mirroring how tennis alerts into its own picks
+    # channel. This is the ONLY surface now, so an undelivered alert is a
+    # silent outage — hence the explicit check on the return value rather than
+    # trusting the fire-and-forget contract.
     if not send_to_discord("picks-cards", message=text):
         log.error("Could not deliver picks-failed alert to Discord ('picks-cards')")
 
@@ -1656,63 +1655,7 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
     return ordered
 
 
-# ── Telegram ──────────────────────────────────────────────────────────────────
-
-def _escape_md(text: str) -> str:
-    for ch in r"\_*[]()~`>#+-=|{}.!":
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
-
-def format_telegram_message(picks: list[dict], header: str = "Football Picks") -> str:
-    today = datetime.now(timezone.utc).strftime("%d %b %Y")
-    lines = [f"*{_escape_md(header)} — {_escape_md(today)}*\n"]
-    for i, p in enumerate(picks, 1):
-        kelly = p.get("kelly")
-        if kelly is not None and float(kelly.get("stake") or 0) == 0:
-            kelly_line = "  ⛔ No stake — negative edge\n"
-        elif kelly is not None:
-            note_suffix = f" — {_escape_md(kelly['note'])}" if kelly.get("note") else ""
-            stake_str = f"{kelly['stake']:.2f}"
-            kelly_line = (
-                f"  💰 Suggested stake: €{_escape_md(stake_str)} \\(Kelly{note_suffix}\\)\n"
-            )
-        else:
-            kelly_line = ""
-
-        # ONE odds figure, never two: the real market price when we matched
-        # one, otherwise the estimate. Both are still logged to the sheet
-        # ('Claude Prob %' / 'Market Prob %') for calibration and CLV — this is
-        # display only, and nothing user-facing names the model.
-        market_odds = p.get("market_odds")
-        shown_odds  = market_odds if market_odds is not None else p["odds"]
-        value_tag   = " 🔥 *VALUE*" if (market_odds is not None and p.get("value")) else ""
-        odds_line = (
-            f"  Odds: `{_escape_md(str(shown_odds))}`{value_tag} "
-            f"\\| Confidence: {_escape_md(p['confidence'])}\n"
-        )
-
-        lines.append(
-            f"*{i}\\. {_escape_md(p['match'])}* \\({_escape_md(p['league'])}\\)\n"
-            f"  Bet: {_escape_md(p['bet_type'])} — *{_escape_md(p['pick'])}*\n"
-            + odds_line
-            + f"  _{_escape_md(p['reasoning'])}_\n"
-            + kelly_line
-        )
-    lines.append("_Good luck\\! Bet responsibly\\._")
-    return "\n".join(lines)
-
-
-async def send_to_telegram(text: str):
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    await bot.send_message(
-        chat_id=TELEGRAM_CHANNEL_ID,
-        text=text,
-        parse_mode="MarkdownV2",
-    )
-
-
-# ── Discord (additive delivery — never affects the Telegram flow) ────────────
+# ── Discord (the delivery surface) ───────────────────────────────────────
 
 def _discord_pick_embed(p: dict) -> dict:
     """
@@ -1725,6 +1668,21 @@ def _discord_pick_embed(p: dict) -> dict:
     pick is a real bet but sits outside the tracked 5-pick book, and an
     unlabelled embed would imply otherwise.
     """
+    # Kelly stake, Core only. It lived ONLY in the Telegram digest until
+    # 18 Aug 2026 — not in this embed, not on the card — so removing Telegram
+    # without moving it here would have deleted the staking advice from every
+    # surface at once. Core only because that is exactly who the digest showed
+    # it for: Extended picks sit outside the tracked book, and a stake figure on
+    # one would read as a claim on the bankroll it is deliberately excluded from.
+    kelly = p.get("kelly")
+    if kelly is not None and p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE:
+        stake = float(kelly.get("stake") or 0)
+        if stake == 0:
+            p = {**p, "stake_display": "⛔ No stake — negative edge"}
+        else:
+            note = f" — {kelly['note']}" if kelly.get("note") else ""
+            p = {**p, "stake_display": f"€{stake:.2f} (Kelly{note})"}
+
     league = p.get("league", "")
     rank   = p.get("league_rank")
     if p.get("pick_tier") == PICK_TIER_EXTENDED:
@@ -1754,12 +1712,6 @@ def _pick_log_entry(pick: dict, kickoff_lookup: dict[str, str]) -> dict:
         "market_odds": pick.get("market_odds"),
         "pick_tier": pick.get("pick_tier", PICK_TIER_CORE),
     }
-
-
-async def _send_photo(path, chat_id: str | None = None) -> None:
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    with open(path, "rb") as f:
-        await bot.send_photo(chat_id=chat_id or TELEGRAM_CHANNEL_ID, photo=f)
 
 
 # ── Main job ──────────────────────────────────────────────────────────────────
@@ -1842,9 +1794,9 @@ async def daily_picks_job():
     except Exception as exc:
         log.warning("Failed to log picks: %s", exc)
 
-    # From here on the CARD and TELEGRAM surfaces see Core only, so the daily
-    # post stays the same 5-pick book it has been since 30 Jun 2026. Extended
-    # picks reach Discord's league channels below, and the Sheet above.
+    # From here on the CARD sees Core only, so the daily post stays the same
+    # 5-pick book it has been since 30 Jun 2026. Extended picks reach Discord's
+    # league channels below, and the Sheet above.
     # Sorted by rank rather than trusting list order: the renderers number the
     # picks 1..5 by position, so conviction order has to be a guarantee here,
     # not something that happens to hold.
@@ -1854,25 +1806,21 @@ async def daily_picks_job():
     )
     extended_picks = [p for p in picks if p.get("pick_tier") == PICK_TIER_EXTENDED]
 
-    message = format_telegram_message(core_picks, header="Football Picks")
-    try:
-        await send_to_telegram(message)
-        log.info("Sent %d morning Core picks to Telegram", len(core_picks))
-    except Exception as exc:
-        log.error("Telegram send failed: %s", exc)
-
+    # The Telegram text digest is gone with Telegram (18 Aug 2026) and is NOT
+    # reproduced on Discord: it was a flat re-listing of the same Core picks the
+    # per-pick embeds below already carry in richer form, and its one piece of
+    # unique content — the Kelly stake — moved into the Core embed itself.
     card = None
     try:
         # Core only, passed explicitly: generate_picks_card also slices to 5
         # internally, but relying on that would make the card's contents an
         # accident of ordering rather than a stated choice.
         card = generate_picks_card(core_picks, session="morning")
-        await _send_photo(card)
-        log.info("Picks card sent: %s", card.name)
+        log.info("Picks card generated: %s", card.name)
     except Exception as exc:
         log.warning("Picks card failed (non-fatal): %s", exc)
 
-    # Discord delivery — additive; send_to_discord never raises.
+    # Discord delivery — the only delivery; send_to_discord never raises.
     # Both tiers post to their league channel; the embed marks which is which.
     #
     # Paced deliberately. Discord allows roughly one sustained message per second
@@ -1912,14 +1860,12 @@ async def daily_picks_job():
     try:
         ig_card = generate_picks_card_ig(core_picks)
         log.info("Instagram picks card saved: %s", ig_card.name)
-        if TELEGRAM_IG_CHANNEL_ID:
-            await _send_photo(ig_card, chat_id=TELEGRAM_IG_CHANNEL_ID)
-            log.info("Instagram picks card sent to TELEGRAM_IG_CHANNEL_ID")
-        else:
-            log.info("TELEGRAM_IG_CHANNEL_ID not set — skipping send")
-        # Discord mirror — same 'picks-cards' channel as the regular card,
-        # intentional (both card variants land in one place); send_to_discord
-        # never raises
+        # Same 'picks-cards' channel as the regular card, intentional (both card
+        # variants land in one place). Until 18 Aug 2026 this card ALSO went to a
+        # dedicated Telegram channel (TELEGRAM_IG_CHANNEL_ID) used for sourcing
+        # Instagram posts; that destination is gone, and the card is now pulled
+        # from Discord instead. It is still generated and saved to cards/ either
+        # way, so nothing about the artefact itself changed.
         send_to_discord("picks-cards", image_path=ig_card)
     except Exception as exc:
         log.warning("Instagram picks card failed (non-fatal): %s", exc)

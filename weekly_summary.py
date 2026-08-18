@@ -1,20 +1,30 @@
 """
 Standalone weekly summary scheduler.
-Posts a performance summary to Telegram every Monday at 09:05 Europe/Brussels.
+Posts a performance summary to Discord every Monday at 09:05 Europe/Brussels.
 On the first Monday of each month, also posts a probability calibration report.
+
+Both go to the 'weekly-cards' channel. Until 18 Aug 2026 both were TELEGRAM-ONLY
+and only the card IMAGE reached Discord, so removing Telegram would have taken
+the weekly text and the entire monthly calibration report off every surface at
+once. They are ported here, not dropped.
+
+The messages are still built in Telegram's MarkdownV2 (that is what the
+builders and _esc() emit) and converted at the send boundary by
+_to_discord_markdown(). Keeping the builders as they are means the escaping
+rules stay in ONE place; the converter is the only thing that knows about
+Discord's dialect.
 
 Run alongside main.py:
     python weekly_summary.py
 """
 import asyncio
 import logging
-import os
+import re
 from datetime import date
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram import Bot
 
-from discord_bot import send_to_discord
+from discord_bot import send_long_to_discord, send_to_discord
 from env_loader import load_env
 from excel_tracker import get_bet_type_breakdown, get_weekly_data
 
@@ -22,8 +32,23 @@ load_env()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
+# MarkdownV2 -> Discord. Telegram bold is *one* asterisk, Discord's is two, and
+# MarkdownV2 backslash-escapes a long list of punctuation that Discord renders
+# literally — left in place it would show every "\." and "\-" on screen.
+# Italics (_x_), inline code and code fences mean the same thing in both, so
+# they pass through untouched.
+_MD2_BOLD_RE   = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+# Any backslash-escaped PUNCTUATION character, not an enumerated set: the
+# builders hand-write escapes beyond what _esc() emits (the calibration report
+# contains a literal "\\<"), and each character missed would show on screen as
+# a stray backslash. MarkdownV2 only ever escapes punctuation, so this is exact.
+_MD2_ESCAPE_RE = re.compile(r"\\([^\w\s])")
+
+
+def _to_discord_markdown(text: str) -> str:
+    """Render a MarkdownV2 message the way Discord expects it."""
+    # Bold first: after unescaping, a literal "\*" would look like a delimiter.
+    return _MD2_ESCAPE_RE.sub(r"\1", _MD2_BOLD_RE.sub(r"**\1**", text))
 
 
 def _esc(text: str) -> str:
@@ -201,20 +226,16 @@ async def post_weekly_summary():
     data    = get_weekly_data()
     message = build_weekly_message(data)
 
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    await bot.send_message(
-        chat_id=TELEGRAM_CHANNEL_ID,
-        text=message,
-        parse_mode="MarkdownV2",
-    )
+    if not await asyncio.to_thread(
+        send_long_to_discord, "weekly-cards", _to_discord_markdown(message)
+    ):
+        log.error("Weekly summary text was not delivered to Discord ('weekly-cards')")
 
     try:
         from card_generator import generate_weekly_card
         card_path = generate_weekly_card(data)
-        with open(card_path, "rb") as f:
-            await bot.send_photo(chat_id=TELEGRAM_CHANNEL_ID, photo=f)
+        await asyncio.to_thread(send_to_discord, "weekly-cards", None, card_path)
         log.info("Weekly card sent: %s", card_path.name)
-        send_to_discord("weekly-cards", image_path=card_path)
     except Exception as exc:
         log.warning("Weekly card failed (non-fatal): %s", exc)
 
@@ -223,18 +244,20 @@ async def post_weekly_summary():
         if _is_first_monday_of_month():
             cal_message = build_calibration_message()
             if cal_message:
-                await bot.send_message(
-                    chat_id=TELEGRAM_CHANNEL_ID,
-                    text=cal_message,
-                    parse_mode="MarkdownV2",
-                )
-                log.info("Monthly calibration report posted")
+                if not await asyncio.to_thread(
+                    send_long_to_discord,
+                    "weekly-cards",
+                    _to_discord_markdown(cal_message),
+                ):
+                    log.error("Monthly calibration report was not delivered to Discord")
+                else:
+                    log.info("Monthly calibration report posted")
             else:
                 log.info("Monthly calibration skipped — no probability data yet")
     except Exception as exc:
         log.warning("Monthly calibration report failed (non-fatal): %s", exc)
 
-    log.info("Weekly summary posted to Telegram")
+    log.info("Weekly summary posted to Discord")
 
 
 async def main():

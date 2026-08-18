@@ -6,8 +6,8 @@ An automated football betting analysis bot that:
 - Fetches upcoming fixtures from a live football API (RapidAPI)
 - Enriches each fixture with last-5 team form and head-to-head history from the same API
 - Sends the enriched fixture list to Claude AI (claude-sonnet-4-6) for betting analysis
-- Posts the top 5 value picks daily to a Telegram channel at 12:00 Brussels time as a text message and a branded PNG card
-- Mirrors delivery to Discord (purely additive): picks/results/weekly PNG cards to card channels, plus each pick's text routed to a per-league Discord channel
+- Posts the day's picks to Discord at 12:00 Brussels time: a branded PNG card to `picks-cards` and each pick as an embed in its own per-league channel
+- Discord is the ONLY delivery surface — Telegram was removed from the whole repo on 18 Aug 2026 (see section 5)
 - Automatically checks match results every 30 minutes and updates Google Sheets
 - Polls closing odds every 15 minutes as kickoff approaches, for closing line value (CLV) tracking
 - Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
@@ -27,10 +27,10 @@ Since 9 Jul 2026 the repo also hosts a **fully separate tennis picks system** (A
 football-bot/
 │
 ├── run_all.py            Entry point for Railway — combines all 4 schedulers into one process
-├── main.py               Daily picks: fetches fixtures, enriches with form/H2H, runs Claude analysis, posts to Telegram
+├── main.py               Daily picks: fetches fixtures, enriches with form/H2H, runs Claude analysis, posts to Discord
 ├── auto_results.py       Automatic result checker — polls API every 30 min, updates Sheets, posts result cards
 ├── closing_odds.py       Closing line value (CLV) tracker — polls odds every 15 min near kickoff, writes 'Closing Odds'
-├── weekly_summary.py     Posts Monday performance summary to Telegram with PNG card
+├── weekly_summary.py     Posts Monday performance summary + monthly calibration report to Discord with PNG card
 ├── excel_tracker.py      Google Sheets data layer — all read/write to the spreadsheet
 ├── tracker.py            SQLite layer — local backup of every pick in picks.db
 ├── card_generator.py     Generates branded 1080×1080 PNG cards (picks, results, weekly summary)
@@ -74,13 +74,10 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `RAPIDAPI_KEY` | RapidAPI key for the live football data API |
 | `ODDS_API_KEY` | The Odds API key for real market odds (h2h/totals/spreads) used to flag value picks |
 | `ANTHROPIC_API_KEY` | Anthropic API key for Claude AI analysis |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token from @BotFather |
-| `TELEGRAM_CHANNEL_ID` | Telegram channel ID where picks are posted |
 | `GOOGLE_SHEETS_ID` | ID from the Google Sheet URL (between /d/ and /edit) |
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
-| `TELEGRAM_IG_CHANNEL_ID` | *Optional.* Telegram channel/chat ID that receives the Instagram-formatted picks card (`generate_picks_card_ig`) for manual download and posting. If unset, that card is still generated, saved to `/cards`, and sent to Discord's `picks-cards` channel — only the Telegram send is skipped. |
-| `DISCORD_BOT_TOKEN` | *Optional for football, required for tennis delivery.* Discord bot token (Developer Portal → Bot → Reset Token). If unset, all Discord delivery is skipped silently — football's Telegram is unaffected, but tennis (Discord-only) posts nowhere. |
-| `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","bundesliga":"999...","la-liga":"aaa...","serie-a":"bbb...","ligue-1":"ccc...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-picks-lower` / `tennis-results` keys carry ALL tennis delivery (tennis is Discord-only — no Telegram). |
+| `DISCORD_BOT_TOKEN` | **Required.** Discord bot token (Developer Portal → Bot → Reset Token). If unset, all delivery is skipped silently and NOTHING is posted anywhere — since 18 Aug 2026 Discord is the only surface, so this is no longer an optional extra. |
+| `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","bundesliga":"999...","la-liga":"aaa...","serie-a":"bbb...","ligue-1":"ccc...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-picks-lower` / `tennis-results` keys carry ALL tennis delivery. |
 | `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
 | `TENNIS_RANK_THRESHOLD` | *Optional (tennis system).* Rank tier cutoff, default `150`. No fixtures are excluded by rank — picks where BOTH players rank inside the top N go to the `tennis-picks` Discord channel; all others (either player outside, or unranked) go to `tennis-picks-lower`. The tier ('Top 150' / 'Lower Ranked') is also logged to the Sheet's 'Rank Tier' column. Per-tier pick counts are logged every run. |
 
@@ -111,28 +108,62 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 
 ---
 
-## 5. Telegram Channel
+## 5. Telegram — REMOVED (18 Aug 2026)
 
-- **Channel ID:** `-1003617316561`
-- **Message format:** MarkdownV2
-- **What gets posted:**
-  - Daily picks at 12:00 — MarkdownV2 text message + 1080×1080 PNG picks card
-  - Result notifications when a pick settles (WIN / LOSS / HALF WIN / HALF LOSS with score and P&L)
-  - Results card (PNG) posted after all picks for a day are settled
-  - Weekly summary every Monday at 09:05 — text + PNG weekly summary card
+Telegram was the original delivery channel and is now entirely gone: no
+`python-telegram-bot` dependency, no `TELEGRAM_*` environment variable, no
+`telegram` import, no send anywhere in the repo. Discord is the only surface for
+football and tennis alike (section 5b). Do not reintroduce it.
+
+**Railway variables to delete:** `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHANNEL_ID`,
+`TELEGRAM_IG_CHANNEL_ID`. Nothing reads them; leaving them set is harmless but
+`TELEGRAM_BOT_TOKEN` is a live credential and should be revoked in @BotFather as
+well, because it appeared in plaintext in the Railway deploy logs (see below).
+
+**What moved, so nothing was lost.** Three things were Telegram-only and were
+ported rather than dropped:
+
+| Was Telegram-only | Now |
+|---|---|
+| Weekly summary TEXT (Monday 09:05) | `weekly-cards`, via `send_long_to_discord` |
+| Monthly calibration report (first Monday) | `weekly-cards`, via `send_long_to_discord` |
+| Kelly suggested stake (in the picks digest) | `Stake` field on each **Core** pick embed |
+| `auto_results.py --results` per-pick + P&L lines (CLI only) | `results-cards` |
+
+The MarkdownV2 builders in `weekly_summary.py` are unchanged; a
+`_to_discord_markdown()` converter at the send boundary turns `*bold*` into
+`**bold**` and strips MarkdownV2's backslash escapes, so the escaping rules stay
+in one place.
+
+**What was dropped deliberately:** the Telegram picks digest itself (the numbered
+text list of the day's Core picks). The per-pick embeds already carry the same
+picks in richer form, and its one unique element — the Kelly stake — moved into
+the Core embed. The dedicated Instagram Telegram channel is also gone; the IG
+card is still generated, saved to `/cards`, and posted to `picks-cards`.
+
+**Credential leak, now closed.** `httpx` logs the full request URL at INFO, and
+`python-telegram-bot` put its bot token in the URL PATH — so
+`api.telegram.org/bot<TOKEN>/sendMessage` was written to the Railway logs in
+plaintext (5 occurrences in the 15-18 Aug window). Removing Telegram removes the
+leak; `httpx`/`httpcore` are additionally pinned to WARNING in `main.py` and
+`tennis_main.py`. Audited at the same time: the Anthropic SDK is httpx-backed but
+sends its key as a header, and RapidAPI / The Odds API use `requests`, which
+never logs URLs — no other key leaks.
 
 ---
 
 ## 5b. Discord Delivery (added 9 Jul 2026)
 
-Delivery channel via `discord_bot.py` — no changes to pick generation or calibration. For **football** it is purely additive (mirrors what already goes to Telegram). For **tennis** it is the ONLY delivery channel — see the tennis section; tennis never posts to Telegram (user preference: Discord is easier to view). Send-only: uses Discord's REST API directly through `requests` (no discord.py dependency, no gateway/event client).
+Delivery via `discord_bot.py` — no changes to pick generation or calibration. Since 18 Aug 2026 this is **the** delivery layer for football and tennis alike, not a mirror: a failed send here is the delivery failing, not a duplicate going missing. Send-only: uses Discord's REST API directly through `requests` (no discord.py dependency, no gateway/event client).
+
+`send_to_discord()` truncates message content at 2000 characters. Long reports (weekly summary, monthly calibration) must therefore go through **`send_long_to_discord()`**, which splits on line boundaries and paces the chunks.
 
 **Channel mapping** (`DISCORD_CHANNELS_JSON` keys → what gets posted there):
 
 | Key | Content | Sent from |
 |---|---|---|
 | `picks-cards` | Daily picks PNG card, **plus** the Instagram-variant card (`generate_picks_card_ig`) — both land in this same channel every run (since 11 Jul 2026, intentional) | `main.py` (after the Telegram card send; IG card sent right after its optional `TELEGRAM_IG_CHANNEL_ID` send) |
-| `results-cards` | Football live result notifications (text) — mirrored from the same 30-min automatic trigger that sends them to Telegram; plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
+| `results-cards` | Football live result notifications (text) from the 30-min automatic trigger; plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
 | `premier-league` | Each Premier League pick as an embed | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as an embed | `main.py` |
@@ -190,7 +221,7 @@ as `tennis-picks-lower` above.)
 
 Internal logs, docstrings, exception text and column headers may still say Claude.
 The one trap: `_notify_picks_failed(reason)` / `_notify_tennis_picks_failed(reason)`
-relay `reason` verbatim into a Telegram/Discord alert, so reason strings passed to
+relay `reason` verbatim into a Discord alert, so reason strings passed to
 them are user-facing — keep model names in the adjacent `log.error` instead.
 
 **Fail-silent guarantee:** `send_to_discord(channel_key, message=None, image_path=None)` never raises. Missing `DISCORD_BOT_TOKEN`, missing/malformed `DISCORD_CHANNELS_JSON`, an unmapped key, a bad image path, or a Discord API error each log one line and return `False` — the Telegram flow can never be affected. Rate limits (HTTP 429) get one retry after Discord's `retry_after`.
@@ -708,7 +739,7 @@ restart can re-send one alert; that is the safe direction to fail.
 ### Real odds & value flagging (added)
 - `fetch_real_odds()` pulls live h2h/totals/spreads (Asian handicap) odds from The Odds API per fixture
 - Each Claude pick is matched to its real market outcome; a pick is flagged as "value" only when Claude's implied probability exceeds the market's by ≥5 percentage points
-- Both Claude's estimated odds and the real market odds are shown side by side in the Telegram message and the picks card
+- Both Claude's estimated odds and the real market odds are shown side by side on the picks card and the pick embed
 - If `ODDS_API_KEY` is missing, the fixture/market can't be matched, or the API call fails, the pick silently falls back to Claude-only odds (no crash, no message)
 
 ### Cross-day duplicate logging (fixed 13 Aug 2026)
@@ -744,7 +775,7 @@ correlated, so the sheet's P&L and calibration both read them as independent sam
 not. Only unsettled rows block; once a row has a Result the fixture is over, so a later row on it is a
 data problem worth seeing rather than hiding.
 
-**This is a logging-level fix only.** Picks cards, the Telegram post and the Discord embeds all render
+**This is a logging-level fix only.** Picks cards and the Discord embeds all render
 the unfiltered `picks` list, so a repeated fixture still appears on the card exactly as before — only
 the sheet write is suppressed.
 
@@ -858,7 +889,7 @@ place — and `MAX_PICKS_PER_RUN` rose 5 → 10 (`CORE_PICKS_PER_RUN = 5` marks 
 > competition and tier is decided by an explicit global selection step, not by a rank number — see
 > "Per-league picks and global Core selection". Every other column in the table still holds exactly.
 
-| Tier | Ranks (13-15 Aug 2026) | Sheet / settlement | Card + Telegram | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
+| Tier | Ranks (13-15 Aug 2026) | Sheet / settlement | Card | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
 |---|---|---|---|---|---|---|
 | **Core** | 1-5 | logged + settled | **yes** | league channel | **yes** | **yes** |
 | **Extended** | 6-10 | logged + settled | no | league channel, labelled `· EXTENDED #n` | **no** | **no** |
@@ -969,13 +1000,13 @@ each other for space. Each competition now gets its own call and is judged on it
    `rank = None`. **Tier is never inferred from a rank number any more:** a league's rank-1 pick is
    Extended whenever it loses the global cut.
 
-| Tier | How it is chosen | Volume | Sheet / settlement | Card + Telegram | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
+| Tier | How it is chosen | Volume | Sheet / settlement | Card | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
 |---|---|---|---|---|---|---|---|
 | **Core** | best 5 on the whole slate, selected globally each run | exactly 5/day (fewer if the slate offers fewer) | logged + settled | **yes** | league channel | **yes** | **yes** |
 | **Extended** | every other returned pick | up to 10 per competition per day | logged + settled | no | league channel, labelled `· EXTENDED · league rank n` | **no** | **no** |
 
 **Core is unchanged in every respect that matters.** Still 5, still global, still the only tier
-reaching the card, the Telegram post, the running total, the bankroll, the Summary figures and every
+reaching the card, the running total, the bankroll, the Summary figures and every
 calibration/edge/CLV report — `excel_tracker._core_rows()` remains the single filter. Core picks are
 also logged **first**, so where a fixture somehow carries two picks the sheet's one-open-bet-per-
 fixture guard resolves it in Core's favour.
@@ -1016,7 +1047,7 @@ have meant 10 identical requests and 30 units for data already in hand. Picks-ru
 
 **Failure isolation.** A competition whose call fails costs that competition only: it is logged at
 ERROR, skipped, and the rest of the slate is still analysed and delivered. Only a run where *every*
-competition failed raises and fires the picks-failed Telegram alert — one alert, never one per
+competition failed raises and fires the picks-failed Discord alert — one alert, never one per
 league. If the Core selection call fails the run continues on a deterministic fallback order (each
 competition's rank-1 pick first, best edge first), because that step decides ordering only, never
 which bets exist.
@@ -1054,7 +1085,7 @@ selected 5" against "everything else", not two adjacent rank bands.
 - Claude must now output a `probability` field per pick (0-100, its estimated true win probability), logged to the 'Claude Prob %' column; the market implied probability (100 / market odds) is logged to 'Market Prob %' when real odds were found
 - `calibration_report()` — buckets settled WIN/LOSS picks by stated probability (<50%, 50-60% … 90-100%) and compares Claude's average stated probability to the actual win rate per bucket, plus a Brier score (well-calibrated = actual ≈ stated)
 - `edge_report()` — average Claude-vs-market edge for winners vs losers, and ROI of picks where Claude's probability exceeded the market's vs where it didn't
-- Monthly calibration summary posted to Telegram on the first Monday of each month (piggybacks the weekly summary job), with sample size and a warning below 300 settled picks
+- Monthly calibration summary posted to Discord's `weekly-cards` on the first Monday of each month (piggybacks the weekly summary job), with sample size and a warning below 300 settled picks
 - No backfill: picks logged before the columns existed have no probability data and are skipped
 - Run manually: `python calibration.py`
 
@@ -1162,7 +1193,7 @@ cell with `pnl_for_result(result, market_odds_from_row(row, header))` and call
 - Odds API calls are batched per competition (one request covers every due match in that league that cycle), not one request per match
 - Self-imposed cap of **60** Odds API requests/day (raised from 12 on 6 Aug 2026 with the paid tier); polling is skipped with a warning if exceeded. Sizing: a pick's closing window is 5-65 min and the poller runs every 15 min, so covering one competition's kickoff wave costs 4 requests — 60/day buys ~15 competition-waves, i.e. real coverage across staggered kickoff blocks rather than a token single poll. **Re-check this against the per-league cap (15 Aug 2026):** the poller is tier-BLIND by design (both tiers collect closing odds) and now chases 30+ unsettled picks spread over up to 10 competitions, each with several kickoff waves, so 15 waves/day is no longer comfortable headroom. When the cap trips, polling stops for the rest of the day — and since the job takes rows in sheet order rather than Core-first, the skipped waves can be the ones carrying Core picks, which is the only tier CLV is scored on. Not yet changed: the two candidate fixes are raising the cap (the picks-run enrichment re-key freed ~210 units/day of worst-case budget, so there is room) or ordering `get_unsettled_picks_with_kickoff` Core-first
 - `calibration.py`'s `clv_report()` computes CLV = (original odds / closing odds − 1) × 100 for every settled pick with both values — average CLV, % of picks with positive CLV, and ROI split between positive- and negative-CLV picks
-- Appended to the existing monthly calibration Telegram message, with the same below-300-picks sample size warning
+- Appended to the existing monthly calibration report, with the same below-300-picks sample size warning
 - Purely additive measurement: never touches pick generation, Kelly staking, or the calibration engine's existing reports; every step fails silently on error
 - Run manually: `python closing_odds.py`
 
@@ -1171,25 +1202,25 @@ cell with `pnl_for_result(result, market_odds_from_row(row, header))` and call
 - Based on historical win rate for that specific bet type from settled Sheets data
 - Falls back to flat 1-unit (€10) stake when fewer than 10 settled picks exist for the bet type
 - Key constants in `excel_tracker.py`: `UNIT_STAKE = 10.0`, `REAL_BANKROLL = 1500.0`
-- Stake suggestion is included in the Telegram pick message
+- Stake suggestion is shown as the `Stake` field on each **Core** pick embed (Extended picks carry no stake — they sit outside the tracked book)
 
 ### PNG pick and result cards (added — `card_generator.py`)
 - Dark neon aesthetic: black background, neon green accents, styled text
-- **Picks card** (1080×1080): generated after daily picks are posted; sent as a photo to Telegram
-- **Results card** (1080×1080): generated after results are finalized; sent as a photo to Telegram
+- **Picks card** (1080×1080): generated after daily picks are posted; posted to Discord's `picks-cards`
+- **Results card** (1080×1080): generated after results are finalized; posted to Discord's `results-cards`
 - **Weekly summary card** (1080×1080): generated and sent with the Monday weekly summary
 - Cards saved to `cards/` folder; win rate in the footer is pulled live from the Summary sheet
 - Font: DejaVu Sans Mono, bundled in `fonts/` (Consolas et al. remain later fallbacks on Windows)
 
 ### Discord delivery (added — `discord_bot.py`)
-- Every daily picks card and weekly card is mirrored to Discord right after its Telegram send
-- Live result notifications (the automatic 30-minute checker) mirror to Discord from the identical trigger as the Telegram notification; the results PNG card additionally mirrors when the manual `--results` path generates it
+- Every daily picks card and weekly card is posted to its Discord card channel
+- Live result notifications (the automatic 30-minute checker) post to Discord; the results PNG card additionally mirrors when the manual `--results` path generates it
 - Each individual pick is routed as a Discord embed to a league-specific channel (`premier-league` / `jupiler-pro-league` / `world-cup` / `bundesliga` / `la-liga` / `serie-a` / `ligue-1` / `champions-league` / `europa-league` / `conference-league`) — see section 5b for the embed format
 - Entirely fail-silent — see section 5b for the mapping structure and guarantees
 
 ### Tracking and reporting
 - Auto result detection with score-based evaluation for all supported bet types
-- Live result notifications sent to Telegram as each match finishes
+- Live result notifications sent to Discord as each match finishes
 - Running P&L tracked per pick and cumulatively; bankroll column updates after every result
 - Bet type breakdown in Summary sheet: wins, losses, win rate %, total P&L per bet type
 - Bet type breakdown also included in weekly Monday summary
@@ -1379,10 +1410,10 @@ Completion estimates per area — update these percentages whenever a related ch
 
 | Area | Done | Status |
 |---|---|---|
-| Bot core | 99% | Picks analysed **one competition per Claude call** since 15 Aug 2026, with a global selection step naming the day's Core 5 — the sheet write path batched and Discord sends paced to carry the resulting 30+ picks a day. Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026). Total-failure alerting closed its last blind spot on 18 Aug 2026: the football picks-failed alert now fires on Telegram AND Discord independently and states the upstream reason, the tennis job alerts on API failure at all, and `_run_now.py` delivers to Discord like the job it stands in for — an exhausted API credit balance had silently killed three consecutive slates |
+| Bot core | 99% | Picks analysed **one competition per Claude call** since 15 Aug 2026, with a global selection step naming the day's Core 5 — the sheet write path batched and Discord sends paced to carry the resulting 30+ picks a day. Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026). Total-failure alerting closed its last blind spot on 18 Aug 2026: the football picks-failed alert now fires on Telegram AND Discord independently and states the upstream reason, the tennis job alerts on API failure at all, and `_run_now.py` delivers to Discord like the job it stands in for — an exhausted API credit balance had silently killed three consecutive slates. Telegram removed entirely 18 Aug 2026 — Discord is the sole delivery surface, the weekly summary text / monthly calibration report / Kelly stake were ported rather than dropped, and the bot-token-in-URL log leak went with it |
 | Data quality | 91% | Picks-per-run hard-capped in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). That cap became **per competition** (`MAX_PICKS_PER_LEAGUE = 10`) on 15 Aug 2026, so card and sheet now diverge *by design*: the sheet carries 30+ picks and the card the 5 Core ones, and it is the tier split — not the cap — that keeps them consistent. The card's backstop was re-cut as a tier filter rather than a positional `[:5]` in the same change, and picks-run Odds API enrichment was re-keyed per competition instead of per fixture, which cut its worst case from ~300 to ~30 units/day. Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + closing odds (CLV) live since 4 Jul 2026. **Form/H2H enrichment was NOT live despite this line previously claiming it was** — both its endpoints 404'd from 29 Jun to 14 Aug 2026 and the failures were logged at DEBUG under an INFO root logger, so every football pick in that window was made on team names alone; repaired 14 Aug 2026 onto `football-get-matches-by-date` (form) + `football-get-head-to-head` (H2H) with failures now at WARNING/ERROR. Knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change. **Regime break at 14 Aug 2026:** every pick logged before that date was made with no form and no H2H (see "Form & H2H enrichment"), so the pre-14-Aug rows measure the model reasoning from team names alone. Treat the series as two samples rather than one when the verdict is read, and do not attribute a change in calibration after this date to model drift. **Second break at 15 Aug 2026:** Core is selected by a different mechanism from that date — one call per competition plus a global selection call, instead of one cross-competition ranking (see "Per-league picks and global Core selection"), so it is the third boundary in the series alongside 13 and 14 Aug |
-| Content pipeline | 95% | Cards automatic; auto-posted to Telegram + Discord (9 Jul 2026), only IG posting still manual |
+| Content pipeline | 95% | Cards automatic; auto-posted to Discord (Telegram removed 18 Aug 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |
 | Site/app/monetization | 0% | Deliberately parked until edge is proven |

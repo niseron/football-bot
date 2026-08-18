@@ -64,8 +64,20 @@ holds for the selection step — Core is capped at 5, never padded up to 5.
 
 **Failure is per competition.** One league's call failing is logged and skipped; the rest
 of the slate still delivers. Only a run where every competition failed raises and sends
-the picks-failed Telegram alert — never one alert per league. A failed Core selection call
+the picks-failed alert — never one alert per league. A failed Core selection call
 falls back to a deterministic order; it decides ordering only, never which bets exist.
+
+**The picks-failed alert goes to BOTH Telegram and Discord `picks-cards`, independently**
+(18 Aug 2026). It was Telegram-only, behind a missing-token guard that returned early, so
+nothing reached the surface the outage is actually noticed on: an exhausted API credit
+balance killed three consecutive whole slates (16-18 Aug 2026) in silence. Neither surface
+may gate the other. The alert also carries the first upstream error as a `Reason:` line —
+every competition failing almost always has ONE shared cause, and naming it is what turns
+a three-day outage into a same-morning fix. Both channels are subscriber-facing, so that
+text is scrubbed of model AND vendor names (`_scrub_model_names`) and truncated to
+`ALERT_DETAIL_MAX_CHARS`. `tennis_main._notify_tennis_picks_failed` took the same detail
+argument and was finally wired to the API-failure path, which had been silent on every
+surface since it was written.
 
 **Volume plumbing that must stay batched/paced.** Sheet writes go through
 `log_picks_batch` (one read, one append, one repaint — `log_to_excel` costs ~4 API calls

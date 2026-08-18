@@ -20,7 +20,11 @@ from main import (
     _kickoff_lookup,
     _pick_log_entry,
     _send_photo,
+    _discord_pick_embed,
+    DISCORD_LEAGUE_CHANNEL_KEYS,
+    DISCORD_PICK_SEND_DELAY,
 )
+from discord_bot import send_to_discord
 from excel_tracker import PICK_TIER_CORE, calculate_kelly_stake
 from tracker import log_picks_batch, picks_exist_for_session
 
@@ -103,6 +107,7 @@ async def run():
     log.info("Sent %d Core pick(s) to Telegram (%d Extended logged, not sent)",
              len(core_picks), extended)
 
+    card = None
     try:
         from card_generator import generate_picks_card
         card = generate_picks_card(core_picks, session=session)
@@ -110,6 +115,31 @@ async def run():
         log.info("Picks card sent: %s", card.name)
     except Exception as exc:
         log.warning("Picks card failed (non-fatal): %s", exc)
+
+    # Discord delivery — mirrors daily_picks_job exactly. Omitted until
+    # 18 Aug 2026, which meant a manual recovery run published a DIFFERENT book
+    # to a different audience than the job it stands in for: the Sheet and
+    # Telegram got the picks, the league channels got nothing. That is the
+    # surface the outage is noticed on, so a recovery that skips it is not a
+    # recovery. Both tiers post to their league channel; the embed marks which
+    # is which, and the send is paced for the same reason it is in the job —
+    # one competition can send 10 embeds back to back and send_to_discord
+    # retries a 429 exactly once. send_to_discord never raises.
+    try:
+        if card is not None:
+            send_to_discord("picks-cards", image_path=card)
+        sent = 0
+        for pick in picks:
+            channel_key = DISCORD_LEAGUE_CHANNEL_KEYS.get(pick.get("league", ""))
+            if not channel_key:
+                continue
+            if sent:
+                await asyncio.sleep(DISCORD_PICK_SEND_DELAY)
+            send_to_discord(channel_key, embed=_discord_pick_embed(pick))
+            sent += 1
+        log.info("Discord: sent %d of %d pick(s) to their league channels", sent, len(picks))
+    except Exception as exc:
+        log.warning("Discord picks delivery failed (non-fatal): %s", exc)
 
 
 asyncio.run(run())

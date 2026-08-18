@@ -748,11 +748,36 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def _notify_tennis_picks_failed(reason: str) -> None:
-    # Tennis is Discord-only — the alert goes to the picks channel, never Telegram
-    if not send_to_discord(
-        "tennis-picks", message=f"⚠️ Tennis picks failed today — {reason}. Check logs."
-    ):
+# Deliberately duplicated from main.py rather than imported: tennis_main shares
+# no code with the football pipeline, and one alert helper is not worth the
+# coupling. See the module docstring.
+_MODEL_NAME_RE = re.compile(r"\bclaude[\w.\-]*|\b(?:opus|sonnet|haiku)[\w.\-]*", re.I)
+_VENDOR_NAME_RE = re.compile(r"\banthropic\s*", re.I)
+
+ALERT_DETAIL_MAX_CHARS = 300
+
+
+def _notify_tennis_picks_failed(reason: str, detail: str = "") -> None:
+    """
+    Tennis is Discord-only — the alert goes to the picks channel, never Telegram.
+
+    `detail` carries the underlying error, scrubbed of model names and truncated
+    because the channel is subscriber-facing. Added 18 Aug 2026: this was only
+    ever called for an unparseable response, so an upstream API failure (an
+    exhausted credit balance, 15-18 Aug 2026) logged and returned in silence and
+    the outage went unnoticed for three days.
+    """
+    text = f"⚠️ Tennis picks failed today — {reason}."
+    if detail:
+        clean = " ".join(
+            _VENDOR_NAME_RE.sub("", _MODEL_NAME_RE.sub("the model", detail)).split()
+        )
+        if len(clean) > ALERT_DETAIL_MAX_CHARS:
+            clean = clean[:ALERT_DETAIL_MAX_CHARS] + "…"
+        text += f"\nReason: {clean}"
+    text += "\nCheck logs."
+
+    if not send_to_discord("tennis-picks", message=text):
         log.error("Could not deliver tennis picks-failed alert to Discord ('tennis-picks')")
 
 
@@ -925,7 +950,13 @@ async def daily_tennis_picks_job():
     try:
         picks = analyse_tennis_with_claude(fixtures_by_tour)
     except Exception as exc:
+        # Alert, don't just log: an upstream failure here is a TOTAL outage for
+        # the day, and until 18 Aug 2026 this path was silent on every surface.
+        # analyse_tennis_with_claude already alerts on an unparseable response,
+        # so that case would double-send — but a duplicate alert is a far
+        # cheaper failure than no alert at all.
         log.error("Claude tennis analysis failed: %s", exc)
+        _notify_tennis_picks_failed("the analysis could not be completed", detail=str(exc))
         return
 
     if not picks:

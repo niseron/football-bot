@@ -1240,21 +1240,62 @@ def _strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def _notify_picks_failed(reason: str) -> None:
-    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID):
+# Model identifiers must never reach a subscriber-facing channel, and since
+# 18 Aug 2026 the alert relays a raw upstream error — exactly the kind of string
+# that carries one.
+_MODEL_NAME_RE = re.compile(r"\bclaude[\w.\-]*|\b(?:opus|sonnet|haiku)[\w.\-]*", re.I)
+_VENDOR_NAME_RE = re.compile(r"\banthropic\s*", re.I)
+
+ALERT_DETAIL_MAX_CHARS = 300
+
+
+def _scrub_model_names(text: str) -> str:
+    """Strip the AI stack out of text bound for a subscriber-facing channel."""
+    return " ".join(
+        _VENDOR_NAME_RE.sub("", _MODEL_NAME_RE.sub("the model", text)).split()
+    )
+
+
+def _notify_picks_failed(reason: str, detail: str = "") -> None:
+    """
+    Announce a total picks failure on BOTH surfaces, independently.
+
+    Telegram-only until 18 Aug 2026, and the missing-token guard returned early,
+    so an unconfigured Telegram could silence the alert entirely. Discord is the
+    surface an outage is actually noticed on: three consecutive whole-slate
+    failures (16-18 Aug 2026, an exhausted API credit balance) produced nothing
+    there and went unseen for three days. Neither surface may gate the other —
+    that is the whole point of this function, so do not merge the two sends back
+    into one try block or reinstate an early return between them.
+
+    `detail` carries the underlying error so the alert says WHY, not just THAT.
+    It is scrubbed of model names and truncated: both channels are
+    subscriber-facing, and an upstream error is arbitrary third-party text.
+    """
+    text = f"⚠️ Picks failed today — {reason}."
+    if detail:
+        clean = _scrub_model_names(detail)
+        if len(clean) > ALERT_DETAIL_MAX_CHARS:
+            clean = clean[:ALERT_DETAIL_MAX_CHARS] + "…"
+        text += f"\nReason: {clean}"
+    text += "\nCheck logs."
+
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHANNEL_ID:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHANNEL_ID, "text": text},
+                timeout=10,
+            )
+        except Exception as exc:
+            log.error("Failed to send picks-failed Telegram alert: %s", exc)
+    else:
         log.error("Cannot send picks-failed Telegram alert — bot token/channel not configured")
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHANNEL_ID,
-                "text": f"⚠️ Picks failed today — {reason}. Check logs.",
-            },
-            timeout=10,
-        )
-    except Exception as exc:
-        log.error("Failed to send picks-failed Telegram alert: %s", exc)
+
+    # Discord — the football picks hub, mirroring how tennis alerts into its own
+    # picks channel. send_to_discord never raises and returns False on any skip.
+    if not send_to_discord("picks-cards", message=text):
+        log.error("Could not deliver picks-failed alert to Discord ('picks-cards')")
 
 
 def _parse_picks_response(raw: str, scope: str) -> list[dict]:
@@ -1537,6 +1578,7 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
     """
     picks_by_league: dict[str, list[dict]] = {}
     failed: list[str] = []
+    errors: list[str] = []
     # Cache the shared system prompt only when more than one league will use it.
     cache_prompt = len(fixtures_by_league) > 1
 
@@ -1549,13 +1591,21 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
             )
         except Exception as exc:
             failed.append(league)
+            errors.append(str(exc))
             log.error("Analysis failed for %s — that competition is skipped: %s", league, exc)
 
     if failed and not any(picks_by_league.values()):
         # Nothing survived: same outcome as a failed single call, so alert and
-        # raise exactly as before. Reason text is relayed verbatim into a
-        # Telegram alert — keep it free of model names.
-        _notify_picks_failed("the analysis returned no usable picks")
+        # raise exactly as before. Reason text is relayed verbatim into the
+        # alert — keep it free of model names. The first upstream error travels
+        # with it: every competition failing almost always means ONE shared
+        # cause (an exhausted credit balance, a bad key, an upstream outage),
+        # and naming it is the difference between noticing in minutes and
+        # noticing in days.
+        _notify_picks_failed(
+            "the analysis returned no usable picks",
+            detail=errors[0] if errors else "",
+        )
         raise ValueError(
             f"Analysis failed for every competition attempted ({', '.join(failed)})"
         )

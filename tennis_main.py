@@ -965,6 +965,11 @@ async def daily_tennis_picks_job():
         # cheaper failure than no alert at all.
         log.error("Claude tennis analysis failed: %s", exc)
         _notify_tennis_picks_failed("the analysis could not be completed", detail=str(exc))
+        try:
+            from usage_tracker import alert_anthropic_failure
+            alert_anthropic_failure("tennis-picks", exc, "claude-sonnet-4-6")
+        except Exception as inner:
+            log.debug("failure alert skipped: %s", inner)
         return
 
     if not picks:

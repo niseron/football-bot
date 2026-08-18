@@ -1524,6 +1524,11 @@ def _select_core_with_claude(picks: list[dict], n: int) -> list[dict] | None:
             "order. The run continues: this decides ordering only, never which "
             "bets exist.", exc,
         )
+        try:
+            from usage_tracker import alert_anthropic_failure
+            alert_anthropic_failure("football-core-select", exc, "claude-sonnet-4-6")
+        except Exception as inner:
+            log.debug("failure alert skipped: %s", inner)
         return None
 
 
@@ -1592,6 +1597,14 @@ def analyse_with_claude(fixtures_by_league: dict[str, list[dict]]) -> list[dict]
             failed.append(league)
             errors.append(str(exc))
             log.error("Analysis failed for %s — that competition is skipped: %s", league, exc)
+            # Alert the ops channel on an exhausted credit balance, and record
+            # every failure for the daily summary's status line. Deduped per
+            # day, so a slate where all ten competitions fail posts ONE alert.
+            try:
+                from usage_tracker import alert_anthropic_failure
+                alert_anthropic_failure("football-picks", exc, "claude-sonnet-4-6")
+            except Exception as inner:
+                log.debug("failure alert skipped: %s", inner)
 
     if failed and not any(picks_by_league.values()):
         # Nothing survived: same outcome as a failed single call, so alert and
@@ -1856,6 +1869,12 @@ async def daily_picks_job():
         await asyncio.to_thread(run_opus_shadow, fixtures_by_league, kickoff_lookup)
     except Exception as exc:
         log.warning("Opus 5 shadow failed (non-fatal): %s", exc)
+        try:
+            from usage_tracker import alert_anthropic_failure
+            from opus_shadow import OPUS_MODEL
+            alert_anthropic_failure("opus-shadow", exc, OPUS_MODEL)
+        except Exception as inner:
+            log.debug("failure alert skipped: %s", inner)
 
     try:
         ig_card = generate_picks_card_ig(core_picks)

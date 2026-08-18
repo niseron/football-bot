@@ -34,6 +34,15 @@ USAGE_HEADERS = [
     "Input Tokens", "Output Tokens", "Cache Read", "Cache Write", "Cost USD",
 ]
 
+# Failures live in their OWN tab, deliberately (18 Aug 2026). The usage sheet is
+# the cost ledger and every reader of it counts rows as calls and sums column I
+# — a failure row there would inflate the call count and dilute the per-job
+# figures with events that consumed nothing. Keeping them apart means the cost
+# math needs no "is this row real" filter, and the failures tab doubles as the
+# audit trail for the status line in the daily summary.
+FAILURE_SHEET = "API Failures"
+FAILURE_HEADERS = ["Date", "Timestamp UTC", "Job", "Model", "Error"]
+
 # USD per 1M tokens. Source: Anthropic API reference, checked 4 Aug 2026 —
 # not recalled from memory. Add a row when a new model is introduced; an
 # unlisted model logs its tokens with a cost of 0.0 and a warning rather than
@@ -137,6 +146,124 @@ def _usage_ws():
         return ws
 
 
+def _failures_ws(create: bool = True):
+    """
+    The 'API Failures' worksheet. `create=False` returns None when the tab does
+    not exist yet, so a read never provokes a write — the daily summary asks for
+    this on a schedule and should not create a tab just to find it empty.
+    """
+    from excel_tracker import _get_spreadsheet
+    ss = _get_spreadsheet()
+    try:
+        return ss.worksheet(FAILURE_SHEET)
+    except Exception:
+        if not create:
+            return None
+        ws = ss.add_worksheet(FAILURE_SHEET, rows=1000, cols=len(FAILURE_HEADERS))
+        ws.update(values=[FAILURE_HEADERS], range_name="A1", value_input_option="RAW")
+        log.info("usage_tracker: created '%s' sheet", FAILURE_SHEET)
+        return ws
+
+
+def _read_failure_rows() -> list[list[str]]:
+    try:
+        ws = _failures_ws(create=False)
+        return ws.get_all_values()[1:] if ws else []
+    except Exception as exc:
+        log.warning("usage_tracker: could not read failures sheet: %s", exc)
+        return []
+
+
+# The API returns no distinct error code for an exhausted balance — it is a
+# generic 400 `invalid_request_error`, and `.type` is the same string a
+# malformed request returns. The human-readable message is the only signal that
+# separates "you owe money" from "your payload is wrong", so this matches on it.
+# Deliberately narrow: a false positive would tell the user to top up an account
+# that is already funded and send them looking in the wrong place.
+_CREDIT_BALANCE_MARKER = "credit balance is too low"
+
+
+def is_credit_balance_error(exc: Exception) -> bool:
+    """True when an Anthropic call failed because the account is out of credit."""
+    return _CREDIT_BALANCE_MARKER in str(exc).lower()
+
+
+def record_anthropic_failure(job: str, model: str, exc: Exception) -> None:
+    """
+    Append one FAILED Claude call to the failures sheet. Never raises, for the
+    same reason record_anthropic_usage doesn't: tracking a failure must not
+    become a second failure.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        _failures_ws().append_row(
+            [
+                now.strftime("%d-%b-%Y"),
+                now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                job,
+                model or "",
+                " ".join(str(exc).split())[:500],
+            ],
+            value_input_option="RAW",
+        )
+    except Exception as inner:
+        log.warning("usage_tracker: failed to record failure for %s (non-fatal): %s", job, inner)
+
+
+# One alert per (day, kind) per process. A picks run makes one call PER
+# COMPETITION, so an exhausted balance fails every one of them — without this
+# guard a ten-competition slate would post ten identical alerts and train the
+# reader to ignore the channel. Keyed by date so a still-broken account alerts
+# again tomorrow rather than going quiet after the first day.
+_alerted_failures: set[tuple[str, str]] = set()
+
+
+def alert_anthropic_failure(job: str, exc: Exception, model: str = "") -> bool:
+    """
+    Record an Anthropic failure and, for an exhausted credit balance, alert the
+    'usage' Discord channel immediately.
+
+    Returns True if an alert was actually sent. Only credit-balance failures
+    alert: they are account-wide and nothing recovers until someone tops up, so
+    the sooner a human sees it the better. Other failures (a 429, a 529, a
+    transient network error) are recorded for the status line but not alerted —
+    they are usually self-healing, and the picks-failed alert already covers the
+    case where they killed a whole slate.
+
+    'usage' is the ops channel, not a subscriber-facing one, so the raw error
+    goes out unscrubbed here. The subscriber-facing picks-failed alert scrubs
+    model and vendor names (main._scrub_model_names); this one deliberately does
+    not — the person reading it needs the verbatim message.
+    """
+    from discord_bot import send_to_discord
+
+    record_anthropic_failure(job, model, exc)
+
+    if not is_credit_balance_error(exc):
+        return False
+
+    key = (date.today().isoformat(), "credit-balance")
+    if key in _alerted_failures:
+        log.info("usage_tracker: credit-balance alert already sent today — not repeating")
+        return False
+    _alerted_failures.add(key)
+
+    now = datetime.now(timezone.utc)
+    detail = " ".join(str(exc).split())
+    text = (
+        "🛑 **ANTHROPIC API FAILURE — OUT OF CREDIT**\n"
+        f"Job: `{job}`" + (f" (`{model}`)" if model else "") + "\n"
+        f"Time: {now:%d %b %Y %H:%M} UTC\n\n"
+        f"```{detail[:1200]}```\n"
+        "Every Anthropic call — football picks, tennis picks and the Opus shadow — "
+        "fails until credit is added. Repeat alerts are suppressed for the rest of today."
+    )
+    if not send_to_discord("usage", message=text):
+        log.error("usage_tracker: could not deliver credit-balance alert to Discord ('usage')")
+        return False
+    return True
+
+
 def record_anthropic_usage(job: str, model: str, usage) -> None:
     """
     Append one Claude call to the usage sheet. NEVER raises — usage tracking
@@ -204,6 +331,47 @@ def anthropic_totals() -> dict:
             if model:
                 out["models_today"].add(model)
     return out
+
+
+def _parse_ts(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+def anthropic_status() -> dict:
+    """
+    Health of the Anthropic API from this bot's point of view: the most recent
+    successful call and the most recent failure, each with its job and time.
+
+    This exists because a total outage is otherwise INVISIBLE in the daily
+    summary — an account with no credit simply produces no usage rows, which
+    reads identically to a quiet day with no fixtures. Comparing the two
+    timestamps is what separates "nothing to do" from "nothing works": the
+    16-18 Aug 2026 outage produced three consecutive silent zero-cost days.
+    """
+    last_ok: tuple[datetime, str, str] | None = None
+    for r in _read_usage_rows():
+        if len(r) < 4:
+            continue
+        ts = _parse_ts(r[1])
+        if ts and (last_ok is None or ts > last_ok[0]):
+            last_ok = (ts, r[2], r[3])
+
+    last_fail: tuple[datetime, str, str] | None = None
+    for r in _read_failure_rows():
+        if len(r) < 5:
+            continue
+        ts = _parse_ts(r[1])
+        if ts and (last_fail is None or ts > last_fail[0]):
+            last_fail = (ts, r[2], r[4])
+
+    healthy = True
+    if last_fail and (last_ok is None or last_fail[0] > last_ok[0]):
+        healthy = False
+
+    return {"last_success": last_ok, "last_failure": last_fail, "healthy": healthy}
 
 
 # ── The Odds API: live quota ─────────────────────────────────────────────────
@@ -318,6 +486,19 @@ def fetch_rapidapi_quota(pipeline: str) -> dict | None:
 
 # ── Daily summary ────────────────────────────────────────────────────────────
 
+def _ago(delta: timedelta) -> str:
+    """Compact human age of a timestamp, e.g. '3d 2h', '14m'."""
+    secs = int(max(delta.total_seconds(), 0))
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
 def _bar(used: int, limit: int, width: int = 20) -> str:
     if not limit:
         return ""
@@ -328,7 +509,31 @@ def _bar(used: int, limit: int, width: int = 20) -> str:
 def build_daily_summary() -> str:
     """Assemble the daily API usage + cost report. Plain text for Discord."""
     today = date.today()
+    now = datetime.now(timezone.utc)
     lines = [f"📊 **API USAGE — {today:%d %b %Y}**", ""]
+
+    # Anthropic health FIRST, above the spend figures. A dead account shows up
+    # in the numbers below only as an absence, which is indistinguishable from a
+    # quiet day — this line is what makes a silent outage legible without
+    # depending on the immediate alert having been seen.
+    st = anthropic_status()
+    ok, fail = st["last_success"], st["last_failure"]
+    if st["healthy"]:
+        if ok:
+            lines.append(f"**Status** ✅ last Anthropic call OK — `{ok[1]}`, "
+                         f"{ok[0]:%d %b %H:%M} UTC ({_ago(now - ok[0])} ago)")
+        else:
+            lines.append("**Status** — no Anthropic calls recorded yet")
+    else:
+        lines.append(f"**Status** 🛑 **LAST ANTHROPIC CALL FAILED** — `{fail[1]}`, "
+                     f"{fail[0]:%d %b %H:%M} UTC ({_ago(now - fail[0])} ago)")
+        lines.append(f"     └ {fail[2][:200]}")
+        if ok:
+            lines.append(f"     └ last success: {ok[0]:%d %b %H:%M} UTC "
+                         f"({_ago(now - ok[0])} ago)")
+        else:
+            lines.append("     └ no successful call on record")
+    lines.append("")
 
     # Anthropic
     a = anthropic_totals()

@@ -189,6 +189,45 @@ both render the unfiltered `picks` list, so a repeated fixture still shows on th
 card. Do not push this filter up into `analyse_with_claude` or the delivery
 path.
 
+## API Failure Visibility — the `usage` channel (18 Aug 2026)
+
+`usage_tracker` owns the ops view of API health, separately from the
+subscriber-facing picks-failed alert:
+
+- **Immediate alert.** `alert_anthropic_failure(job, exc, model)` posts to the
+  `usage` Discord channel when a call fails with an exhausted credit balance,
+  carrying the verbatim error and the job that failed. Wired into every
+  Anthropic failure path (`football-picks`, `football-core-select`,
+  `tennis-picks`, `opus-shadow`). **Deduped per day**: a slate where all ten
+  competitions fail posts ONE alert, not ten — do not remove that guard, an
+  alert channel that cries wolf gets muted and then the next outage is silent
+  again. Only credit-balance failures alert; a 429/529/network blip is recorded
+  but not announced, because those self-heal and the picks-failed alert already
+  covers a whole-slate loss.
+- **`usage` is an OPS channel, so the alert is NOT scrubbed.** The raw error
+  including vendor and model names goes out verbatim — that is the opposite of
+  the picks-failed alert's rule (`main._scrub_model_names`), and deliberately so:
+  the reader here is the operator, who needs the exact message.
+- **Status line in the daily summary.** `build_daily_summary()` opens with the
+  last Anthropic call's outcome and, when it failed, the age of the last
+  *successful* call. A dead account otherwise produces no usage rows at all,
+  which reads exactly like a quiet day with no fixtures — this line is what
+  separates "nothing to do" from "nothing works", and is the backstop for the
+  alert being missed.
+- **Failures live in their own `API Failures` tab**, never the `API Usage` cost
+  ledger. Every reader of that ledger counts rows as calls and sums the cost
+  column; a zero-cost failure row would inflate the call count and dilute the
+  per-job figures.
+
+**Credit balance is not retrievable programmatically — do not add it.** Checked
+against the live docs 18 Aug 2026: the Admin API has no balance endpoint, and
+the Usage & Cost API (`/v1/organizations/cost_report`) reports *spend incurred*,
+not *credit remaining*. It also needs a separate Admin API key
+(`sk-ant-admin01-...`) and is unavailable to individual accounts entirely.
+Remaining balance is Console-only (platform.claude.com/settings/billing). Never
+put an estimated or inferred balance figure in the summary — a wrong number
+there is worse than no number, because it would be trusted.
+
 ## Working Rules
 
 - Load `.env` via `from env_loader import load_env; load_env()` — never call

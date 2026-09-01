@@ -224,6 +224,45 @@ Discord and nowhere else. Full postmortem in PROJECT_SUMMARY.md, "Sheets quota l
   (1 Sep 2026). It and `_opus_restake_aug13.py` are guarded now — keep any new `_*.py`
   script the same way; importing a file must never deliver or write anything.
 
+## Extra-Time Settlement — derive the margin, never the score (1 Sep 2026)
+
+**The feed publishes no period scores. Do not go looking again.** Verified
+exhaustively 1 Sep 2026: `football-get-match-detail` is 792 bytes of metadata
+with no score at all, `football-get-match-score` gives only the final score, and
+`-match-events / -statistics / -stats / -timeline / -lineups / -shotmap /
+-momentum / -goals / -period / -halftime / -summary / -info / -h2h /
+-player-stats / -odds / -live-matches / -list-events` **all 404**.
+`status.halfs` holds period START TIMESTAMPS, never period scores.
+
+- **The 90-minute MARGIN is derivable; the 90-minute SCORE is not.** Extra time
+  in a two-legged tie means the aggregate was level at 90' of the second leg, so
+  `h90 - a90 = (agg_away - final_away) - (agg_home - final_home)`. That settles
+  **Match Winner, Double Chance and Asian Handicap** — all pay on the margin.
+  **Over/Under and BTTS stay PENDING** unless a bound closes them: the margin
+  does not pin the total. Do not "finish the job" by inventing a total.
+- **`_regulation_goal_difference()` returning None means PENDING, always.** It
+  returns None when the aggregate is missing, unparseable, below this leg's
+  score for either side, or implies a margin unreachable inside the final score.
+  Never settle a margin that failed those gates — a wrong margin books a real
+  bet off arithmetic that did not hold.
+- **`extra_time` means EXTRA TIME WAS ACTUALLY PLAYED**, read from
+  `status.halfs.firstExtraHalfStarted` — not "the tie needed separating". A
+  shootout straight after 90 minutes (CONMEBOL, many domestic cups) leaves the
+  published score EQUAL to the 90-minute score and settles exactly for every
+  market. When `halfs` is missing on a shootout, assume extra time: that costs a
+  manual settlement, the other direction settles off the wrong score.
+- **Reversed home/away is a LAST RESORT.** Exhaust the correct orientation
+  across every candidate date first. Both orientations are real fixtures in a
+  two-legged tie, so a greedy reversed match settles against the wrong leg.
+- **`_normalise_team()` folds case, diacritics and whitespace — nothing else.**
+  `ø æ å ð þ đ ł ß œ ı` need explicit transliteration because NFKD does not
+  decompose them. Do not extend it to punctuation: looser matching starts
+  hitting genuinely different clubs, and a wrong fixture settles a real bet off
+  someone else's result.
+
+Details, the validation set and the audit history in PROJECT_SUMMARY.md,
+"Extra-time settlement" and "Fixture name matching".
+
 ## API Failure Visibility — the `usage` channel (18 Aug 2026)
 
 `usage_tracker` owns the ops view of API health, separately from the

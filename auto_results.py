@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 
 import requests
@@ -161,18 +162,34 @@ def _pending_reason(
     penalties: bool,
     two_legged: bool,
     scope_ft: bool,
+    margin_known: bool = False,
 ) -> str:
-    """Why evaluate_pick() could not settle this pick, in one human sentence."""
+    """
+    Why evaluate_pick() could not settle this pick, in one human sentence.
+
+    Kept in step with evaluate_pick deliberately — the two used to be able to
+    disagree about WHY a pick was pending, and an alert that misstates the
+    reason sends whoever settles it manually looking at the wrong thing. Since
+    1 Sep 2026 the 90-minute MARGIN is derivable on ties that went to extra
+    time, so 'the 90-minute outcome cannot be derived' is no longer true of
+    Match Winner, Double Chance or Asian Handicap — only of the markets that
+    need the 90-minute TOTAL.
+    """
     if penalties and scope_ft:
         return ("decided on a penalty shootout — the API score is level, so the "
                 "winner cannot be read from it")
-    if extra_time or penalties:
+    if extra_time:
+        if margin_known:
+            return ("went past 90 minutes — the 90-minute margin is known, but "
+                    "this market pays on the TOTAL, and the published score "
+                    "includes extra-time goals so the 90-minute total is "
+                    "ambiguous")
         if two_legged:
-            return ("went past 90 minutes in a two-legged tie — extra time was "
-                    "triggered by the aggregate, not the score on the night, so "
-                    "the 90-minute outcome cannot be derived")
-        return ("went past 90 minutes — the API returns only the final score, "
-                "so the 90-minute outcome cannot be derived")
+            return ("went past 90 minutes in a two-legged tie and the aggregate "
+                    "could not be reconciled with the final score, so the "
+                    "90-minute margin could not be derived")
+        return ("went past 90 minutes — the API publishes no period scores, so "
+                "the 90-minute outcome cannot be derived")
     return f"no settlement rule matched bet type '{bet_type}' / pick '{pick}'"
 
 
@@ -227,13 +244,80 @@ def _fetch_matches_cached(dt: date) -> list[dict]:
     return matches
 
 
-def _find_api_match(matches: list[dict], home_q: str, away_q: str) -> dict | None:
-    hq = home_q.lower().strip()
-    aq = away_q.lower().strip()
+# Latin letters that do NOT decompose under NFKD. Unicode classifies these as
+# distinct letters rather than accented forms, so stripping combining marks
+# leaves them untouched and 'Lillestrom' never matches 'Lillestrøm'.
+_TEAM_TRANSLIT = {
+    "ø": "o", "æ": "ae", "å": "a", "ð": "d", "þ": "th",
+    "đ": "d", "ł": "l", "ß": "ss", "œ": "oe", "ı": "i",
+}
+
+
+def _normalise_team(name: str) -> str:
+    """
+    Fold a team name to a comparable form: lowercase, transliterated, stripped
+    of diacritics, whitespace collapsed.
+
+    The pick's match string comes back through Claude, which silently
+    transliterates — the sheet carries 'Lillestrom' and 'Nordsjaelland' where
+    the API says 'Lillestrøm' and 'Nordsjælland'. Substring matching cannot
+    bridge that, so those rows never matched a fixture, never settled, and
+    stranded permanently once they aged out of the lookback window (rows 246
+    and 251, found 1 Sep 2026).
+
+    Deliberately limited to case, diacritics and whitespace. Punctuation is left
+    alone: loosening further would start matching genuinely different clubs, and
+    a wrong fixture settles a real bet off someone else's result.
+    """
+    s = (name or "").strip().lower()
+    for src, dst in _TEAM_TRANSLIT.items():
+        s = s.replace(src, dst)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(s.split())
+
+
+def _side_matches(query: str, api_name: str) -> bool:
+    """Loose containment either way, but never on an empty string."""
+    if not query or not api_name:
+        return False
+    return query in api_name or api_name in query
+
+
+def _find_api_match(
+    matches: list[dict],
+    home_q: str,
+    away_q: str,
+    *,
+    reversed_sides: bool = False,
+) -> dict | None:
+    """
+    The fixture matching '<home_q> vs <away_q>', or None.
+
+    `reversed_sides` looks for the SAME pair with the sides swapped. Claude
+    occasionally emits a fixture with home and away the wrong way round (row
+    243: 'Bodø/Glimt vs NEC Nijmegen' for a fixture the API lists as 'NEC
+    Nijmegen vs Bodø/Glimt'), which is a naming error, not a different match.
+
+    Callers must exhaust the correct orientation across EVERY candidate date
+    before trying this one. In a two-legged tie both orientations exist as real
+    fixtures on different dates, so a reversed match found greedily could settle
+    a pick against the wrong leg.
+
+    Settlement then uses the API's own home/away, not the pick's — scores, names
+    and handicap sides all come from the matched fixture, so a reversed match
+    still settles correctly.
+    """
+    hq = _normalise_team(home_q)
+    aq = _normalise_team(away_q)
+    if not hq or not aq:
+        return None
     for m in matches:
-        h = m["home"]["longName"].lower()
-        a = m["away"]["longName"].lower()
-        if (hq in h or h in hq) and (aq in a or a in aq):
+        h = _normalise_team(m["home"]["longName"])
+        a = _normalise_team(m["away"]["longName"])
+        if reversed_sides:
+            h, a = a, h
+        if _side_matches(hq, h) and _side_matches(aq, a):
             return m
     return None
 
@@ -258,6 +342,93 @@ def _eval_ah_line(adj: float, opp: float) -> str:
     return "VOID"
 
 
+def _parse_aggregate(aggregate: str | None) -> tuple[int, int] | None:
+    """'5 - 4' -> (5, 4). None when absent or unparseable — never a guess."""
+    if not aggregate:
+        return None
+    nums = re.findall(r"\d+", str(aggregate))
+    if len(nums) != 2:
+        return None
+    return int(nums[0]), int(nums[1])
+
+
+def _regulation_goal_difference(
+    home_score: int,
+    away_score: int,
+    aggregate: str | None,
+    *,
+    two_legged: bool,
+) -> int | None:
+    """
+    Home-minus-away goal difference after 90 minutes, or None if not derivable.
+
+    The API publishes no period scores at all — checked exhaustively 1 Sep 2026:
+    football-get-match-detail returns 792 bytes of metadata with no score,
+    football-get-match-score returns only the final score, and every
+    events/statistics/timeline endpoint 404s. status.halfs carries period START
+    TIMESTAMPS, never period scores. So the 90' SCORE genuinely cannot be read.
+
+    The 90' goal DIFFERENCE can be computed, though, and that is enough to
+    settle every market that pays on the margin:
+
+    * Single match — extra time is only reachable from a level score, so
+      regulation ended a draw. Difference is 0.
+
+    * Two-legged tie — extra time is triggered by the AGGREGATE being level at
+      the end of 90 minutes of the second leg. Each side's first-leg goals are
+      (aggregate - this leg's goals), so aggregate parity at 90' pins the margin
+      exactly:
+
+          h90 - a90 = (agg_away - away_score) - (agg_home - home_score)
+
+      Validated 1 Sep 2026 against all 15 finished two-legged AET/shootout ties
+      in the 19-27 Aug feeds, UEFA and CONMEBOL, with and without extra time.
+      LASK 5-1 Celtic (agg 5-4) yields +3: LASK led by exactly three at 90',
+      whether the night's score was 3-0 or 4-1.
+
+    Two sanity gates, because a wrong margin settles a real bet:
+      * each side's aggregate must be at least its goals in this leg (goals only
+        accumulate), which also catches an aggregate published the other way round
+      * the margin must be reachable given the final score
+
+    Either gate failing returns None, and the caller leaves the pick PENDING.
+    """
+    if not two_legged:
+        # ET in a single match implies a level score after 90 minutes.
+        return 0
+
+    agg = _parse_aggregate(aggregate)
+    if agg is None:
+        return None
+    agg_home, agg_away = agg
+
+    # Goals accumulate across legs, so the aggregate cannot be below this leg's
+    # score for either side. A failure here means bad data or an aggregate
+    # oriented against the fixture — either way, do not derive from it.
+    if agg_home < home_score or agg_away < away_score:
+        log.warning(
+            "Aggregate '%s' is inconsistent with this leg's score %d-%d — "
+            "not deriving a 90-minute margin from it", aggregate, home_score, away_score,
+        )
+        return None
+
+    reg_gd = (agg_away - away_score) - (agg_home - home_score)
+
+    # Reachability: some (h90, a90) with h90 - a90 = reg_gd must sit inside the
+    # final score. a90 ranges over [max(0, -reg_gd), min(away_score, home_score - reg_gd)].
+    lo = max(0, -reg_gd)
+    hi = min(away_score, home_score - reg_gd)
+    if lo > hi:
+        log.warning(
+            "Derived 90-minute margin %+d is unreachable inside final score %d-%d "
+            "(aggregate '%s') — leaving the pick PENDING",
+            reg_gd, home_score, away_score, aggregate,
+        )
+        return None
+
+    return reg_gd
+
+
 def _combine_ah_halves(r1: str, r2: str) -> str:
     pair = frozenset([r1, r2])
     if pair == frozenset(["WIN"]):           return "WIN"
@@ -279,6 +450,7 @@ def evaluate_pick(
     extra_time: bool = False,
     penalties: bool = False,
     two_legged: bool = False,
+    aggregate: str | None = None,
 ) -> str:
     """
     Return WIN, LOSS, VOID, or PENDING (unrecognised bet type / data missing).
@@ -287,27 +459,35 @@ def evaluate_pick(
     picks generated by the updated Claude prompt ('Sweden Win', 'Ivory Coast or Draw').
 
     Knockout picks may carry a time-scope suffix since 12 Jul 2026:
-    '(90 min)' or '(Full-Time incl. ET/Pens)'. The API score includes extra
-    time, so extra_time/penalties (from the match status) decide how each
-    scope settles. Unscoped picks follow the bookmaker default for EVERY bet
-    type: 90 minutes only. When a match went past 90 minutes the regulation
-    score itself is unknown (the API only returns the final score), so each
-    bet type derives what it can and returns PENDING (manual settlement via
-    update_result.py) when the regulation outcome is genuinely ambiguous.
+    '(90 min)' or '(Full-Time incl. ET/Pens)'. Unscoped picks follow the
+    bookmaker default for EVERY bet type: 90 minutes only.
 
-    What can be derived depends on WHY the match went past 90 minutes:
+    `extra_time` means EXTRA TIME WAS ACTUALLY PLAYED, not merely that the tie
+    needed separating (changed 1 Sep 2026). The two are different: a shootout
+    that follows straight after 90 minutes — the CONMEBOL format, and many
+    domestic cups — leaves the published score EQUAL to the 90-minute score, so
+    every market settles exactly. Treating 'went to penalties' as 'went past 90'
+    sent all of those to manual settlement for nothing. The caller reads
+    status.halfs.firstExtraHalfStarted to tell them apart.
 
-    * Single match (two_legged=False) — extra time is only reachable from a
-      level score, so regulation is guaranteed to have ended a draw. That is
-      a strong fact and most bet types settle off it.
-    * Two-legged tie (two_legged=True) — extra time is triggered by the
-      AGGREGATE being level, not the night's score. A team can lead 1-0 at
-      90' and still play extra time, so regulation could have ended in any
-      result and the draw inference is invalid. Only conclusions that follow
-      from goals being monotonic (a side scoreless over 120' was scoreless
-      over 90'; the 90' total cannot exceed the final total) survive; every
-      other case returns PENDING. Fixed 12 Aug 2026 — before that a
-      two-legged tie was settled as though regulation had ended level.
+    When extra time WAS played the published score includes it, so the 90-minute
+    score is unknown — the API publishes no period scores anywhere. The 90-minute
+    goal DIFFERENCE is still derivable (see _regulation_goal_difference), and
+    that settles every market paying on the margin:
+
+    * Match Winner, Double Chance, Asian Handicap — settled from the derived
+      margin. For a single match the margin is 0 (extra time implies a level
+      score); for a two-legged tie it follows from the aggregate being level at
+      90 minutes of the second leg. Before 1 Sep 2026 the two-legged case
+      returned PENDING for all three, which is why LASK vs Celtic and Rapid Wien
+      vs Hearts sat unsettled — both were derivable all along.
+    * Over/Under and BTTS — the margin does not pin the TOTAL, so these stay
+      PENDING unless a bound settles them outright: a side scoreless over 120'
+      was scoreless over 90' (BTTS), or the largest reachable 90-minute total
+      still sits under the line (Under).
+
+    A derivation that cannot be trusted returns None from the helper and the
+    pick stays PENDING. Never settle a margin that was guessed.
     """
     bt    = bet_type.lower()
     pk    = pick.lower().strip()
@@ -323,18 +503,21 @@ def evaluate_pick(
     if scope:
         pk = re.sub(r'\s*\([^)]*\)$', '', pk).strip()
 
-    # Match went past 90 minutes and the pick settles on regulation time (the
-    # default). The API score includes ET goals, so the 90' score is unknown.
-    past_90 = (extra_time or penalties) and scope != "ft"
+    # Extra time was PLAYED and the pick settles on regulation time (the
+    # default), so the published score overshoots the 90-minute one. A shootout
+    # with no extra time does not qualify: its score IS the 90-minute score.
+    past_90 = extra_time and scope != "ft"
 
-    # Single match: ET is only reachable from a level score, so regulation is
-    # guaranteed to have ended a draw.
-    reg_draw = past_90 and not two_legged
-
-    # Two-legged tie: ET is triggered by the aggregate, so regulation could
-    # have ended in ANY result. Nothing may be inferred from the scoreline
-    # beyond what monotonic goal counts give us.
-    reg_unknown = past_90 and two_legged
+    # Home-minus-away margin after 90 minutes: 0 for a single match, derived
+    # from the aggregate for a two-legged tie, None when it cannot be trusted.
+    reg_gd = (
+        _regulation_goal_difference(
+            home_score, away_score, aggregate, two_legged=two_legged
+        )
+        if past_90 else None
+    )
+    reg_known   = past_90 and reg_gd is not None
+    reg_unknown = past_90 and reg_gd is None
 
     # ── Match Winner ─────────────────────────────────────────────────────────
     if any(x in bt for x in ("match winner", "1x2", "result", "moneyline")):
@@ -344,17 +527,16 @@ def evaluate_pick(
         draw_pick = pk in ("draw", "x", "tie")
 
         if reg_unknown:
-            log.warning("Pick '%s' (%s) went past 90 minutes in a TWO-LEGGED tie "
-                        "— extra time was triggered by the aggregate, so the "
-                        "90-minute result cannot be derived; settle manually "
-                        "via update_result.py", pick, bet_type)
+            log.warning("Pick '%s' (%s) went past 90 minutes and the 90-minute "
+                        "margin could not be derived; settle manually via "
+                        "update_result.py", pick, bet_type)
             return "PENDING"
-        if reg_draw:
-            # A single-match knockout only reaches extra time when level after
-            # 90 minutes, so the regulation result is a draw regardless of the
-            # final API score (which includes ET goals).
-            if draw_pick:                          return "WIN"
-            if home_pick != away_pick:             return "LOSS"
+        if reg_known:
+            # Settle on the derived 90-minute margin, not the published score
+            # (which includes extra-time goals).
+            if draw_pick:              return "WIN" if reg_gd == 0 else "LOSS"
+            if home_pick and not away_pick: return "WIN" if reg_gd > 0 else "LOSS"
+            if away_pick and not home_pick: return "WIN" if reg_gd < 0 else "LOSS"
         if penalties and scope == "ft":
             # After a shootout the API score is level — the winner cannot be
             # derived here. Settle manually via update_result.py.
@@ -391,14 +573,17 @@ def evaluate_pick(
         nums      = re.findall(r'\d+\.?\d*', bt)
         threshold = float(nums[0]) if nums else 2.5
         if past_90:
-            # Upper bound on the 90-minute total. Single match: regulation
-            # ended h-h with h ≤ min(final scores), so at most 2 × min. Two
-            # legs: no draw inference is available, only that goals are
-            # monotonic — the 90' total cannot exceed the final total. (The
-            # 2 × min bound is the tighter of the two, so applying it to a
-            # two-legged tie could settle Under on a match that was already
-            # past the line at 90'.)
-            max_reg_total = total if two_legged else 2 * min(home_score, away_score)
+            # Largest 90-minute total consistent with the derived margin. With
+            # h90 - a90 = reg_gd and neither side above its final score, a90 tops
+            # out at min(away_score, home_score - reg_gd), giving 2*a90 + reg_gd.
+            # For a single match reg_gd is 0 and this reduces to the old
+            # 2 × min(final scores). Without a trusted margin, fall back to the
+            # only fact left — goals accumulate, so the 90' total cannot exceed
+            # the final one.
+            if reg_known:
+                max_reg_total = 2 * min(away_score, home_score - reg_gd) + reg_gd
+            else:
+                max_reg_total = total
             if max_reg_total < threshold:
                 if "over"  in pk: return "LOSS"
                 if "under" in pk: return "WIN"
@@ -415,22 +600,24 @@ def evaluate_pick(
         parsed = _parse_handicap(pk)  # pk, not pick: the scope suffix is stripped
         if parsed:
             team_q, hc = parsed
+            picked_home = None
             if team_q in hn or hn in team_q:
-                score, opp = home_score, away_score
+                score, opp, picked_home = home_score, away_score, True
             elif team_q in an or an in team_q:
-                score, opp = away_score, home_score
+                score, opp, picked_home = away_score, home_score, False
             else:
                 score, opp = None, None
             if score is not None and reg_unknown:
-                log.warning("Pick '%s' (%s) went past 90 minutes in a TWO-LEGGED "
-                            "tie — extra time was triggered by the aggregate, so "
-                            "the 90-minute goal difference cannot be derived; "
-                            "settle manually via update_result.py", pick, bet_type)
+                log.warning("Pick '%s' (%s) went past 90 minutes and the 90-minute "
+                            "goal difference could not be derived; settle manually "
+                            "via update_result.py", pick, bet_type)
                 return "PENDING"
-            if score is not None and reg_draw:
-                # AH settles on the goal difference, which was exactly 0 after
-                # 90 minutes no matter how many ET goals the API score holds.
-                score, opp = 0, 0
+            if score is not None and reg_known:
+                # AH pays on the goal difference alone, and that is exactly what
+                # the derivation gives — so the handicap settles even when the
+                # 90-minute SCORE is unknown. Expressed from the picked side.
+                margin = reg_gd if picked_home else -reg_gd
+                score, opp = margin, 0
             if score is not None:
                 if _is_quarter_line(hc):
                     h_low  = math.floor(hc * 2) / 2
@@ -448,14 +635,13 @@ def evaluate_pick(
     # ── Double Chance ────────────────────────────────────────────────────────
     elif "double chance" in bt:
         if reg_unknown:
-            log.warning("Pick '%s' (%s) went past 90 minutes in a TWO-LEGGED tie "
-                        "— extra time was triggered by the aggregate, so the "
-                        "90-minute result cannot be derived; settle manually "
-                        "via update_result.py", pick, bet_type)
+            log.warning("Pick '%s' (%s) went past 90 minutes and the 90-minute "
+                        "result could not be derived; settle manually via "
+                        "update_result.py", pick, bet_type)
             return "PENDING"
-        if reg_draw:
-            # Regulation result was a draw: 'or draw' sides win, '12' loses.
-            hw, aw, dr = False, False, True
+        if reg_known:
+            # Re-express the outcome from the derived 90-minute margin.
+            hw, aw, dr = reg_gd > 0, reg_gd < 0, reg_gd == 0
         # "or draw" picks: home team name or "home" must appear alongside "or draw"
         if "or draw" in pk:
             home_side = hn in pk or "home" in pk or "1x" in pk
@@ -553,11 +739,28 @@ def run_auto_results(
 
         home_q, away_q = [s.strip() for s in match.split(" vs ", 1)]
 
+        # Correct orientation first, across EVERY candidate date, before trying
+        # the reversed one. Both orientations are real fixtures in a two-legged
+        # tie, so a greedy reversed match could settle against the wrong leg.
+        candidate_dates = (p["date"], p["date"] + timedelta(days=1))
         api_match = None
-        for dt in (p["date"], p["date"] + timedelta(days=1)):
+        for dt in candidate_dates:
             api_match = _find_api_match(api_cache.get(dt, []), home_q, away_q)
             if api_match:
                 break
+
+        if api_match is None:
+            for dt in candidate_dates:
+                api_match = _find_api_match(
+                    api_cache.get(dt, []), home_q, away_q, reversed_sides=True
+                )
+                if api_match:
+                    log.warning(
+                        "'%s' matched with home/away REVERSED — the API lists it as "
+                        "'%s vs %s'. Settling on the API's orientation.",
+                        match, api_match["home"]["longName"], api_match["away"]["longName"],
+                    )
+                    break
 
         if api_match is None:
             log.info("'%s' — not found in API yet", match)
@@ -580,15 +783,35 @@ def run_auto_results(
         reason     = status.get("reason") or {}
         fin_txt    = f"{reason.get('short', '')} {reason.get('long', '')}".lower()
         penalties  = fin_txt.startswith("pen") or "penalt" in fin_txt
-        extra_time = penalties or "aet" in fin_txt or "extra time" in fin_txt
-        # A two-legged tie carries an aggregate score. Extra time there is
-        # triggered by the aggregate, so 'went to ET' does NOT imply the night
-        # ended level — see evaluate_pick().
-        two_legged = bool(status.get("aggregatedStr"))
+        aet_reason = "aet" in fin_txt or "extra time" in fin_txt
+
+        # Did extra time actually get PLAYED? A shootout straight after 90
+        # minutes (CONMEBOL, many domestic cups) leaves the published score
+        # equal to the 90-minute score, so every market settles exactly — but
+        # until 1 Sep 2026 'penalties' alone was read as 'went past 90' and
+        # those all went to manual settlement for nothing. status.halfs carries
+        # a start timestamp per period, so an extra-time half appears there iff
+        # one was played.
+        halfs = status.get("halfs") or {}
+        if aet_reason:
+            extra_time = True
+        elif not halfs:
+            # No period data at all: cannot rule extra time out, so assume the
+            # cautious side for a tie that needed separating. Wrongly assuming
+            # extra time costs a manual settlement; wrongly assuming none
+            # settles a bet off a score that is not the 90-minute one.
+            extra_time = bool(penalties)
+        else:
+            extra_time = bool(halfs.get("firstExtraHalfStarted"))
+
+        # A two-legged tie carries an aggregate score, and that aggregate is
+        # what pins the 90-minute margin — see _regulation_goal_difference().
+        aggregate  = status.get("aggregatedStr")
+        two_legged = bool(aggregate)
 
         result = evaluate_pick(bet_type, pick, home_name, away_name, home_score, away_score,
                                extra_time=extra_time, penalties=penalties,
-                               two_legged=two_legged)
+                               two_legged=two_legged, aggregate=aggregate)
 
         if result == "PENDING":
             log.warning("Could not evaluate bet_type='%s' pick='%s'", bet_type, pick)
@@ -640,6 +863,9 @@ def run_auto_results(
                         extra_time=extra_time, penalties=penalties,
                         two_legged=two_legged,
                         scope_ft=_pick_scope(pick) == "ft",
+                        margin_known=_regulation_goal_difference(
+                            home_score, away_score, aggregate, two_legged=two_legged
+                        ) is not None,
                     ),
                 })
             continue

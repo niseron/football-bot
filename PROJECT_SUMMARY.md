@@ -626,13 +626,64 @@ derivable depends on **why** it went past 90:
 | | Single match | Two-legged tie |
 |---|---|---|
 | Why ET happened | scores level at 90' | **aggregate** level at 90' |
-| Regulation result | guaranteed a draw | **could be anything** |
-| Match Winner / AH / Double Chance | settled off the guaranteed draw | `PENDING` |
+| 90' goal difference | guaranteed `0` | **derived from the aggregate** (below) |
+| Match Winner / AH / Double Chance | settled off the derived margin | settled off the derived margin |
 | BTTS | `LOSS`/`WIN` if a side was scoreless over 120' (goals are monotonic), else `PENDING` | same |
-| Over/Under | bound is `2 × min(home, away)` | bound is the **final total** |
+| Over/Under | `PENDING` unless the largest reachable 90' total is under the line | same |
 
 Detected via `status.aggregatedStr`, which is present only on two-legged ties and
-is passed to `evaluate_pick(..., two_legged=True)`.
+is passed to `evaluate_pick(..., two_legged=True, aggregate=...)`.
+
+#### The 90-minute margin is derivable — the 90-minute SCORE is not (1 Sep 2026)
+
+**The API publishes no period scores anywhere.** Checked exhaustively 1 Sep 2026,
+so nobody has to check again: `football-get-match-detail` returns 792 bytes of
+metadata with **no score of any kind** (matchId, round, team colours,
+`parentLeagueId`, kickoff, started/finished); `football-get-match-score` returns
+only the **final** score; and `football-get-match-events`, `-statistics`,
+`-stats`, `-timeline`, `-lineups`, `-shotmap`, `-momentum`, `-goals`, `-period`,
+`-halftime`, `-summary`, `-info`, `-h2h`, `-player-stats`, `-odds`,
+`-live-matches` and `-list-events` **all 404 — they do not exist on this host**.
+`status.halfs` carries period START TIMESTAMPS, never period scores.
+
+The 90-minute **margin**, however, follows from arithmetic. Extra time in a
+two-legged tie is triggered by the aggregate being level at the end of 90 minutes
+of the second leg, and each side's first-leg goals are `aggregate − this leg's
+goals`, so:
+
+```
+h90 − a90 = (agg_away − final_away) − (agg_home − final_home)
+```
+
+That settles every market paying on the margin — Match Winner, Double Chance and
+Asian Handicap — even though the score itself stays unknown. LASK 5-1 Celtic
+(agg 5-4) yields **+3**: LASK led by exactly three at 90', whether the night was
+3-0 or 4-1. Validated against **all 15** finished two-legged AET/shootout ties in
+the 19-27 Aug feeds, UEFA and CONMEBOL alike.
+
+Over/Under and BTTS stay `PENDING` when ambiguous: the margin does not pin the
+TOTAL. The Over/Under bound is now computed from the margin
+(`2 × min(final_away, final_home − reg_gd) + reg_gd`), which reduces to the old
+`2 × min(home, away)` for a single match and is strictly tighter than the final
+total for a two-legged one — so it settles `Under` in more cases without ever
+guessing.
+
+`_regulation_goal_difference()` returns `None` — leaving the pick `PENDING` —
+when the aggregate is missing, unparseable, **below this leg's score for either
+side** (bad data, or an aggregate published the other way round), or implies a
+margin unreachable inside the final score. A margin that cannot be trusted is
+never settled.
+
+#### A shootout with no extra time settles exactly (1 Sep 2026)
+
+`extra_time` now means **extra time was actually played**, read from
+`status.halfs.firstExtraHalfStarted`, not "the tie needed separating". A shootout
+straight after 90 minutes — the CONMEBOL format, and many domestic cups — leaves
+the published score EQUAL to the 90-minute score, so *every* market settles
+exactly. Treating "went to penalties" as "went past 90" sent all of those to
+manual settlement for nothing. When the `halfs` block is missing entirely on a
+shootout the code assumes extra time was played, which costs a manual settlement
+rather than risking a bet settled off the wrong score.
 
 Before this fix a two-legged tie was settled as though regulation had ended level.
 A team can lead 1-0 on the night and still play extra time because the aggregate is
@@ -648,8 +699,13 @@ their API fixture (no gaps); 27 ran past 90 minutes. 24 were single matches (inf
 hand on 12 Aug after external verification; r203 (CSKA 1948 vs Panathinaikos, MW
 Panathinaikos Win, AET 1-2, agg 2-3) is correct as LOSS because leg 1 finished
 **1-1** — a level first leg forces the second leg to be level at 90' too, which
-collapses the two-legged case back to the single-match one. The new code returns
-`PENDING` for r202/r203 rather than guessing; that is the intended trade.
+collapses the two-legged case back to the single-match one.
+
+*Update 1 Sep 2026:* the margin derivation reproduces that hand-analysis
+automatically — `(3−2) − (2−1) = 0`, level at 90', so `Panathinaikos Win` settles
+LOSS — and r203 was settled by the normal path on 1 Sep after sitting PENDING
+since 10 Aug. The 12 Aug trade ("return PENDING rather than guess") is no longer
+a trade for these markets: the margin is not a guess.
 
 ⚠️ The same audit found three **single-match** rows that *are* mis-settled, from
 before the 12 Jul 2026 ET rules existed — see Known Limitations.
@@ -714,6 +770,34 @@ Everything settled from **12 Aug onward** goes through the fixed evaluator, so t
 Conference return legs — the first large block of two-legged second legs since the fix — settle
 correctly: an aggregate-triggered extra time returns PENDING and raises a PENDING alert rather than
 booking a false LOSS.
+
+### Fixture name matching: transliteration and reversed sides (fixed 1 Sep 2026)
+
+Three rows never settled and stranded past the 7-day lookback because
+`_find_api_match` could not resolve them. The pick's match string is echoed back
+through Claude, which silently rewrites names:
+
+| Row | Sheet says | API says | Cause |
+|---|---|---|---|
+| 246 | `Egnatia vs Lillestrom` | `Egnatia vs Lillestrøm` | `ø` transliterated |
+| 251 | `Nordsjaelland vs St. Gallen` | `Nordsjælland vs St. Gallen` | `æ` transliterated |
+| 243 | `Bodø/Glimt vs NEC Nijmegen` | `NEC Nijmegen vs Bodø/Glimt` | home/away reversed |
+
+`ø` and `æ` do **not** decompose under NFKD — Unicode treats them as distinct
+letters, not accented forms — so stripping combining marks is not enough.
+`_normalise_team()` transliterates them explicitly (plus `å ð þ đ ł ß œ ı`) before
+the NFKD pass. Deliberately limited to case, diacritics and whitespace:
+punctuation is left alone, because looser matching starts hitting genuinely
+different clubs and a wrong fixture settles a real bet off someone else's result.
+
+Reversed sides are tried **only after** the correct orientation has been
+exhausted across every candidate date. In a two-legged tie both orientations
+exist as real fixtures on different dates, so a greedy reversed match could
+settle a pick against the wrong leg. Settlement then uses the API's own
+home/away — scores, names and handicap sides all come from the matched fixture —
+so a reversed match still settles correctly.
+
+All three rows settled on 1 Sep 2026: r243 WIN (+0.70), r246 LOSS, r251 LOSS.
 
 ### PENDING alerting (added 12 Aug 2026)
 
@@ -1459,6 +1543,7 @@ does not fall back to another model's rate), so Opus spend would have read as fr
 - **LLM overconfidence risk** — Claude's stated probabilities are uncalibrated and likely systematically overconfident on favorites. The calibration engine exists specifically to measure this gap. *Note: the first spot check (6 Aug 2026, n=3 — see "Early calibration observation" above) pointed the **other** way, showing 11-19pp **under**confidence on short-priced favourites. Far too small a sample to overturn this expectation; recorded so the formal report is read against both hypotheses, not just this one.*
 - **No market data at all for Europa/Conference League qualifying** — *provider gap, not a budget or mapping problem; the 20,000-unit paid tier does not fix it.* Measured 6 Aug 2026 across all 67 soccer keys (see "Odds caveat" above): those fixtures exist under no sport key. Consequences while the bot picks these competitions: no value flags, no `Market Prob %` (so the picks contribute to `calibration_report` but never to `edge_report`/`clv_report`), and **P&L computed off Claude's estimated odds**, which the 6 Aug spot check showed run 11-19pp short of real market prices — i.e. tracked returns on these picks are inflated. Champions League qualifying is unaffected (covered, 10 events listed for 11 Aug).
 - ⚠️ **Three pre-12-Jul-2026 rows are mis-settled under the current 90-minute policy — not yet corrected.** Found by the 12 Aug 2026 two-legged audit (below). Before 12 Jul 2026 settlement used the raw final score with no extra-time awareness; the 90-minute default arrived that day and nothing backfilled the rows settled under the old rule. Three are provably wrong because their match went to ET/pens as a **single** match, which guarantees regulation ended level: **r103** (1 Jul, Belgium vs Senegal, AH Belgium −0.5 @1.85, stored WIN, regulation goal difference was 0 → LOSS), **r111** (3 Jul, Argentina vs Cape Verde, MW Argentina Win @1.12, stored WIN → LOSS) and **r146** (11 Jul, Norway vs England, MW England Win @1.93, stored WIN → LOSS). Net effect: running P&L is overstated by **4.82 units** (31.57 → 26.75 if corrected). A further four BTTS rows (**r87, r90, r105, r147**) are genuinely underivable — the 90' score cannot be recovered from an AET/pens final score — so their stored values are unverifiable rather than known-wrong. Correcting any of these rewrites historical P&L and the calibration sample, so it is left as a deliberate decision.
+- **Two-legged Over/Under and BTTS remain manual when ambiguous** — the 90-minute margin is derivable but the TOTAL is not, so a pick like r282 (Sabah FK vs Hapoel Beer Sheva, Over 2.5, AET 5-2 agg 6-4) stays `PENDING`: the 90-minute total could be 1, 3 or 5. A *minimum*-total bound (`|reg_gd|`) would settle `Over` in some of these — LASK vs Celtic had a margin of 3, so its 90-minute total was at least 3 — but that was deliberately not added on 1 Sep 2026, keeping the change to markets that pay on the margin. Available as a follow-up.
 - **No injury/lineup data** — the bot has form and H2H context but no player availability, injury status, or individual player form. Napoleon Games odds are also not in The Odds API, so market comparison uses consensus European bookmaker odds instead.
 - ⚠️ **128 picks from 20-29 Aug 2026 are permanently absent from the Picks tab** — delivered to Discord, lost to a silent Sheets 429 (see "Sheets quota loss" above). Affected dates: 20, 22, 26, 27, 28, 29 Aug. They are deliberately **not** backfilled: their results are now known, so adding them retrospectively would inject hindsight into the P&L and calibration baseline. Consequences — the Aug sample is ~128 picks short of what was actually published, the weekly summary for 24-30 Aug reported 11 Core picks against 35 posted, and any Discord-vs-sheet reconciliation over that window will not balance. The cause is fixed; the hole is not fillable.
 - **Kelly stakes based on thin data** — bet-type win rates driving Kelly calculations are based on small samples (10-30 picks per type) and may regress significantly.
@@ -1471,8 +1556,8 @@ Completion estimates per area — update these percentages whenever a related ch
 
 | Area | Done | Status |
 |---|---|---|
-| Bot core | 99% | Picks analysed **one competition per Claude call** since 15 Aug 2026, with a global selection step naming the day's Core 5 — the sheet write path batched and Discord sends paced to carry the resulting 30+ picks a day. Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026). Total-failure alerting closed its last blind spot on 18 Aug 2026: the football picks-failed alert now fires on Telegram AND Discord independently and states the upstream reason, the tennis job alerts on API failure at all, and `_run_now.py` delivers to Discord like the job it stands in for — an exhausted API credit balance had silently killed three consecutive slates. Telegram removed entirely 18 Aug 2026 — Discord is the sole delivery surface, the weekly summary text / monthly calibration report / Kelly stake were ported rather than dropped, and the bot-token-in-URL log leak went with it. API health is now visible in `usage`: a credit-balance 400 alerts immediately (deduped per day) and the daily summary opens with the last call's outcome plus the age of the last success, so a zero-cost day can no longer be mistaken for a quiet one. Credit BALANCE stays absent by design — no Anthropic endpoint exposes it (Console only), and a guessed figure would be worse than none. 1 Sep 2026 closed the matching blind spot on the SHEET side: a pick batch that does not fully land now alerts to `usage` with written/skipped/failed counts, so a partial write is as visible as a total one — previously both printed one INFO line and nothing else |
-| Data quality | 93% | Picks-per-run hard-capped in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). That cap became **per competition** (`MAX_PICKS_PER_LEAGUE = 10`) on 15 Aug 2026, so card and sheet now diverge *by design*: the sheet carries 30+ picks and the card the 5 Core ones, and it is the tier split — not the cap — that keeps them consistent. The card's backstop was re-cut as a tier filter rather than a positional `[:5]` in the same change, and picks-run Odds API enrichment was re-keyed per competition instead of per fixture, which cut its worst case from ~300 to ~30 units/day. Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + closing odds (CLV) live since 4 Jul 2026. **Form/H2H enrichment was NOT live despite this line previously claiming it was** — both its endpoints 404'd from 29 Jun to 14 Aug 2026 and the failures were logged at DEBUG under an INFO root logger, so every football pick in that window was made on team names alone; repaired 14 Aug 2026 onto `football-get-matches-by-date` (form) + `football-get-head-to-head` (H2H) with failures now at WARNING/ERROR. Knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups. **The sheet write path stopped losing data silently on 1 Sep 2026**: sizing every pick in a loop made one full-sheet read PER PICK (`calculate_kelly_stake` → `get_bet_type_breakdown`), which exceeded Google's 60-reads-per-minute quota once the per-league cap took slates past ~20 picks and silently 429'd the batch write — 128 picks over six days reached Discord and never the sheet. The read is now once per run (29→1), `log_picks_batch` returns written/skipped/**failed** and any non-zero `failed` alerts to `usage` whether the loss is partial or total, the batch read/append retry 429s with backoff, and the interval jobs are phase-shifted so their reads no longer land in one minute |
+| Bot core | 99% | Picks analysed **one competition per Claude call** since 15 Aug 2026, with a global selection step naming the day's Core 5 — the sheet write path batched and Discord sends paced to carry the resulting 30+ picks a day. Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026). Total-failure alerting closed its last blind spot on 18 Aug 2026: the football picks-failed alert now fires on Telegram AND Discord independently and states the upstream reason, the tennis job alerts on API failure at all, and `_run_now.py` delivers to Discord like the job it stands in for — an exhausted API credit balance had silently killed three consecutive slates. Telegram removed entirely 18 Aug 2026 — Discord is the sole delivery surface, the weekly summary text / monthly calibration report / Kelly stake were ported rather than dropped, and the bot-token-in-URL log leak went with it. API health is now visible in `usage`: a credit-balance 400 alerts immediately (deduped per day) and the daily summary opens with the last call's outcome plus the age of the last success, so a zero-cost day can no longer be mistaken for a quiet one. Credit BALANCE stays absent by design — no Anthropic endpoint exposes it (Console only), and a guessed figure would be worse than none. Two-legged extra-time settlement stopped needing a human on 1 Sep 2026: the 90-minute goal DIFFERENCE is derived from the aggregate (`h90-a90 = (agg_away-final_away) - (agg_home-final_home)`), which settles Match Winner, Double Chance and Asian Handicap automatically — validated against all 15 real two-legged AET/shootout ties — while Over/Under and BTTS correctly stay PENDING because the margin does not pin the total; a shootout with no extra time now settles exactly on the final score, and fixture matching folds diacritics and tries reversed sides, clearing four rows stranded since 10-19 Aug. 1 Sep 2026 also closed the matching blind spot on the SHEET side: a pick batch that does not fully land now alerts to `usage` with written/skipped/failed counts, so a partial write is as visible as a total one — previously both printed one INFO line and nothing else |
+| Data quality | 94% | Picks-per-run hard-capped in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). That cap became **per competition** (`MAX_PICKS_PER_LEAGUE = 10`) on 15 Aug 2026, so card and sheet now diverge *by design*: the sheet carries 30+ picks and the card the 5 Core ones, and it is the tier split — not the cap — that keeps them consistent. The card's backstop was re-cut as a tier filter rather than a positional `[:5]` in the same change, and picks-run Odds API enrichment was re-keyed per competition instead of per fixture, which cut its worst case from ~300 to ~30 units/day. Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + closing odds (CLV) live since 4 Jul 2026. **Form/H2H enrichment was NOT live despite this line previously claiming it was** — both its endpoints 404'd from 29 Jun to 14 Aug 2026 and the failures were logged at DEBUG under an INFO root logger, so every football pick in that window was made on team names alone; repaired 14 Aug 2026 onto `football-get-matches-by-date` (form) + `football-get-head-to-head` (H2H) with failures now at WARNING/ERROR. Knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups. **The sheet write path stopped losing data silently on 1 Sep 2026**: sizing every pick in a loop made one full-sheet read PER PICK (`calculate_kelly_stake` → `get_bet_type_breakdown`), which exceeded Google's 60-reads-per-minute quota once the per-league cap took slates past ~20 picks and silently 429'd the batch write — 128 picks over six days reached Discord and never the sheet. The read is now once per run (29→1), `log_picks_batch` returns written/skipped/**failed** and any non-zero `failed` alerts to `usage` whether the loss is partial or total, the batch read/append retry 429s with backoff, and the interval jobs are phase-shifted so their reads no longer land in one minute. Settlement coverage improved the same day: the 90-minute goal difference on two-legged extra-time ties is now derived from the aggregate rather than sent to manual settlement, shootouts with no extra time settle exactly on the final score, and fixture matching folds diacritics and tries reversed home/away — four rows stranded since 10-19 Aug 2026 (r203, r243, r246, r251) settled automatically, leaving only genuinely ambiguous totals pending |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change. **Regime break at 14 Aug 2026:** every pick logged before that date was made with no form and no H2H (see "Form & H2H enrichment"), so the pre-14-Aug rows measure the model reasoning from team names alone. Treat the series as two samples rather than one when the verdict is read, and do not attribute a change in calibration after this date to model drift. **Second break at 15 Aug 2026:** Core is selected by a different mechanism from that date — one call per competition plus a global selection call, instead of one cross-competition ranking (see "Per-league picks and global Core selection"), so it is the third boundary in the series alongside 13 and 14 Aug |
 | Content pipeline | 95% | Cards automatic; auto-posted to Discord (Telegram removed 18 Aug 2026), only IG posting still manual |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |

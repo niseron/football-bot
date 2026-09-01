@@ -318,6 +318,49 @@ def alert_sheet_write_failure(
     return True
 
 
+def alert_data_integrity(kind: str, detail: str, rows: list[str] | None = None) -> bool:
+    """
+    Alert the ops 'usage' channel that a number in the sheet cannot be right.
+
+    For invariant breaches, not failures: nothing crashed, the data is simply
+    impossible. Two feed it — a settled row whose P&L does not follow from its
+    result and price, and a matched market price that disagrees wildly with the
+    model estimate for the same pick (the 23 Aug 2026 Club Brugge mispricing,
+    where a 1.26 favourite was priced and paid at the underdog's 8.98).
+
+    Unscrubbed, like every 'usage' alert: the reader is the operator and needs
+    the exact figures. Deduped per (day, kind) so one bad slate cannot spam the
+    channel — an alert channel that cries wolf gets muted, and then the next one
+    is invisible.
+    """
+    from discord_bot import send_to_discord
+
+    key = (date.today().isoformat(), f"integrity:{kind}")
+    if key in _alerted_failures:
+        log.warning("usage_tracker: integrity alert '%s' already sent today: %s", kind, detail)
+        return False
+    _alerted_failures.add(key)
+
+    now = datetime.now(timezone.utc)
+    body = [
+        "🧮 **DATA INTEGRITY CHECK FAILED**\n",
+        f"Check: `{kind}`\n",
+        f"Time: {now:%d %b %Y %H:%M} UTC\n\n",
+        f"{detail}\n",
+    ]
+    if rows:
+        body.append("\nAffected:\n```\n" + "\n".join(rows[:15]) + "\n```\n")
+    body.append("\nThese figures are wrong in the Sheet and in anything already "
+                "published from it. Repeat alerts for this check are suppressed "
+                "for the rest of today.")
+    text = "".join(body)
+    if not send_to_discord("usage", message=text):
+        log.error("usage_tracker: could not deliver integrity alert '%s' to Discord "
+                  "('usage') — %s", kind, detail)
+        return False
+    return True
+
+
 def record_anthropic_usage(job: str, model: str, usage) -> None:
     """
     Append one Claude call to the usage sheet. NEVER raises — usage tracking

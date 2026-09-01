@@ -537,6 +537,42 @@ def pnl_for_result(result: str, odds: float) -> float:
     return 0.0
 
 
+# Rounding slack: pnl_for_result rounds to 2dp and sheet values round-trip
+# through text, so anything inside a cent is the same number.
+_PNL_TOLERANCE = 0.011
+
+
+def settlement_pnl_mismatch(result: str, odds: float, pnl: float | None) -> str | None:
+    """
+    Describe why this row's P&L is impossible for its result and price, or None.
+
+    The payout of a settled bet is fully determined by its result and the price
+    it settled at, so a row that disagrees with pnl_for_result is corrupt: a hand
+    edit, a stale write, or a price that changed under a settlement that was
+    never recomputed. Added 1 Sep 2026 after a WIN was published as
+    "@ 1.55 (+7.98 units)" — arithmetic nothing can produce.
+
+    Note what this does and does not cover. It proves a row is SELF-consistent;
+    it cannot tell you the price itself was right. The 23 Aug mispricing passed
+    this check perfectly (8.98 -> +7.98) because the wrong price was used
+    consistently. Catching THAT needs main._flag_suspicious_market_odds, which
+    compares the matched market price against the model's own estimate.
+    """
+    if result not in _SETTLED_RESULTS:
+        return None
+    if pnl is None:
+        return f"{result} row carries no P&L at all"
+    try:
+        odds = float(odds)
+    except (TypeError, ValueError):
+        return f"{result} row has an unreadable price {odds!r}"
+    expected = pnl_for_result(result, odds)
+    if abs(float(pnl) - expected) > _PNL_TOLERANCE:
+        return (f"{result} at {odds:.2f} must pay {expected:+.2f} units, "
+                f"row says {float(pnl):+.2f}")
+    return None
+
+
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 def init_excel() -> None:
@@ -1423,8 +1459,16 @@ def _safe_float(val: str) -> float | None:
         return None
 
 
-def _weekly_row(row: list[str]) -> dict | None:
-    """One Picks row as the dict shape the weekly aggregations work on."""
+def _weekly_row(row: list[str], header: list[str] | None = None) -> dict | None:
+    """
+    One Picks row as the dict shape the weekly aggregations work on.
+
+    'odds' is the ESTIMATE (column E) and 'settle_odds' is the price the row
+    actually pays out at. Reporting must show the latter: the weekly summary used
+    to print the estimate beside a P&L computed from the market price, so a WIN
+    was published as "@ 1.55 (+7.98 units)" — arithmetic that cannot happen, and
+    the only outward sign of the 23 Aug 2026 mispricing for over a week.
+    """
     if not row or not row[0]:
         return None
     try:
@@ -1433,6 +1477,7 @@ def _weekly_row(row: list[str]) -> dict | None:
         return None
     return {
         "date":       dt,
+        "settle_odds": settlement_odds_from_row(row, header) if header else None,
         "match":      row[1] if len(row) > 1 else "",
         "bet_type":   row[2] if len(row) > 2 else "",
         "pick":       row[3] if len(row) > 3 else "",
@@ -1512,7 +1557,7 @@ def get_weekly_data() -> dict:
     week_sun = week_mon + timedelta(days=6)
 
     def _split(src: list[list[str]]) -> tuple[list[dict], list[dict]]:
-        parsed = [x for x in (_weekly_row(r) for r in src) if x is not None]
+        parsed = [x for x in (_weekly_row(r, header) for r in src) if x is not None]
         return parsed, [r for r in parsed if week_mon <= r["date"] <= week_sun]
 
     core_all, core_week = _split(core_src)

@@ -29,6 +29,7 @@ from excel_tracker import (
     get_picks_for_date,
     init_excel,
     pnl_for_result,
+    settlement_pnl_mismatch,
     update_row_result,
 )
 
@@ -875,6 +876,20 @@ def run_auto_results(
         # Paying out at the estimate inflated P&L on every pick whose card
         # showed a shorter market price (fixed 9 Aug 2026).
         pnl = pnl_for_result(result, odds)
+
+        # The payout must follow from the result and the price this row settles
+        # at. A breach means the row is corrupt — a stale write, a hand edit, or
+        # a price that moved under a settlement nobody recomputed — and it must
+        # never reach a subscriber-facing message. Cheap, and it also catches the
+        # degenerate case of a WIN paying 0.00 because the price fell back to 1.0.
+        breach = settlement_pnl_mismatch(result, odds, pnl)
+        if breach:
+            log.error("Row %s (%s | %s): IMPOSSIBLE PAYOUT — %s",
+                      sheet_row, match, pick, breach)
+            stats.setdefault("integrity_breaches", []).append(
+                f"row {sheet_row}: {match} | {pick} — {breach}"
+            )
+
         # A writer that returns False failed to write. Counting it as settled
         # anyway is how the tennis pipeline can announce '✅ settled' for a row
         # that is still PENDING on the sheet (tennis_excel_tracker.py:368 +
@@ -908,6 +923,8 @@ def run_auto_results(
         })
 
     # ── 4. Recalculate running totals + refresh Summary ───────────────────────
+    _alert_integrity_breaches(stats, alert_scope)
+
     if changed:
         finalizer()
         log.info("Google Sheets updated — %d row(s) written.", stats["updated"])
@@ -918,6 +935,28 @@ def run_auto_results(
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
+
+def _alert_integrity_breaches(stats: dict, alert_scope: str) -> None:
+    """
+    Announce impossible payouts found while settling. Ops channel, not the
+    subscriber-facing results feed: the picks are fine, the arithmetic in the
+    sheet is not. One alert per run listing every breach, rather than one per
+    row — the same reasoning that keeps the credit-balance alert deduped.
+    """
+    breaches = stats.get("integrity_breaches") or []
+    if not breaches:
+        return
+    try:
+        from usage_tracker import alert_data_integrity
+        alert_data_integrity(
+            f"settlement-payout ({alert_scope})",
+            f"**{len(breaches)}** settled row(s) carry a P&L that cannot follow "
+            f"from their result and price.",
+            rows=breaches,
+        )
+    except Exception as exc:
+        log.error("Could not raise the settlement integrity alert: %s", exc)
+
 
 def _print_stats(stats: dict) -> None:
     print(f"\n  Checked     : {stats.get('checked', 0)}")

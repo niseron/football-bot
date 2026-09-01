@@ -852,21 +852,131 @@ def enrich_with_context(fixtures_by_league: dict[str, list[dict]]) -> None:
 _TEAM_NOISE_RE = re.compile(r"\b(fc|cf|afc|sc|cd|ac|club)\b", re.IGNORECASE)
 
 
-def _normalize_team(name: str) -> str:
+def _normalize_team(name: str, *, strip_noise: bool = True) -> str:
+    """
+    Fold a team name for comparison.
+
+    `strip_noise=False` keeps FC/CF/AC/CLUB etc. Those words are usually noise —
+    the two APIs disagree about them — but sometimes they are the ONLY thing
+    telling two clubs apart, so the scorer needs both readings. Stripping alone
+    turns "Club Brugge" into bare "brugge", which is a substring of "Cercle
+    Brugge KSV"; that is how a 1.26 favourite was priced at 8.98 on 23 Aug 2026.
+    """
     name = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
-    name = _TEAM_NOISE_RE.sub("", name.lower())
+    name = name.lower()
+    if strip_noise:
+        name = _TEAM_NOISE_RE.sub("", name)
     name = re.sub(r"[^a-z0-9 ]", "", name)
     return re.sub(r"\s+", " ", name).strip()
 
 
 def _team_match(a: str, b: str) -> bool:
-    """Fuzzy-match team names across the two APIs' differing naming conventions."""
+    """
+    Could these two names be the same club? Recall-oriented and deliberately
+    permissive — it decides which CANDIDATES are worth scoring, never which one
+    wins. Anything picking between candidates must use _best_team_match.
+    """
     na, nb = _normalize_team(a), _normalize_team(b)
     if not na or not nb:
         return False
     if na == nb or na in nb or nb in na:
         return True
     return difflib.SequenceMatcher(None, na, nb).ratio() >= 0.72
+
+
+# Two candidates within this score of each other are treated as unresolvable.
+# 0.15 is wide relative to the gaps that matter: on the 23 Aug 2026 fixture the
+# correct outcome scores 1.00 and the wrong one 0.72.
+TEAM_MATCH_MARGIN = 0.15
+
+
+# Noise words are DOWN-WEIGHTED, not deleted, when scoring. Deleting them is
+# what let "Club Brugge" collapse to bare "brugge" and match "Cercle Brugge KSV";
+# weighting keeps "club" vs "cercle" a real difference while still letting an
+# FC/AC prefix mismatch be forgiven.
+_NOISE_TOKENS = frozenset({"fc", "cf", "afc", "sc", "cd", "ac", "club"})
+_NOISE_TOKEN_WEIGHT = 0.3
+
+# Character similarity is discounted relative to token evidence. "Club Brugge"
+# and "Cercle Brugge" are ~76% identical as strings — spelling alone cannot tell
+# two clubs of the same city apart, so it must never outvote the tokens.
+_CHAR_RATIO_WEIGHT = 0.8
+
+
+def _token_weights(normalised: str) -> dict[str, float]:
+    return {
+        t: (_NOISE_TOKEN_WEIGHT if t in _NOISE_TOKENS else 1.0)
+        for t in normalised.split()
+    }
+
+
+def _team_similarity(a: str, b: str) -> float:
+    """
+    How alike two team names are, 0..1.
+
+    Token evidence leads: a weighted overlap over the names with noise words kept
+    (at low weight), so a differing real word — club vs cercle — costs far more
+    than a missing suffix. Character similarity is a discounted fallback, there
+    only for genuine spelling divergence between the two APIs (Kobenhavn vs
+    Copenhagen), where token overlap is near zero and nothing else can help.
+
+    Measured on the fixture that caused the bug: "Club Brugge" scores 1.00
+    against itself and 0.51 against "Cercle Brugge KSV"; querying the other way,
+    "Cercle Brugge" scores 0.82 against "Cercle Brugge KSV" and 0.61 against
+    "Club Brugge". Both gaps clear TEAM_MATCH_MARGIN comfortably.
+    """
+    na_u = _normalize_team(a, strip_noise=False)
+    nb_u = _normalize_team(b, strip_noise=False)
+    if not na_u or not nb_u:
+        return 0.0
+    if na_u == nb_u:
+        return 1.0
+
+    wa, wb = _token_weights(na_u), _token_weights(nb_u)
+    shared = sum(min(wa[t], wb[t]) for t in set(wa) & set(wb))
+    total_a, total_b = sum(wa.values()), sum(wb.values())
+    tok = 0.0
+    if shared and total_a and total_b:
+        # How completely the shorter name is covered, damped by how much of the
+        # longer name is left unexplained — so a single shared token inside a
+        # much longer name stays weak evidence.
+        tok = (shared / min(total_a, total_b)) * ((shared / max(total_a, total_b)) ** 0.5)
+
+    na_s, nb_s = _normalize_team(a), _normalize_team(b)
+    ratio = difflib.SequenceMatcher(None, na_u, nb_u).ratio()
+    if na_s and nb_s:
+        ratio = max(ratio, difflib.SequenceMatcher(None, na_s, nb_s).ratio())
+
+    return max(tok, ratio * _CHAR_RATIO_WEIGHT)
+
+
+def _best_team_match(query: str, candidates: list[str]) -> str | None:
+    """
+    The one candidate that is unambiguously `query`, or None.
+
+    Candidates are first filtered by _team_match (recall), then RANKED — the
+    winner must beat the runner-up by TEAM_MATCH_MARGIN. Two names too close to
+    separate return None, and the caller falls back to Claude's estimated odds.
+    Refusing is the safe direction: no market price costs a little accuracy,
+    the WRONG market price pays out a favourite at the underdog's odds.
+
+    Replaces first-substring-wins (fixed 1 Sep 2026), which returned whichever
+    name happened to come first in the bookmaker's outcome list.
+    """
+    viable = [c for c in candidates if _team_match(c, query)]
+    if not viable:
+        return None
+    if len(viable) == 1:
+        return viable[0]
+    scored = sorted(((_team_similarity(c, query), c) for c in viable), reverse=True)
+    if scored[0][0] - scored[1][0] < TEAM_MATCH_MARGIN:
+        log.warning(
+            "Ambiguous team match for %r — %s score within %.2f of each other; "
+            "refusing to guess and falling back to the estimated price",
+            query, [f"{c} {sc:.2f}" for sc, c in scored[:3]], TEAM_MATCH_MARGIN,
+        )
+        return None
+    return scored[0][1]
 
 
 def _fetch_odds_events(sport_key: str | tuple[str, ...] | None) -> list[dict] | None:
@@ -970,15 +1080,43 @@ def fetch_real_odds(home_team: str, away_team: str, competition: str) -> dict | 
 
 
 def _find_odds_event(events: list[dict], home_team: str, away_team: str) -> dict | None:
-    """This fixture's event inside an already-fetched list. No network call."""
-    return next(
+    """
+    This fixture's event inside an already-fetched list. No network call.
+
+    Scores every event that matches on BOTH sides and takes the best, rather
+    than the first — same first-wins pattern that mispriced 23 Aug 2026, and the
+    cost of resolving it to the wrong fixture is a bet settled off another
+    match's result. A tie inside TEAM_MATCH_MARGIN returns None.
+    """
+    viable = [
+        e for e in events
+        if _team_match(e.get("home_team", ""), home_team)
+        and _team_match(e.get("away_team", ""), away_team)
+    ]
+    if not viable:
+        return None
+    if len(viable) == 1:
+        return viable[0]
+    scored = sorted(
         (
-            e for e in events
-            if _team_match(e.get("home_team", ""), home_team)
-            and _team_match(e.get("away_team", ""), away_team)
+            (
+                _team_similarity(e.get("home_team", ""), home_team)
+                + _team_similarity(e.get("away_team", ""), away_team),
+                i,
+                e,
+            )
+            for i, e in enumerate(viable)
         ),
-        None,
+        key=lambda t: (-t[0], t[1]),
     )
+    if scored[0][0] - scored[1][0] < TEAM_MATCH_MARGIN:
+        log.warning(
+            "Ambiguous odds event for '%s vs %s' — %d candidates too close to "
+            "separate; treating the fixture as unmatched",
+            home_team, away_team, len(viable),
+        )
+        return None
+    return scored[0][2]
 
 
 _OU_RE = re.compile(r"(over|under)\s*([\d.]+)", re.IGNORECASE)
@@ -996,10 +1134,12 @@ def _match_market_odds(pick: dict, real_odds: dict) -> float | None:
             if selection.lower() == "draw":
                 return h2h.get("Draw")
             team_part = re.sub(r"\s+win$", "", selection, flags=re.IGNORECASE).strip()
-            for name, odds in h2h.items():
-                if _team_match(name, team_part):
-                    return odds
-            return None
+            # Ranked against BOTH team names jointly — the h2h keys are exactly
+            # the two sides plus Draw — so the pick can never take whichever
+            # outcome happens to be listed first.
+            names = [n for n in h2h if n != "Draw"]
+            best = _best_team_match(team_part, names)
+            return h2h.get(best) if best else None
 
         if "over" in bet_type or "under" in bet_type or "goals" in bet_type:
             m = _OU_RE.search(selection) or _OU_RE.search(bet_type)
@@ -1018,9 +1158,12 @@ def _match_market_odds(pick: dict, real_odds: dict) -> float | None:
             team_part, line = m.group(1).strip(), float(m.group(2))
             for row in real_odds.get("spreads", []):
                 if abs(row.get("point", -999) - line) < 0.01:
-                    for name, odds in row.items():
-                        if name != "point" and _team_match(name, team_part):
-                            return odds
+                    # Same joint ranking as h2h: a spread row is keyed by the two
+                    # team names, so first-wins could hand back the other side.
+                    names = [n for n in row if n != "point"]
+                    best = _best_team_match(team_part, names)
+                    if best:
+                        return row[best]
             return None
     except Exception as exc:
         log.debug("_match_market_odds failed for pick %s: %s", pick.get("match"), exc)
@@ -1031,6 +1174,57 @@ def _match_market_odds(pick: dict, real_odds: dict) -> float | None:
 
 def _implied_prob(odds: float) -> float:
     return 1.0 / odds if odds else 0.0
+
+
+# A matched market price this far from the model's own estimate is not a value
+# bet, it is a bad match. Calibrated against the full 307-row history on
+# 1 Sep 2026: the median estimate/market ratio is 1.15x, the 90th percentile
+# 1.37x, and the largest legitimate divergence ever recorded is 2.05x
+# (Man United vs Ipswich, a genuine long-shot call). The Club Brugge mispricing
+# was 5.79x. A 3.0x floor therefore fires on that row and on nothing else in the
+# bot's entire history — no false positives to train the reader to ignore it.
+SUSPICIOUS_ODDS_RATIO = 3.0
+
+
+def _flag_suspicious_market_odds(pick: dict, market_odds: float) -> bool:
+    """
+    True when the matched market price contradicts the estimate badly enough to
+    look like a matcher error rather than an edge. Alerts the ops channel.
+
+    This is the check that would have caught 23 Aug 2026 unaided. The payout
+    invariant cannot: that row was perfectly self-consistent at the WRONG price
+    (8.98 in, +7.98 out). Only comparing the matched price against what the model
+    thought the same selection was worth exposes a price attached to the other
+    team.
+    """
+    try:
+        est = float(pick.get("odds") or 0)
+    except (TypeError, ValueError):
+        return False
+    if est <= 1.0 or market_odds <= 1.0:
+        return False
+    ratio = max(est, market_odds) / min(est, market_odds)
+    if ratio < SUSPICIOUS_ODDS_RATIO:
+        return False
+    log.error(
+        "SUSPICIOUS market price for '%s' — %s: estimate %.2f vs market %.2f "
+        "(%.1fx). Likely matched to the wrong selection; NOT attaching it.",
+        pick.get("match"), pick.get("pick"), est, market_odds, ratio,
+    )
+    try:
+        from usage_tracker import alert_data_integrity
+        alert_data_integrity(
+            "market-odds-divergence",
+            f"A matched market price is **{ratio:.1f}x** away from the estimate for "
+            f"the same selection, past the {SUSPICIOUS_ODDS_RATIO}x threshold. The "
+            f"price was DISCARDED and the pick falls back to its estimate, so "
+            f"nothing settles at it.",
+            rows=[f"{pick.get('match')} | {pick.get('pick')} | "
+                  f"estimate {est:.2f} vs market {market_odds:.2f}"],
+        )
+    except Exception as exc:
+        log.error("Could not raise the market-odds divergence alert: %s", exc)
+    return True
 
 
 def enrich_picks_with_real_odds(picks: list[dict]) -> None:
@@ -1072,6 +1266,12 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
 
             market_odds = _match_market_odds(pick, real_odds)
             if market_odds is None:
+                continue
+            # Refuse a price that contradicts the estimate by more than the
+            # matcher could plausibly be right about. Dropping it costs one
+            # pick's market data; keeping it pays a favourite at the underdog's
+            # price and books that into P&L, CLV and the edge report.
+            if _flag_suspicious_market_odds(pick, market_odds):
                 continue
 
             pick["market_odds"] = market_odds

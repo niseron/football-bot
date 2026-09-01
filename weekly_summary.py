@@ -144,7 +144,11 @@ def build_weekly_message(data: dict) -> str:
 
     if best:
         best_pnl  = best.get("pnl", 0) or 0
-        best_odds = best.get("odds", 0) or 0
+        # The price it SETTLED at, not the estimate. Printing the estimate beside
+        # a market-priced P&L is how "@ 1.55 (+7.98 units)" reached subscribers on
+        # 24 Aug 2026 — a payout that cannot follow from the price shown next to
+        # it. Falls back to the estimate for rows that never matched a market.
+        best_odds = best.get("settle_odds") or best.get("odds", 0) or 0
         lines.append(
             f"\U0001f3c6 Best pick: _{_esc(str(best['match']))} "
             f"— {_esc(str(best['pick']))} @ {_esc(str(best_odds))} "

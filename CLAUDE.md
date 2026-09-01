@@ -274,6 +274,49 @@ with no score at all, `football-get-match-score` gives only the final score, and
 Details, the validation set and the audit history in PROJECT_SUMMARY.md,
 "Extra-time settlement" and "Fixture name matching".
 
+## Odds Matching — rank candidates, never take the first (1 Sep 2026)
+
+Stripping noise words can delete the ONLY word telling two clubs apart.
+`_normalize_team("Club Brugge")` returns bare `"brugge"`, a substring of
+`"cercle brugge ksv"` — and `_match_market_odds` used to return the first substring
+hit, so a 1.26 favourite was priced and paid at the underdog's 8.98. That single row
+carried 7.72 units of phantom P&L, a fifth of reported Core P&L, and doubled the
+headline positive-edge ROI. Postmortem in PROJECT_SUMMARY.md, "Odds matched to the
+wrong team".
+
+- **Never pick a team by first match.** `_team_match` is a permissive RECALL filter —
+  it says which candidates are worth scoring, never which one wins. Anything choosing
+  between candidates must go through `_best_team_match`, which ranks by
+  `_team_similarity` and requires the winner to beat the runner-up by
+  `TEAM_MATCH_MARGIN`. That covers the h2h branch, the Asian Handicap branch and
+  `_find_odds_event`; a new market branch must use it too.
+- **Ambiguity returns None, and None is correct.** The pick then falls back to the
+  estimated price. No market price costs a little accuracy; the WRONG market price
+  pays a favourite at the underdog's odds and books it into P&L, CLV and the edge
+  report.
+- **`_team_similarity` is token-dominant on purpose.** Noise words are down-weighted
+  (0.3), not deleted; character similarity is discounted (0.8) and is only a fallback
+  for spelling divergence. "Club Brugge" and "Cercle Brugge" are ~76% identical as
+  strings — spelling must never outvote tokens. Do not reintroduce a containment
+  bonus: it was tried and scored the WRONG candidate at 0.76, leaving a 0.11 gap.
+- **The payout invariant proves self-consistency, not correctness.**
+  `settlement_pnl_mismatch` catches a P&L that cannot follow from the row's result and
+  price. It did NOT and could not catch this bug — 8.98 in, +7.98 out is consistent.
+  The check that catches it is `_flag_suspicious_market_odds`, comparing the matched
+  price against the model's own estimate. Keep both; they cover different failures.
+- **`SUSPICIOUS_ODDS_RATIO = 3.0` is calibrated, not guessed.** Median divergence
+  across the full history is 1.15x, p90 1.37x, largest legitimate 2.05x, the bug
+  5.79x. Re-measure before moving it — a threshold that fires on real value picks
+  trains the reader to ignore the channel.
+- **Anything published beside a P&L must be the SETTLEMENT price.** The only outward
+  sign of this bug for a week was a weekly summary line reading "@ 1.55 (+7.98
+  units)". Rows carry `settle_odds`; use it, not the `Odds` estimate.
+- **Pre-9-Aug-2026 rows breach the payout invariant by design** — settlement paid the
+  estimate then, and `market_odds_from_row` reconstructs a price from `Market Prob %`
+  for rows with no `Market Odds` cell. 14 such rows exist, all 4-11 Jul 2026, worth
+  +0.30 units. They are correct as settled; do not "fix" them, and do not widen the
+  invariant to sweep the whole sheet or it will alert on them every day.
+
 ## API Failure Visibility — the `usage` channel (18 Aug 2026)
 
 `usage_tracker` owns the ops view of API health, separately from the

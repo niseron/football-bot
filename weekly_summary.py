@@ -57,6 +57,40 @@ def _esc(text: str) -> str:
     return text
 
 
+def _extended_section(ext: dict | None) -> list[str]:
+    """
+    The Extended-tier block, as MarkdownV2 lines. Empty when there is nothing to
+    report, so a Core-only week reads exactly as it always has.
+
+    Reported BESIDE Core, never merged into it: Extended sits outside the staked
+    book (no Kelly stake, no bankroll, no running total, and excluded from the
+    calibration / edge / CLV series), so a reader who added the two P/L figures
+    together would be adding a real book to a paper one. The caveat line says so
+    on every send rather than relying on the reader remembering.
+
+    Same arithmetic as the Core block — both come from
+    excel_tracker._weekly_tier_stats — so the two win rates are comparable.
+    """
+    if not ext:
+        return []
+    total = ext.get("total_picks", 0) or 0
+    if not total:
+        return []
+    pnl  = ext.get("pnl_week", 0.0) or 0.0
+    sign = "+" if pnl >= 0 else ""
+    return [
+        "",
+        "*\U0001f9e9 EXTENDED \\- tracked separately*",
+        "_Outside the staked book: no stake, no bankroll, and never folded into "
+        "the Core figures above\\._",
+        f"\U0001f3af *Picks this week:* {total}",
+        f"✅ Wins: *{ext.get('wins', 0)}*  ❌ Losses: *{ext.get('losses', 0)}*  "
+        f"⏳ Pending: *{ext.get('pending', 0)}*",
+        f"\U0001f4c8 Win rate: *{_esc(str(ext.get('win_rate', 0.0)))}%*",
+        f"\U0001f4b0 P/L this week: *{_esc(sign + f'{pnl:.2f}')} units*",
+    ]
+
+
 def build_weekly_message(data: dict) -> str:
     if not data:
         return (
@@ -84,8 +118,10 @@ def build_weekly_message(data: dict) -> str:
     ]
 
     if total == 0:
-        # Nothing sent this week yet
-        lines.append("_No picks sent this week yet\\._")
+        # No CORE picks this week. Extended is still reported if it has any —
+        # the two tiers are independent, so an empty Core week does not mean an
+        # empty week.
+        lines.append("_No Core picks sent this week yet\\._")
         pending_all = data.get("pending_picks", [])
         if pending_all:
             lines.append(f"\n*Pending picks from earlier:*")
@@ -95,9 +131,11 @@ def build_weekly_message(data: dict) -> str:
                     f"{_esc(p['bet_type'])} → {_esc(str(p['pick']))} "
                     f"@ {_esc(str(p['odds']))}"
                 )
+        lines += _extended_section(data.get("extended"))
         return "\n".join(lines)
 
     lines += [
+        "*⭐ CORE \\- the tracked book*",
         f"\U0001f3af *Picks this week:* {total}",
         f"✅ Wins: *{wins}*  ❌ Losses: *{losses}*  ⏳ Pending: *{pending}*",
         f"\U0001f4c8 Win rate: *{_esc(str(rate))}%*",
@@ -117,9 +155,11 @@ def build_weekly_message(data: dict) -> str:
 
     lines.append(f"\U0001f4c9 Running total P/L: *{_esc(rt_sign + f'{rt:.2f}')} units*")
 
+    lines += _extended_section(data.get("extended"))
+
     breakdown = get_bet_type_breakdown()
     if breakdown:
-        lines.append("\n*\U0001f4cb Bet Type Breakdown \\(all\\-time settled\\)*")
+        lines.append("\n*\U0001f4cb Bet Type Breakdown \\(Core, all\\-time settled\\)*")
         lines.append("`{:<22} {:>4}  {:>5}  {:>5}  {:>6}  {:>7}`".format(
             "Bet Type", "W", "L", "WR%", "Picks", "P/L"
         ))

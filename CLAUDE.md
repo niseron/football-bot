@@ -69,9 +69,20 @@ busy day yields 30+ picks across up to 10 competitions. A global selection step
 **Core**; every other pick is **Extended** (so at most 10 per competition per day).
 Both tiers are logged to the Picks tab, settled by the same `auto_results.py` path, and
 posted to their league's Discord channel (Extended embeds are labelled
-`· EXTENDED · league rank n`). Only Core reaches the picks card, the `Stake` embed
-field, the running total/bankroll columns, the Summary totals, and the
-calibration/edge/CLV reports.
+`· EXTENDED · league rank n`). Only Core reaches the picks card, the weekly summary
+CARD, the `Stake` embed field, the running total/bankroll columns, the Summary totals,
+and the calibration/edge/CLV reports.
+
+The weekly summary TEXT is the one exception (1 Sep 2026): it reports Extended in its
+own labelled section **beside** Core, never merged in. `get_weekly_data()` keeps the
+Core figures at the top level untouched and puts Extended under an `"extended"` key,
+so `generate_weekly_card` and `update_result.py` — which read named Core keys through
+`.get()` — are unaffected and the card stays Core-only. Both tiers go through
+`_weekly_tier_stats()` so their win rates are computed identically and are actually
+comparable; do NOT reach for `_tier_stats()` there, it divides by wins+losses only
+while the Core figure has always divided by every settled row. The section carries a
+standing caveat that Extended sits outside the staked book, because a reader adding
+the two P/L lines together would be adding a real book to a paper one.
 
 **Tier does not follow from a rank number.** It did until 15 Aug 2026 (ranks 1-5 Core,
 6-10 Extended of one global list); now `league_rank` is the pick's position *inside its

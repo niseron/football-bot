@@ -1416,52 +1416,48 @@ def get_picks_for_date(dt: date) -> list[dict]:
 
 # ── Weekly data ───────────────────────────────────────────────────────────────
 
-def get_weekly_data() -> dict:
-    # CORE ONLY — feeds the weekly summary card and `update_result.py`'s recap.
+def _safe_float(val: str) -> float | None:
     try:
-        ws = _picks_ws()
-        all_rows = ws.get_all_values()
-        rows = _core_rows(all_rows[1:], all_rows[0] if all_rows else [])
-    except Exception as exc:
-        log.error("Sheets read failed: %s", exc)
-        return {}
+        return float(val) if val else None
+    except ValueError:
+        return None
 
-    today    = date.today()
-    week_mon = today - timedelta(days=today.weekday() + 7)
-    week_sun = week_mon + timedelta(days=6)
 
-    all_rows:  list[dict] = []
-    week_rows: list[dict] = []
+def _weekly_row(row: list[str]) -> dict | None:
+    """One Picks row as the dict shape the weekly aggregations work on."""
+    if not row or not row[0]:
+        return None
+    try:
+        dt = datetime.strptime(row[0], "%d-%b-%Y").date()
+    except ValueError:
+        return None
+    return {
+        "date":       dt,
+        "match":      row[1] if len(row) > 1 else "",
+        "bet_type":   row[2] if len(row) > 2 else "",
+        "pick":       row[3] if len(row) > 3 else "",
+        "odds":       _safe_float(row[4] if len(row) > 4 else "") or 0.0,
+        "confidence": row[5] if len(row) > 5 else "",
+        "result":     row[6] if len(row) > 6 else "",
+        "pnl":        _safe_float(row[7] if len(row) > 7 else ""),
+        "running":    _safe_float(row[8] if len(row) > 8 else ""),
+    }
 
-    for row in rows:
-        if not row or not row[0]:
-            continue
-        try:
-            dt = datetime.strptime(row[0], "%d-%b-%Y").date()
-        except ValueError:
-            continue
 
-        def _safe_float(val: str) -> float | None:
-            try:
-                return float(val) if val else None
-            except ValueError:
-                return None
+def _weekly_tier_stats(week_rows: list[dict]) -> dict:
+    """
+    Picks / wins / losses / pending / win rate / P&L for one tier's week.
 
-        r = {
-            "date":       dt,
-            "match":      row[1] if len(row) > 1 else "",
-            "bet_type":   row[2] if len(row) > 2 else "",
-            "pick":       row[3] if len(row) > 3 else "",
-            "odds":       _safe_float(row[4] if len(row) > 4 else "") or 0.0,
-            "confidence": row[5] if len(row) > 5 else "",
-            "result":     row[6] if len(row) > 6 else "",
-            "pnl":        _safe_float(row[7] if len(row) > 7 else ""),
-            "running":    _safe_float(row[8] if len(row) > 8 else ""),
-        }
-        all_rows.append(r)
-        if week_mon <= dt <= week_sun:
-            week_rows.append(r)
+    Extracted from get_weekly_data on 1 Sep 2026 so the Extended section of the
+    weekly summary is computed by the SAME arithmetic as the Core section — two
+    differently-derived win rates printed side by side in one message would
+    invite a comparison that is not valid.
 
+    Deliberately NOT _tier_stats(), which divides by wins+losses only. This
+    divides by every settled row (VOID and the half results included) and
+    honours _WIN_RATE_EXCLUDE, which is what the Core figure has always done and
+    must keep doing.
+    """
     settled  = [r for r in week_rows if r["result"] in _SETTLED_RESULTS]
     wins     = [r for r in settled if r["result"] == "WIN"]
     losses   = [r for r in settled if r["result"] == "LOSS"]
@@ -1470,14 +1466,8 @@ def get_weekly_data() -> dict:
     wr_settled = [r for r in settled if r["date"] not in _WIN_RATE_EXCLUDE]
     wr_wins    = [r for r in wr_settled if r["result"] == "WIN"]
     win_rate   = round(len(wr_wins) / len(wr_settled) * 100, 1) if wr_settled else 0.0
-    best_pick = max(wins, key=lambda r: r["pnl"] or 0) if wins else None
-    running_total = next(
-        (r["running"] for r in reversed(all_rows) if r.get("running") is not None), 0.0
-    )
-
+    best_pick  = max(wins, key=lambda r: r["pnl"] or 0) if wins else None
     return {
-        "week_start":    week_mon.strftime("%d %b"),
-        "week_end":      week_sun.strftime("%d %b %Y"),
         "total_picks":   len(week_rows),
         "wins":          len(wins),
         "losses":        len(losses),
@@ -1485,8 +1475,73 @@ def get_weekly_data() -> dict:
         "win_rate":      win_rate,
         "pnl_week":      pnl_week,
         "best_pick":     best_pick,
-        "running_total": running_total or 0.0,
         "pending_picks": pending,
+    }
+
+
+def get_weekly_data() -> dict:
+    """
+    Last week performance. The top-level figures are CORE ONLY — they feed the
+    weekly summary card and the update_result.py recap, and they are the
+    headline series, so nothing here may fold Extended into them.
+
+    Extended is reported SEPARATELY under the "extended" key (added 1 Sep 2026),
+    computed from the same sheet read and the same arithmetic. Consumers that
+    predate it — generate_weekly_card, update_result.py — read named Core keys
+    through .get(), so the extra key is inert for them and the card stays
+    Core-only.
+
+    ONE sheet read serves both tiers. Do not add a second read for Extended: the
+    whole Picks tab is one full read and the quota is 60/minute across the
+    spreadsheet (see the 20-29 Aug 2026 data loss).
+    """
+    try:
+        ws = _picks_ws()
+        sheet_rows = with_sheets_retry("read (weekly data)", ws.get_all_values)
+    except Exception as exc:
+        log.error("Sheets read failed: %s", exc)
+        return {}
+
+    header = sheet_rows[0] if sheet_rows else []
+    body   = sheet_rows[1:]
+    core_src = _core_rows(body, header)
+    ext_src  = _extended_rows(body, header)
+
+    today    = date.today()
+    week_mon = today - timedelta(days=today.weekday() + 7)
+    week_sun = week_mon + timedelta(days=6)
+
+    def _split(src: list[list[str]]) -> tuple[list[dict], list[dict]]:
+        parsed = [x for x in (_weekly_row(r) for r in src) if x is not None]
+        return parsed, [r for r in parsed if week_mon <= r["date"] <= week_sun]
+
+    core_all, core_week = _split(core_src)
+    _, ext_week         = _split(ext_src)
+
+    core = _weekly_tier_stats(core_week)
+    ext  = _weekly_tier_stats(ext_week)
+
+    # Core only: the running-total and bankroll columns are never written for an
+    # Extended row (_recalculate_running_total skips them), so there is no
+    # Extended equivalent to read and inventing one would imply a second book.
+    running_total = next(
+        (r["running"] for r in reversed(core_all) if r.get("running") is not None), 0.0
+    )
+
+    return {
+        "week_start":    week_mon.strftime("%d %b"),
+        "week_end":      week_sun.strftime("%d %b %Y"),
+        "total_picks":   core["total_picks"],
+        "wins":          core["wins"],
+        "losses":        core["losses"],
+        "pending":       core["pending"],
+        "win_rate":      core["win_rate"],
+        "pnl_week":      core["pnl_week"],
+        "best_pick":     core["best_pick"],
+        "running_total": running_total or 0.0,
+        "pending_picks": core["pending_picks"],
+        # Reported alongside Core, never merged into it.
+        "extended":      ext,
     }
 
 

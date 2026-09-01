@@ -189,6 +189,41 @@ both render the unfiltered `picks` list, so a repeated fixture still shows on th
 card. Do not push this filter up into `analyse_with_claude` or the delivery
 path.
 
+## Google Sheets Quota — the read budget is shared and finite (1 Sep 2026)
+
+Google allows **60 read requests per minute per service account, across the whole
+spreadsheet** — football tabs, tennis tabs, the Opus tab and the usage ledger all draw on
+one budget. Every read in `excel_tracker` is wrapped in `except: log.error(); return
+<neutral>`, so exceeding it does not raise: it returns empty and the run continues.
+
+That cost 128 picks over six days (20/22/26/27/28/29 Aug 2026). `calculate_kelly_stake`
+read the entire Picks tab, `daily_picks_job` called it once per pick, and once the
+per-league cap took slates past ~20 picks the loop drained the minute's budget — so the
+`log_picks_batch` read immediately afterwards took the 429 and the whole slate went to
+Discord and nowhere else. Full postmortem in PROJECT_SUMMARY.md, "Sheets quota loss".
+
+- **Never put a full-sheet read inside a per-pick loop.** `calculate_kelly_stake` takes
+  `breakdown=` for exactly this reason; read it once per run and pass it down. Any new
+  per-pick enrichment that touches the sheet must be hoisted the same way. The rule is
+  one read per RUN, not per pick.
+- **`log_picks_batch` returns `BatchLogResult(written, skipped, failed)`, not an int.**
+  `skipped` is the duplicate guard working as designed; `failed` is a **lost pick** — it
+  was eligible, nothing wrote it, and nothing downstream will ever see it. Callers must
+  route any non-zero `failed` through `main._notify_sheet_write_gap()`, which alerts the
+  ops `usage` channel. A PARTIAL write alerts exactly as loudly as a total one: 25 of 29
+  landing is not a good day, it is four picks lost. Do not collapse these three counts
+  back into one number.
+- **`with_sheets_retry()` re-raises when its attempts are exhausted.** It must never
+  convert a permanent failure into a silent success — the caller decides what a failure
+  means. Retries cover 429/5xx only; a malformed request fails fast.
+- **Interval jobs in `run_all.py` are phase-shifted via `start_date` offsets.** Keep them
+  apart, but never rely on it: interval phase drifts on every Railway restart, so it
+  reduces collisions and cannot prevent them. Correctness has to hold without it.
+- **One-off scripts must not run on import.** `_run_now.py` had no `__main__` guard, so
+  `import _run_now` fired a full live picks run and posted to subscriber channels
+  (1 Sep 2026). It and `_opus_restake_aug13.py` are guarded now — keep any new `_*.py`
+  script the same way; importing a file must never deliver or write anything.
+
 ## API Failure Visibility — the `usage` channel (18 Aug 2026)
 
 `usage_tracker` owns the ops view of API health, separately from the

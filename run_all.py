@@ -14,6 +14,7 @@ football jobs.
 """
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from env_loader import load_env
 
@@ -153,11 +154,28 @@ async def main() -> None:
         post_weekly_summary, "cron",
         day_of_week="mon", hour=9, minute=5, timezone="Europe/Brussels",
     )
+    # ── Interval jobs are PHASE-SHIFTED, not merely spaced ───────────────────
+    # Every one of these reads the spreadsheet, and Google's quota is 60 reads
+    # per minute per service account across the WHOLE spreadsheet — shared by
+    # the football tabs, the tennis tabs, the Opus tab and the usage ledger.
+    # Registered back-to-back with no start_date, APScheduler fires all three
+    # 30-minute jobs in the SAME pass, and the 15-minute one joins them every
+    # other pass, so their reads land in one burst and compete for one minute's
+    # budget. The offsets below give each its own minute.
+    #
+    # This is defence in depth, not the fix for the 20-29 Aug 2026 data loss —
+    # that was the picks run reading the full sheet once per pick, and it is
+    # fixed at the source in main.daily_picks_job. Interval jobs drift with
+    # every Railway restart, so staggering can reduce collisions but can never
+    # be relied on to prevent them.
+    def _offset(minutes: float):
+        return datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
     scheduler.add_job(
-        live_results_check, "interval", minutes=30,
+        live_results_check, "interval", minutes=30, start_date=_offset(1),
     )
     scheduler.add_job(
-        closing_odds_job, "interval", minutes=15,
+        closing_odds_job, "interval", minutes=15, start_date=_offset(4),
     )
     # Tennis system — independent jobs, never intermixed with the football ones
     scheduler.add_job(
@@ -166,16 +184,21 @@ async def main() -> None:
     )
     # No tennis closing-odds job — Odds API disabled for tennis 6 Aug 2026
     scheduler.add_job(
-        tennis_live_results_check, "interval", minutes=30,
+        tennis_live_results_check, "interval", minutes=30, start_date=_offset(7),
     )
-    # Opus 5 shadow settlement — sheet-only, no delivery. Same 30-min cadence
-    # as football's and registered back-to-back, so in practice the two fire in
-    # the SAME scheduler pass and run concurrently. That is safe rather than
-    # merely tolerable: run_auto_results' shared PENDING-alert state is
-    # namespaced per alert_scope, so neither run can consume the other's alert
-    # slot no matter which thread gets there first.
+    # Opus 5 shadow settlement — sheet-only, no delivery. Same 30-min cadence as
+    # football's but deliberately 9 minutes out of phase with it (1 Sep 2026):
+    # the two used to be registered back-to-back with no start_date and fired in
+    # the SAME scheduler pass, putting both settlement passes' sheet reads in one
+    # minute of the shared 60-read quota.
+    #
+    # Running them concurrently was never a CORRECTNESS problem and still is not:
+    # run_auto_results' shared PENDING-alert state is namespaced per alert_scope,
+    # so neither run can consume the other's alert slot no matter which thread
+    # gets there first. Keep that namespacing — the phase offset is a quota
+    # measure and drifts on every restart, so it cannot be leaned on for safety.
     scheduler.add_job(
-        opus_shadow_results_check, "interval", minutes=30,
+        opus_shadow_results_check, "interval", minutes=30, start_date=_offset(10),
     )
     # Usage + cost report — 23:50 so it captures a full day of both pipelines
     scheduler.add_job(

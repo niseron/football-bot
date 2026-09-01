@@ -18,11 +18,17 @@ from main import (
     _kickoff_lookup,
     _pick_log_entry,
     _discord_pick_embed,
+    _notify_sheet_write_gap,
     DISCORD_LEAGUE_CHANNEL_KEYS,
     DISCORD_PICK_SEND_DELAY,
 )
 from discord_bot import send_to_discord
-from excel_tracker import PICK_TIER_CORE, calculate_kelly_stake
+from excel_tracker import (
+    PICK_TIER_CORE,
+    BatchLogResult,
+    calculate_kelly_stake,
+    get_bet_type_breakdown,
+)
 from tracker import log_picks_batch, picks_exist_for_session
 
 
@@ -60,10 +66,20 @@ async def run():
     except Exception as exc:
         log.warning("Real odds enrichment failed — proceeding with Claude odds only: %s", exc)
 
+    # ONE breakdown read for the whole slate — see the same block in
+    # main.daily_picks_job: per-pick reads exhaust the Sheets per-minute quota
+    # and the batch write below silently eats the 429.
+    try:
+        bet_type_breakdown = get_bet_type_breakdown()
+    except Exception as exc:
+        log.warning("Bet-type breakdown read failed — Kelly falls back to flat stakes: %s", exc)
+        bet_type_breakdown = []
+
     try:
         for pick in picks:
             pick["kelly"] = calculate_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+                pick["bet_type"], float(pick["odds"]), pick.get("confidence", ""),
+                breakdown=bet_type_breakdown,
             )
     except Exception as exc:
         log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
@@ -85,12 +101,19 @@ async def run():
     # protect. Written as one batch for the same reason daily_picks_job is: a
     # per-league run can produce 30+ picks.
     try:
-        written = log_picks_batch(
+        result = log_picks_batch(
             [_pick_log_entry(p, kickoff_lookup) for p in picks], session=session,
         )
-        log.info("Logged %d of %d pick(s) to the sheet", written, len(picks))
+        log.info(
+            "Sheet log: %d written, %d skipped (duplicate guard), %d FAILED of %d pick(s)",
+            result.written, result.skipped, result.failed, len(picks),
+        )
+        _notify_sheet_write_gap("football-picks-manual", result, len(picks))
     except Exception as exc:
-        log.warning("Failed to log picks: %s", exc)
+        log.error("Failed to log picks: %s", exc)
+        _notify_sheet_write_gap(
+            "football-picks-manual", BatchLogResult(0, 0, len(picks)), len(picks),
+        )
 
     # Telegram and the card carry CORE only, matching daily_picks_job — this
     # script is a stand-in for that job, so it must not publish a different book.
@@ -136,4 +159,12 @@ async def run():
         log.warning("Discord picks delivery failed (non-fatal): %s", exc)
 
 
-asyncio.run(run())
+# MUST stay behind the __main__ guard. This module is importable (main.py's
+# helpers are re-exported through it and tooling reaches for it), and without
+# the guard a bare `import _run_now` executes a FULL live run: Claude calls,
+# a card, and real pick embeds into the subscriber-facing league channels.
+# That happened on 1 Sep 2026 during an import smoke-test — two duplicate
+# messages went out and had to be deleted by hand. Importing this file must
+# never post anything.
+if __name__ == "__main__":
+    asyncio.run(run())

@@ -264,6 +264,60 @@ def alert_anthropic_failure(job: str, exc: Exception, model: str = "") -> bool:
     return True
 
 
+def alert_sheet_write_failure(
+    job: str,
+    *,
+    attempted: int,
+    written: int,
+    skipped: int,
+    failed: int,
+) -> bool:
+    """
+    Alert the 'usage' channel when a pick batch did not fully reach the Sheet.
+
+    Called whenever `failed` is non-zero — a PARTIAL loss alerts exactly as
+    loudly as a total one. That distinction is the whole reason this exists:
+    between 20 and 29 Aug 2026 six slates were written to Discord and never to
+    the Sheet, and the only trace was `log.info("Logged 0 of 29 pick(s)")` in
+    the Railway logs. Nothing was delivered anywhere, nobody looked, and 128
+    picks were lost before a manual audit found them.
+
+    `skipped` is reported but never triggers the alert on its own: the duplicate
+    guard dropping a pick is correct behaviour and happens most days.
+
+    NOT deduped, unlike alert_anthropic_failure. That guard exists because one
+    exhausted balance fans out across ten per-competition calls in a single run;
+    here there is exactly one batch call per run, so every alert is a distinct
+    real loss and suppressing the second would hide it.
+
+    'usage' is the OPS channel — the text is deliberately unscrubbed and names
+    the sheet, the job and the counts, because the reader is the operator.
+    """
+    from discord_bot import send_to_discord
+
+    now = datetime.now(timezone.utc)
+    text = (
+        "🛑 **PICKS DID NOT REACH THE SHEET**\n"
+        f"Job: `{job}`\n"
+        f"Time: {now:%d %b %Y %H:%M} UTC\n\n"
+        f"Picks generated: **{attempted}**\n"
+        f"Written to the Sheet: **{written}**\n"
+        f"Skipped by the duplicate guard (expected): **{skipped}**\n"
+        f"**LOST: {failed}**\n\n"
+        "These picks were delivered to Discord but are absent from the Picks tab, "
+        "so they will never settle and never reach the Summary, calibration or CLV. "
+        "Check the Railway logs for `Sheets read failed` / `Sheets batch write failed` "
+        "around this timestamp. A 429 means the Sheets per-minute quota was exhausted."
+    )
+    if not send_to_discord("usage", message=text):
+        log.error(
+            "usage_tracker: could not deliver sheet-write-failure alert to Discord "
+            "('usage') — %d pick(s) lost by %s and NOTHING announced it", failed, job,
+        )
+        return False
+    return True
+
+
 def record_anthropic_usage(job: str, model: str, usage) -> None:
     """
     Append one Claude call to the usage sheet. NEVER raises — usage tracking

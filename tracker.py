@@ -82,10 +82,15 @@ def log_pick(
         logging.getLogger(__name__).warning("Excel log failed: %s", exc)
 
 
-def log_picks_batch(entries: list[dict], session: str = "morning") -> int:
+def log_picks_batch(entries: list[dict], session: str = "morning"):
     """
     Log a whole run's picks: one local SQLite insert each, then ONE Google
-    Sheets batch for the lot. Returns the number written to the sheet.
+    Sheets batch for the lot.
+
+    Returns excel_tracker.BatchLogResult — written / skipped / failed across
+    BOTH guards. The local SQLite duplicate guard counts as 'skipped' (it is a
+    deliberate drop, same as the sheet's fixture guard); anything the sheet
+    could not write counts as 'failed' and the caller must alert on it.
 
     Same guards and same defaults as log_pick — the only difference is the
     number of sheet round-trips, which is what made this necessary once a run
@@ -96,6 +101,7 @@ def log_picks_batch(entries: list[dict], session: str = "morning") -> int:
     fixture guard then resolves any collision in Core's favour.
     """
     import logging as _logging
+    from excel_tracker import BatchLogResult
     from excel_tracker import log_picks_batch as _sheet_batch
 
     _log = _logging.getLogger(__name__)
@@ -103,6 +109,7 @@ def log_picks_batch(entries: list[dict], session: str = "morning") -> int:
     today = date.today().isoformat()
 
     accepted: list[dict] = []
+    db_skipped = 0
     with sqlite3.connect(DB_PATH) as conn:
         for e in entries:
             pick_date = e.get("pick_date") or today
@@ -114,6 +121,7 @@ def log_picks_batch(entries: list[dict], session: str = "morning") -> int:
             if existing:
                 _log.info("Skipping duplicate pick (already in DB): %s — %s",
                           e["match"], e["pick"])
+                db_skipped += 1
                 continue
             conn.execute(
                 "INSERT INTO picks (date, match, league, bet_type, pick, odds, session, pick_tier) "
@@ -125,12 +133,15 @@ def log_picks_batch(entries: list[dict], session: str = "morning") -> int:
         conn.commit()
 
     if not accepted:
-        return 0
+        return BatchLogResult(0, db_skipped, 0)
     try:
-        return _sheet_batch(accepted)
+        r = _sheet_batch(accepted)
+        return BatchLogResult(r.written, r.skipped + db_skipped, r.failed)
     except Exception as exc:
+        # _sheet_batch handles its own errors, so reaching here means something
+        # unexpected — every accepted entry is lost and none of it was deliberate.
         _log.warning("Excel batch log failed: %s", exc)
-        return 0
+        return BatchLogResult(0, db_skipped, len(accepted))
 
 
 def picks_exist_for_today() -> bool:

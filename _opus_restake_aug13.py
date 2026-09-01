@@ -17,6 +17,20 @@ from __future__ import annotations
 
 import sys
 
+# This file is a completed one-off whose body runs at MODULE level, and that
+# body rewrites the Opus Shadow 'Stake EUR (SIM)' column and rebuilds the
+# bankroll curve from it. Importing the module would therefore silently redo a
+# backfill that is already done. Fail loudly instead — `python -c "import
+# _opus_restake_aug13"` must never be a way to overwrite production data.
+# (A sibling script, _run_now.py, did exactly this on 1 Sep 2026: an import
+# smoke-test fired a full live picks run and posted to subscriber channels.)
+if __name__ != "__main__":
+    raise RuntimeError(
+        "_opus_restake_aug13.py is a one-off script and must not be imported — "
+        "importing it rewrites the Opus Shadow stake column. Run it directly: "
+        "python _opus_restake_aug13.py [--dry-run]"
+    )
+
 from env_loader import load_env
 
 load_env()

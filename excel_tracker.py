@@ -7,13 +7,101 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 
 import gspread
 
 log = logging.getLogger(__name__)
+
+# ── Sheets quota / transient-failure retry ───────────────────────────────────
+# Google Sheets allows 60 READ requests per minute per user (the service
+# account), counted across the whole spreadsheet. Exceeding it returns a 429
+# that gspread raises as APIError, and every read in this module is wrapped in
+# a try/except that logs and returns a neutral value — so before 1 Sep 2026 a
+# 429 was completely silent.
+#
+# It was not hypothetical. From 20 Aug 2026 the picks run read the full Picks
+# tab ONCE PER PICK (calculate_kelly_stake -> get_bet_type_breakdown), so a
+# slate of 21+ picks exhausted the minute's read budget and the batch write
+# that followed got the 429. Six days lost their entire slate to the sheet
+# while Discord showed a full card: 20, 22, 26, 27, 28 and 29 Aug, 128 picks.
+#
+# The per-pick read is gone (calculate_kelly_stake now takes a precomputed
+# breakdown), which is the actual fix. This retry is the belt to that braces:
+# the quota is per MINUTE, so sleeping through the window is usually enough to
+# turn a lost slate into a slow one.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+SHEETS_RETRY_ATTEMPTS = 4
+SHEETS_RETRY_BASE_DELAY = 20.0   # seconds; 429s clear on a per-minute window
+
+
+def _is_retryable_api_error(exc: Exception) -> bool:
+    """True for a Sheets error that is worth waiting out (quota / 5xx)."""
+    code = getattr(getattr(exc, "response", None), "status_code", None)
+    if code is None:
+        code = getattr(exc, "code", None)
+    if code in _RETRY_STATUSES:
+        return True
+    # gspread does not always expose the status; the rendered message does.
+    text = str(exc).lower()
+    return "quota exceeded" in text or "[429]" in text or "rate_limit" in text
+
+
+def with_sheets_retry(what: str, fn, *args, **kwargs):
+    """
+    Run a Sheets call, retrying quota/5xx failures with exponential backoff.
+
+    Re-raises the last exception when the retries are used up, so the CALLER
+    still decides what a permanent failure means — this helper never converts a
+    failure into a silent success. Non-retryable errors propagate immediately.
+    """
+    delay = SHEETS_RETRY_BASE_DELAY
+    for attempt in range(1, SHEETS_RETRY_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            if attempt == SHEETS_RETRY_ATTEMPTS or not _is_retryable_api_error(exc):
+                raise
+            # Jitter so concurrently-throttled jobs do not retry in lockstep and
+            # re-exhaust the same window together.
+            wait = delay + random.uniform(0, delay * 0.25)
+            log.warning(
+                "Sheets %s hit a retryable error (attempt %d/%d) — retrying in %.0fs: %s",
+                what, attempt, SHEETS_RETRY_ATTEMPTS, wait, exc,
+            )
+            time.sleep(wait)
+            delay *= 2
+    raise RuntimeError("unreachable")
+
+
+class BatchLogResult(NamedTuple):
+    """
+    Outcome of one batch pick-logging call.
+
+    Three buckets, because they mean different things to an operator:
+      written — rows appended to the sheet
+      skipped — rows deliberately NOT written (duplicate guard). Expected.
+      failed  — rows that SHOULD have been written and were not. Never expected;
+                this is the number that has to raise an alarm.
+
+    `int(result)` is the written count, so the historical `written = log_picks_batch(...)`
+    shape still reads correctly at a glance.
+    """
+    written: int
+    skipped: int
+    failed: int
+
+    def __int__(self) -> int:
+        return self.written
+
+    @property
+    def attempted(self) -> int:
+        return self.written + self.skipped + self.failed
 
 # Kept so any script that imports EXCEL_PATH still compiles
 EXCEL_PATH = Path(__file__).parent / "picks_tracker.xlsx"
@@ -603,9 +691,15 @@ def _build_pick_row(
     ]
 
 
-def log_picks_batch(entries: list[dict]) -> int:
+def log_picks_batch(entries: list[dict]) -> BatchLogResult:
     """
-    Log a whole run's picks in ONE round-trip. Returns the number written.
+    Log a whole run's picks in ONE round-trip.
+
+    Returns a BatchLogResult splitting the outcome into written / skipped /
+    failed. The split is the point: before 1 Sep 2026 this returned a bare int
+    and the caller logged "Logged 0 of 29" as INFO, so a 429 that dropped a
+    whole slate looked exactly like a day where the duplicate guard legitimately
+    skipped everything. `failed` is never expected and must be alerted on.
 
     Same guards, same row shape and same ordering as log_to_excel — the only
     difference is that the sheet is read once, appended to once and repainted
@@ -621,20 +715,24 @@ def log_picks_batch(entries: list[dict]) -> int:
     guard then resolves any collision in Core's favour.
     """
     if not entries:
-        return 0
+        return BatchLogResult(0, 0, 0)
 
     try:
         ws = _picks_ws()
-        rows = ws.get_all_values()
+        rows = with_sheets_retry("read (picks batch)", ws.get_all_values)
     except Exception as exc:
+        # EVERY entry is unaccounted for: the guard never ran, so none of these
+        # are 'skipped'. They are failures and must be alerted on.
         log.error("Sheets read failed: %s", exc)
-        return 0
+        return BatchLogResult(0, 0, len(entries))
 
     header = rows[0] if rows else []
     _migrate_picks_header(ws, header)
 
     known: list[list[str]] = list(rows[1:])
     staged: list[list] = []
+    skipped = 0
+    failed  = 0
     for e in entries:
         try:
             dt = datetime.fromisoformat(e["pick_date"]) if e.get("pick_date") else datetime.now()
@@ -642,6 +740,7 @@ def log_picks_batch(entries: list[dict]) -> int:
             reason = _duplicate_skip_reason(known, header, match, bet_type, pick, dt.date())
             if reason:
                 log.info("Sheets: skipping '%s — %s [%s]' — %s", match, pick, bet_type, reason)
+                skipped += 1
                 continue
             row = _build_pick_row(
                 dt.strftime("%d-%b-%Y"), match, e.get("league", ""), bet_type, pick,
@@ -650,24 +749,31 @@ def log_picks_batch(entries: list[dict]) -> int:
                 e.get("market_odds"), e.get("pick_tier", PICK_TIER_CORE),
             )
         except Exception as exc:
-            log.error("Sheets: could not build row for %r (skipped): %s", e.get("match"), exc)
+            # A row we could not build is a LOST pick, not a skipped one — it
+            # was eligible and nothing downstream will ever see it again.
+            log.error("Sheets: could not build row for %r (lost): %s", e.get("match"), exc)
+            failed += 1
             continue
         staged.append(row)
         known.append([str(c) for c in row])
 
     if not staged:
-        log.info("Sheets: nothing to log — all %d pick(s) were skipped", len(entries))
-        return 0
+        log.info("Sheets: nothing to log — %d skipped, %d failed of %d pick(s)",
+                 skipped, failed, len(entries))
+        return BatchLogResult(0, skipped, failed)
 
     try:
-        ws.append_rows(staged, value_input_option="USER_ENTERED")
+        with_sheets_retry(
+            "append (picks batch)",
+            ws.append_rows, staged, value_input_option="USER_ENTERED",
+        )
         log.info("Sheets: logged %d pick(s) in one batch", len(staged))
     except Exception as exc:
         log.error("Sheets batch write failed: %s", exc)
-        return 0
+        return BatchLogResult(0, skipped, failed + len(staged))
 
     _apply_formatting(_get_spreadsheet())
-    return len(staged)
+    return BatchLogResult(len(staged), skipped, failed)
 
 
 def log_to_excel(
@@ -1437,7 +1543,12 @@ def get_bet_type_breakdown() -> list[dict]:
 
 # ── Kelly stake recommendation ────────────────────────────────────────────────
 
-def calculate_kelly_stake(bet_type: str, odds: float, confidence: str) -> dict:
+def calculate_kelly_stake(
+    bet_type: str,
+    odds: float,
+    confidence: str,
+    breakdown: list[dict] | None = None,
+) -> dict:
     """
     Return {"stake": euros, "note": str} for a half-Kelly recommendation.
 
@@ -1445,8 +1556,21 @@ def calculate_kelly_stake(bet_type: str, odds: float, confidence: str) -> dict:
     Stake is based on REAL_BANKROLL, capped at 5%.
     Returns a flat UNIT_STAKE with note="insufficient data" when fewer than
     10 settled picks exist for this bet type.
+
+    PASS `breakdown` WHEN SIZING MORE THAN ONE PICK. It is the result of
+    get_bet_type_breakdown(), which reads the ENTIRE Picks tab — one Sheets
+    read per call. Left to fetch its own, this function costs one full-sheet
+    read per pick, and callers size every pick of a run in a loop.
+
+    That is not a theoretical cost. Google allows 60 reads per minute per
+    service account across the whole spreadsheet; once the per-league cap
+    (15 Aug 2026) took a slate to 20-30 picks, the loop alone exhausted the
+    minute and the batch sheet write that ran straight afterwards took the
+    429 — silently. Six slates were lost that way (20/22/26/27/28/29 Aug 2026,
+    128 picks) before the cause was found. One read per RUN, not per pick.
     """
-    breakdown = get_bet_type_breakdown()
+    if breakdown is None:
+        breakdown = get_bet_type_breakdown()
     record = next(
         (b for b in breakdown if b["bet_type"].strip().lower() == bet_type.strip().lower()),
         None,

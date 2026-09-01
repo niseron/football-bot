@@ -14,7 +14,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from env_loader import load_env
 from tracker import log_picks_batch, picks_exist_for_session
-from excel_tracker import PICK_TIER_CORE, PICK_TIER_EXTENDED, calculate_kelly_stake
+from excel_tracker import (
+    PICK_TIER_CORE,
+    PICK_TIER_EXTENDED,
+    BatchLogResult,
+    calculate_kelly_stake,
+    get_bet_type_breakdown,
+)
 from card_generator import generate_picks_card, generate_picks_card_ig
 from discord_bot import build_pick_embed, send_to_discord
 
@@ -1297,6 +1303,43 @@ def _notify_picks_failed(reason: str, detail: str = "") -> None:
         log.error("Could not deliver picks-failed alert to Discord ('picks-cards')")
 
 
+def _notify_sheet_write_gap(job: str, result, attempted: int) -> None:
+    """
+    Raise the alarm when picks were delivered but did not all reach the Sheet.
+
+    A pick that misses the Sheet is invisible to everything downstream: it never
+    settles, never books P&L, and never appears in the Summary, calibration, edge
+    or CLV reports — while the subscriber has already seen it on Discord. That is
+    strictly worse than a failed run, which at least announces itself.
+
+    Fires on `result.failed`, so a PARTIAL write alerts as loudly as a total one.
+    A run where 25 of 29 picks landed used to be indistinguishable from a clean
+    one; it is not clean, it is four picks lost. `skipped` never fires this — the
+    duplicate guard is meant to drop rows and does so most days.
+
+    Ops-channel alert ('usage', unscrubbed), NOT the subscriber-facing
+    picks-cards alert: nothing is wrong with the picks themselves, so this is
+    not news a reader of that channel can act on.
+    """
+    if not getattr(result, "failed", 0):
+        return
+    log.error(
+        "%s: %d of %d pick(s) did not reach the Sheet (written=%d skipped=%d)",
+        job, result.failed, attempted, result.written, result.skipped,
+    )
+    try:
+        from usage_tracker import alert_sheet_write_failure
+        alert_sheet_write_failure(
+            job,
+            attempted=attempted,
+            written=result.written,
+            skipped=result.skipped,
+            failed=result.failed,
+        )
+    except Exception as exc:
+        log.error("Could not raise the sheet-write-failure alert: %s", exc)
+
+
 def _parse_picks_response(raw: str, scope: str) -> list[dict]:
     """
     The picks array out of one model response. Raises ValueError if the text is
@@ -1787,10 +1830,23 @@ async def daily_picks_job():
     except Exception as exc:
         log.warning("Real odds enrichment failed — proceeding with Claude odds only: %s", exc)
 
+    # ONE Sheets read for the whole slate. calculate_kelly_stake reads the
+    # entire Picks tab when it is not given a breakdown, and this loop runs once
+    # per pick — at 20-30 picks that alone exceeded Google's 60-reads-per-minute
+    # quota and the batch sheet write immediately below took the resulting 429,
+    # silently losing six whole slates (20-29 Aug 2026, 128 picks). Never move
+    # this read back inside the loop.
+    try:
+        bet_type_breakdown = get_bet_type_breakdown()
+    except Exception as exc:
+        log.warning("Bet-type breakdown read failed — Kelly falls back to flat stakes: %s", exc)
+        bet_type_breakdown = []
+
     try:
         for pick in picks:
             pick["kelly"] = calculate_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+                pick["bet_type"], float(pick["odds"]), pick.get("confidence", ""),
+                breakdown=bet_type_breakdown,
             )
     except Exception as exc:
         log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
@@ -1800,12 +1856,22 @@ async def daily_picks_job():
     # ONE batch: `picks` is Core-first, and a 30-pick run logged one at a time
     # costs ~120 Sheets calls and 30 full-sheet repaints.
     try:
-        written = log_picks_batch(
+        result = log_picks_batch(
             [_pick_log_entry(p, kickoff_lookup) for p in picks], session="morning",
         )
-        log.info("Logged %d of %d pick(s) to the sheet", written, len(picks))
+        log.info(
+            "Sheet log: %d written, %d skipped (duplicate guard), %d FAILED of %d pick(s)",
+            result.written, result.skipped, result.failed, len(picks),
+        )
+        _notify_sheet_write_gap("football-picks", result, len(picks))
     except Exception as exc:
-        log.warning("Failed to log picks: %s", exc)
+        # The batch handles its own errors, so an exception here means the whole
+        # write path died — every pick is unaccounted for, and that is exactly
+        # the case that used to pass in silence.
+        log.error("Failed to log picks: %s", exc)
+        _notify_sheet_write_gap(
+            "football-picks", BatchLogResult(0, 0, len(picks)), len(picks),
+        )
 
     # From here on the CARD sees Core only, so the daily post stays the same
     # 5-pick book it has been since 30 Jun 2026. Extended picks reach Discord's

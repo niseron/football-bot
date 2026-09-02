@@ -1020,11 +1020,20 @@ async def daily_tennis_picks_job():
     except Exception as exc:
         log.warning("Tennis Kelly stake calculation failed (picks send without it): %s", exc)
 
+    # Only picks the tracker actually took reach Discord. A pick a guard
+    # declined has no row, so it never settles, never reaches the summary and
+    # never moves the running total — publishing it anyway would show a
+    # subscriber a live bet the book had already closed. Football learned this
+    # on 2 Sep 2026; the fixture guard that makes it possible here landed the
+    # same day. log_tennis_pick returns True for anything still publishable,
+    # including a pick it FAILED to write, so a Sheets outage cannot silently
+    # cancel the slate.
+    publishable: list[dict] = []
     for pick in picks:
         try:
             claude_prob = pick.get("probability")
             kelly = pick.get("kelly") or {}
-            log_tennis_pick(
+            tracked = log_tennis_pick(
                 match=pick["match"],
                 bet_type=pick["bet_type"],
                 pick=pick["pick"],
@@ -1038,21 +1047,36 @@ async def daily_tennis_picks_job():
                 player_ids=pick.get("player_ids") or None,
             )
         except Exception as exc:
+            # Unknown outcome — treat as publishable, same fail-open rule.
             log.warning("Failed to log tennis pick: %s", exc)
+            tracked = True
+        if tracked:
+            publishable.append(pick)
 
-    sent = await asyncio.to_thread(post_tennis_picks_to_discord, picks)
+    withheld = len(picks) - len(publishable)
+    if withheld:
+        log.info("Withholding %d untracked tennis pick(s) from Discord "
+                 "(not logged, so not published)", withheld)
+
+    if not publishable:
+        log.info("No tennis picks left to publish — every pick was already "
+                 "tracked from an earlier run; nothing sent to Discord")
+        return
+
+    sent = await asyncio.to_thread(post_tennis_picks_to_discord, publishable)
     if sent:
-        log.info("Posted %d/%d tennis picks to Discord 'tennis-picks'", sent, len(picks))
+        log.info("Posted %d/%d tennis picks to Discord 'tennis-picks'",
+                 sent, len(publishable))
     else:
         log.error(
             "No tennis picks reached Discord — check DISCORD_BOT_TOKEN / "
             "DISCORD_CHANNELS_JSON ('tennis-picks' key)"
         )
 
-    # Branded PNG card with all of today's picks (both tiers) — additive to
-    # the per-pick embeds above; send_to_discord never raises
+    # Branded PNG card with all of today's PUBLISHED picks (both tiers) —
+    # additive to the per-pick embeds above; send_to_discord never raises
     try:
-        card = generate_tennis_picks_card(picks)
+        card = generate_tennis_picks_card(publishable)
         log.info("Tennis picks card saved: %s", card.name)
         send_to_discord("tennis-picks", image_path=card)
     except Exception as exc:

@@ -195,33 +195,52 @@ def _apply_tennis_formatting() -> None:
 
 # ── Write a new pick ──────────────────────────────────────────────────────────
 
-def log_tennis_pick(
+def _tennis_duplicate_skip_reason(
+    body_rows: list[list[str]],
+    header: list[str],
     match: str,
     bet_type: str,
     pick: str,
-    odds: float,
-    confidence: str,
-    pick_date: str | None = None,
-    claude_prob: float | None = None,
-    market_prob: float | None = None,
-    start_time_utc: str | None = None,
-    rank_tier: str | None = None,
-    stake_eur: float | None = None,
-    player_ids: str | None = None,
-) -> None:
-    dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
-    date_str = dt.strftime("%d-%b-%Y")
-    target_date = dt.date()
+    target_date: date,
+) -> str | None:
+    """
+    Why this pick must NOT be written, or None if it may be. Mirrors
+    excel_tracker._duplicate_skip_reason — same two guards, same reasoning,
+    same message shape. Read that docstring for the measured history behind
+    guard (b); the exposure here is identical and the maths is not sport-
+    specific.
 
-    init_tennis_sheet()
+    (a) SAME-DAY exact repeat — a re-run of the same job. Date-scoped.
+
+    (b) CROSS-DAY repeat of an UNSETTLED bet on the same match, added
+        2 Sep 2026. Tennis fetches a 48-hour window exactly as football does,
+        so a match starting tomorrow appears in today's run AND tomorrow's,
+        and guard (a) is keyed on the date — the second day's pick sailed
+        straight through. Measured on 2 Sep 2026 over 245 rows: 12 matches
+        carried the same open bet on consecutive days, Rafael Jodar vs Arthur
+        Fils three days running (9-11 Aug). One result then settled every one
+        of those rows, so the sheet booked the P&L two or three times and the
+        calibration / edge reports read the repeats as independent samples.
+
+    Keyed on MATCH ALONE, like football's — but DATE-SCOPED, unlike football's,
+    and that difference is deliberate. Football forbids a second open bet on a
+    fixture outright. Tennis deliberately bets several angles on one match in a
+    single run (Sakkari Win + Sakkari 2-0 + Sakkari -4.5, 15 Jul 2026): 28 of
+    the 40 multi-pick matches on the sheet are same-day multi-angle slates, and
+    blocking those would have cut 24% of tennis history rather than the 5% that
+    is actually the bug. Same-day multiple angles are a staking decision; the
+    same bet reappearing tomorrow is not.
+
+    Only UNSETTLED rows block: once a row has a Result the match is over, so a
+    later row on it is a data problem to see, not one to hide.
+
+    `body_rows` must exclude the header.
+    """
     try:
-        ws = _tennis_ws()
-        rows = ws.get_all_values()
-    except Exception as exc:
-        log.error("Tennis Sheets read failed: %s", exc)
-        return
-
-    for row in rows[1:]:
+        result_idx = header.index("Result")
+    except (ValueError, AttributeError):
+        result_idx = TENNIS_HEADERS.index("Result")
+    for row in body_rows:
         if not row or not row[0]:
             continue
         try:
@@ -235,8 +254,72 @@ def log_tennis_pick(
             and row[2] == bet_type
             and row[3] == pick
         ):
-            log.info("Tennis Sheets: skipping duplicate '%s — %s'", match, pick)
-            return
+            return "already logged today (exact duplicate)"
+        settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
+        # `existing != target_date` is guard (b)'s whole scope: an open bet from
+        # ANOTHER DAY blocks, one from this same run does not.
+        if (
+            not settled
+            and existing != target_date
+            and len(row) > 1
+            and row[1] == match
+        ):
+            return (
+                f"this match already has an UNSETTLED pick from another day "
+                f"({row[0]}: '{row[3] if len(row) > 3 else '?'}' "
+                f"[{row[2] if len(row) > 2 else '?'}]). The 48-hour window "
+                "re-serves the same match, and both rows would settle off one "
+                "result. Several angles within ONE run are still allowed."
+            )
+    return None
+
+
+def log_tennis_pick(
+    match: str,
+    bet_type: str,
+    pick: str,
+    odds: float,
+    confidence: str,
+    pick_date: str | None = None,
+    claude_prob: float | None = None,
+    market_prob: float | None = None,
+    start_time_utc: str | None = None,
+    rank_tier: str | None = None,
+    stake_eur: float | None = None,
+    player_ids: str | None = None,
+) -> bool:
+    """
+    Log one tennis pick.
+
+    Returns True if the pick may be PUBLISHED, False if a guard deliberately
+    declined to track it. A write failure returns True: the pick was eligible
+    and the sheet lost it, and withholding it would let a Sheets outage
+    silently cancel the slate for subscribers. Only a deliberate skip — a
+    duplicate, or a second open bet on a match — returns False, because a pick
+    with no row never settles, never reaches the summary and never moves the
+    running total, so publishing it would tell a reader a bet is live that the
+    book has already declined.
+    """
+    dt = datetime.fromisoformat(pick_date) if pick_date else datetime.now()
+    date_str = dt.strftime("%d-%b-%Y")
+    target_date = dt.date()
+
+    init_tennis_sheet()
+    try:
+        ws = _tennis_ws()
+        rows = ws.get_all_values()
+    except Exception as exc:
+        # The guard never ran, so nothing here is a deliberate skip — publish.
+        log.error("Tennis Sheets read failed: %s", exc)
+        return True
+
+    reason = _tennis_duplicate_skip_reason(
+        rows[1:], rows[0] if rows else [], match, bet_type, pick, target_date,
+    )
+    if reason:
+        log.info("Tennis Sheets: skipping '%s — %s [%s]' — %s",
+                 match, pick, bet_type, reason)
+        return False
 
     new_row = [
         date_str, match, bet_type, pick, round(float(odds), 2), confidence, "", "",
@@ -258,7 +341,9 @@ def log_tennis_pick(
         log.info("Tennis Sheets: logged '%s — %s'", match, pick)
         _apply_tennis_formatting()
     except Exception as exc:
+        # Eligible but lost — see the docstring: this still publishes.
         log.error("Tennis Sheets write failed: %s", exc)
+    return True
 
 
 def tennis_picks_exist_for_today() -> bool:

@@ -52,8 +52,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # httpx logs the full request URL at INFO. No key leaks through it here (the
 # Anthropic SDK sends its key as a header, RapidAPI/Odds go via `requests`), but
 # tennis_main is a standalone entry point that never imports main.py, so it has
-# to silence httpx itself rather than inherit main's setting.
+# to silence httpx itself rather than inherit main's setting. "httpx2" is the
+# fork anthropic 1.x moved to; it logs under that name instead.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
@@ -800,7 +802,9 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
     message = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=2048,
-        temperature=0,
+        # temperature=0 via extra_body — anthropic 1.x removed the kwarg;
+        # Sonnet 4.6 still honours it and 0 keeps picks reproducible.
+        extra_body={"temperature": 0},
         system=TENNIS_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": f"Upcoming tennis fixtures (next 48 hours):\n\n{payload}"}],
     )

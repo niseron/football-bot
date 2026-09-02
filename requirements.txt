@@ -1,8 +1,19 @@
-anthropic>=0.25.0
-requests>=2.31.0
-python-dotenv>=1.0.0
-apscheduler>=3.10.0
-gspread>=6.0.0
-google-auth>=2.0.0
+# Every requirement here was an open `>=` floor until 2 Sep 2026, when anthropic
+# published 1.0 and a routine Railway redeploy — no code change on our side —
+# resolved `anthropic>=0.25.0` to 1.3.0. That release dropped temperature/top_p/
+# top_k from messages.create(), so every football and tennis slate died on a
+# TypeError. A floor without a ceiling means upstream picks our version for us.
+#
+# anthropic is pinned exactly: it is the only dependency whose API we call
+# directly, so a surprise here costs a slate. The rest keep their floors but gain
+# a major-version ceiling — that is the bound that would have caught this one.
+# Verified 2 Sep 2026: every ceiling below is above the current latest release,
+# so none of them changes what Railway resolves today.
+anthropic==1.3.0
+requests>=2.31.0,<3
+python-dotenv>=1.0.0,<2
+apscheduler>=3.10.0,<4
+gspread>=6.0.0,<7
+google-auth>=2.0.0,<3
 pytz>=2023.3
-Pillow>=10.0.0
+Pillow>=10.0.0,<13

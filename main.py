@@ -39,7 +39,10 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 # defence-in-depth, because the next httpx-backed SDK added here should not be
 # able to reintroduce it. RapidAPI and The Odds API are unaffected either way:
 # both go through `requests`, which never logs URLs.
+# anthropic 1.x swapped httpx for the httpx2 fork, which logs under its own
+# name — silencing only "httpx" would quietly stop working on that upgrade.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpx2").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Single-ID domestic leagues.
@@ -1602,7 +1605,15 @@ def _analyse_one_league(
         # run away from a truncated, unparseable response. max_tokens is a
         # ceiling, not a charge: unused headroom costs nothing.
         max_tokens=4096,
-        temperature=0,
+        # anthropic 1.x dropped temperature/top_p/top_k from the create()
+        # signature — a TypeError, not a 400. On 2 Sep 2026 an unpinned
+        # `anthropic>=0.25.0` let a Railway redeploy resolve to 1.3.0 and
+        # every football and tennis slate died here. The parameter is gone
+        # from the SDK, not from the API, and Sonnet 4.6 still honours it,
+        # so extra_body merges it back into the request JSON verbatim.
+        # Keep it at 0: it is what makes the same fixtures return the same
+        # picks. requirements.txt now pins anthropic exactly for this reason.
+        extra_body={"temperature": 0},
         system=system,
         messages=[{
             "role": "user",
@@ -1722,7 +1733,8 @@ def _select_core_with_claude(picks: list[dict], n: int) -> list[dict] | None:
         message = claude.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=512,
-            temperature=0,
+            # temperature=0 via extra_body — see analyse_league_with_claude() above.
+            extra_body={"temperature": 0},
             system=CORE_SELECTION_PROMPT.format(n=n),
             messages=[{"role": "user", "content": payload}],
         )

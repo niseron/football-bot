@@ -91,10 +91,20 @@ class BatchLogResult(NamedTuple):
 
     `int(result)` is the written count, so the historical `written = log_picks_batch(...)`
     shape still reads correctly at a glance.
+
+    `skipped_keys` carries the identity of the skipped rows, not just how many.
+    The counts tell an operator what happened; the keys tell the DELIVERY layer
+    which picks to withhold, so a pick the guard deliberately refused to track
+    is not published to Discord as though it were live. Only deliberate drops
+    belong in here — a `failed` row still has to reach subscribers, because the
+    alternative is a Sheets outage silently cancelling the slate.
     """
     written: int
     skipped: int
     failed: int
+    # Defaulted, so the positional BatchLogResult(0, 0, n) constructions in the
+    # callers' alert paths keep compiling untouched.
+    skipped_keys: frozenset[tuple[str, str, str]] = frozenset()
 
     def __int__(self) -> int:
         return self.written
@@ -768,6 +778,7 @@ def log_picks_batch(entries: list[dict]) -> BatchLogResult:
     known: list[list[str]] = list(rows[1:])
     staged: list[list] = []
     skipped = 0
+    skipped_keys: set[tuple[str, str, str]] = set()
     failed  = 0
     for e in entries:
         try:
@@ -777,6 +788,7 @@ def log_picks_batch(entries: list[dict]) -> BatchLogResult:
             if reason:
                 log.info("Sheets: skipping '%s — %s [%s]' — %s", match, pick, bet_type, reason)
                 skipped += 1
+                skipped_keys.add((match, bet_type, pick))
                 continue
             row = _build_pick_row(
                 dt.strftime("%d-%b-%Y"), match, e.get("league", ""), bet_type, pick,
@@ -796,7 +808,7 @@ def log_picks_batch(entries: list[dict]) -> BatchLogResult:
     if not staged:
         log.info("Sheets: nothing to log — %d skipped, %d failed of %d pick(s)",
                  skipped, failed, len(entries))
-        return BatchLogResult(0, skipped, failed)
+        return BatchLogResult(0, skipped, failed, frozenset(skipped_keys))
 
     try:
         with_sheets_retry(
@@ -806,10 +818,12 @@ def log_picks_batch(entries: list[dict]) -> BatchLogResult:
         log.info("Sheets: logged %d pick(s) in one batch", len(staged))
     except Exception as exc:
         log.error("Sheets batch write failed: %s", exc)
-        return BatchLogResult(0, skipped, failed + len(staged))
+        # The staged rows are FAILED, not skipped: the guard cleared them and
+        # the write lost them, so they stay publishable.
+        return BatchLogResult(0, skipped, failed + len(staged), frozenset(skipped_keys))
 
     _apply_formatting(_get_spreadsheet())
-    return BatchLogResult(len(staged), skipped, failed)
+    return BatchLogResult(len(staged), skipped, failed, frozenset(skipped_keys))
 
 
 def log_to_excel(

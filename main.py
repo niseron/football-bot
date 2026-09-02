@@ -1982,6 +1982,43 @@ def _pick_log_entry(pick: dict, kickoff_lookup: dict[str, str]) -> dict:
     }
 
 
+def _withhold_untracked(picks: list[dict], entries: list[dict], result) -> list[dict]:
+    """
+    Drop the picks the tracking guards deliberately refused to log.
+
+    A skipped pick is one we are NOT tracking. It has no row in the Sheet, so it
+    never settles, never reaches the weekly summary and never moves the running
+    total — but until 2 Sep 2026 it was still posted to the league channels, so
+    a subscriber saw a live bet that the book had already declined. In practice
+    that is a SECOND pick on a fixture an earlier run inside the same 48-hour
+    window already has an open bet on (excel_tracker's fixture guard: one
+    fixture carries at most one open bet). Publishing an untracked pick and
+    reporting only the tracked ones is what made Discord and the weekly summary
+    disagree.
+
+    Only `skipped` is withheld. A `failed` pick is still published: it was
+    eligible and the write lost it, and silently cancelling a slate because
+    Sheets returned a 503 is a far worse outcome than a missing row. Callers
+    that never got a result at all fall back to publishing everything for the
+    same reason.
+    """
+    keys = getattr(result, "skipped_keys", None)
+    if not keys:
+        return picks
+    kept, held = [], []
+    for pick, entry in zip(picks, entries):
+        if (entry["match"], entry["bet_type"], entry["pick"]) in keys:
+            held.append(f'{entry["match"]} — {entry["pick"]}')
+        else:
+            kept.append(pick)
+    if held:
+        log.info(
+            "Withholding %d untracked pick(s) from Discord (not logged, so not "
+            "published): %s", len(held), "; ".join(held),
+        )
+    return kept
+
+
 # ── Main job ──────────────────────────────────────────────────────────────────
 
 def _kickoff_lookup(fixtures_by_league: dict[str, list[dict]]) -> dict[str, str]:
@@ -2067,15 +2104,18 @@ async def daily_picks_job():
     # reporting layer can filter on it (excel_tracker._core_rows). Written as
     # ONE batch: `picks` is Core-first, and a 30-pick run logged one at a time
     # costs ~120 Sheets calls and 30 full-sheet repaints.
+    entries = [_pick_log_entry(p, kickoff_lookup) for p in picks]
+    # Fail open: if the write path dies outright we never learn what the guard
+    # would have skipped, and publishing everything beats publishing nothing.
+    publishable = picks
     try:
-        result = log_picks_batch(
-            [_pick_log_entry(p, kickoff_lookup) for p in picks], session="morning",
-        )
+        result = log_picks_batch(entries, session="morning")
         log.info(
             "Sheet log: %d written, %d skipped (duplicate guard), %d FAILED of %d pick(s)",
             result.written, result.skipped, result.failed, len(picks),
         )
         _notify_sheet_write_gap("football-picks", result, len(picks))
+        publishable = _withhold_untracked(picks, entries, result)
     except Exception as exc:
         # The batch handles its own errors, so an exception here means the whole
         # write path died — every pick is unaccounted for, and that is exactly
@@ -2092,10 +2132,10 @@ async def daily_picks_job():
     # picks 1..5 by position, so conviction order has to be a guarantee here,
     # not something that happens to hold.
     core_picks     = sorted(
-        [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE],
+        [p for p in publishable if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE],
         key=lambda p: p.get("rank") or 99,
     )
-    extended_picks = [p for p in picks if p.get("pick_tier") == PICK_TIER_EXTENDED]
+    extended_picks = [p for p in publishable if p.get("pick_tier") == PICK_TIER_EXTENDED]
 
     # The Telegram text digest is gone with Telegram (18 Aug 2026) and is NOT
     # reproduced on Discord: it was a flat re-listing of the same Core picks the
@@ -2122,7 +2162,7 @@ async def daily_picks_job():
         if card is not None:
             send_to_discord("picks-cards", image_path=card)
         sent = 0
-        for pick in picks:
+        for pick in publishable:
             channel_key = DISCORD_LEAGUE_CHANNEL_KEYS.get(pick.get("league", ""))
             if not channel_key:
                 continue

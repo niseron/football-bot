@@ -110,6 +110,9 @@ def log_picks_batch(entries: list[dict], session: str = "morning"):
 
     accepted: list[dict] = []
     db_skipped = 0
+    # Same contract as excel_tracker's guard: a deliberate drop is identified,
+    # not just counted, so the delivery layer can withhold it from Discord too.
+    db_skipped_keys: set[tuple[str, str, str]] = set()
     with sqlite3.connect(DB_PATH) as conn:
         for e in entries:
             pick_date = e.get("pick_date") or today
@@ -122,6 +125,7 @@ def log_picks_batch(entries: list[dict], session: str = "morning"):
                 _log.info("Skipping duplicate pick (already in DB): %s — %s",
                           e["match"], e["pick"])
                 db_skipped += 1
+                db_skipped_keys.add((e["match"], e["bet_type"], e["pick"]))
                 continue
             conn.execute(
                 "INSERT INTO picks (date, match, league, bet_type, pick, odds, session, pick_tier) "
@@ -133,15 +137,19 @@ def log_picks_batch(entries: list[dict], session: str = "morning"):
         conn.commit()
 
     if not accepted:
-        return BatchLogResult(0, db_skipped, 0)
+        return BatchLogResult(0, db_skipped, 0, frozenset(db_skipped_keys))
     try:
         r = _sheet_batch(accepted)
-        return BatchLogResult(r.written, r.skipped + db_skipped, r.failed)
+        return BatchLogResult(
+            r.written, r.skipped + db_skipped, r.failed,
+            r.skipped_keys | frozenset(db_skipped_keys),
+        )
     except Exception as exc:
         # _sheet_batch handles its own errors, so reaching here means something
         # unexpected — every accepted entry is lost and none of it was deliberate.
         _log.warning("Excel batch log failed: %s", exc)
-        return BatchLogResult(0, db_skipped, len(accepted))
+        # `accepted` are failures, not deliberate drops — they stay publishable.
+        return BatchLogResult(0, db_skipped, len(accepted), frozenset(db_skipped_keys))
 
 
 def picks_exist_for_today() -> bool:

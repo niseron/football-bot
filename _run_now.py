@@ -19,6 +19,7 @@ from main import (
     _pick_log_entry,
     _discord_pick_embed,
     _notify_sheet_write_gap,
+    _withhold_untracked,
     DISCORD_LEAGUE_CHANNEL_KEYS,
     DISCORD_PICK_SEND_DELAY,
 )
@@ -100,15 +101,17 @@ async def run():
     # the calibration / edge / CLV baseline that the tier split exists to
     # protect. Written as one batch for the same reason daily_picks_job is: a
     # per-league run can produce 30+ picks.
+    entries = [_pick_log_entry(p, kickoff_lookup) for p in picks]
+    # Fail open, exactly as daily_picks_job does — see _withhold_untracked.
+    publishable = picks
     try:
-        result = log_picks_batch(
-            [_pick_log_entry(p, kickoff_lookup) for p in picks], session=session,
-        )
+        result = log_picks_batch(entries, session=session)
         log.info(
             "Sheet log: %d written, %d skipped (duplicate guard), %d FAILED of %d pick(s)",
             result.written, result.skipped, result.failed, len(picks),
         )
         _notify_sheet_write_gap("football-picks-manual", result, len(picks))
+        publishable = _withhold_untracked(picks, entries, result)
     except Exception as exc:
         log.error("Failed to log picks: %s", exc)
         _notify_sheet_write_gap(
@@ -118,10 +121,10 @@ async def run():
     # Telegram and the card carry CORE only, matching daily_picks_job — this
     # script is a stand-in for that job, so it must not publish a different book.
     core_picks = sorted(
-        [p for p in picks if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE],
+        [p for p in publishable if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE],
         key=lambda p: p.get("rank") or 99,
     )
-    extended = len(picks) - len(core_picks)
+    extended = len(publishable) - len(core_picks)
 
     log.info("%d Core pick(s), %d Extended — Core goes on the card",
              len(core_picks), extended)
@@ -146,7 +149,7 @@ async def run():
         if card is not None:
             send_to_discord("picks-cards", image_path=card)
         sent = 0
-        for pick in picks:
+        for pick in publishable:
             channel_key = DISCORD_LEAGUE_CHANNEL_KEYS.get(pick.get("league", ""))
             if not channel_key:
                 continue
@@ -154,7 +157,8 @@ async def run():
                 await asyncio.sleep(DISCORD_PICK_SEND_DELAY)
             send_to_discord(channel_key, embed=_discord_pick_embed(pick))
             sent += 1
-        log.info("Discord: sent %d of %d pick(s) to their league channels", sent, len(picks))
+        log.info("Discord: sent %d of %d pick(s) to their league channels",
+                 sent, len(publishable))
     except Exception as exc:
         log.warning("Discord picks delivery failed (non-fatal): %s", exc)
 

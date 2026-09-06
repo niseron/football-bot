@@ -155,6 +155,19 @@ def _pick_scope(pick: str) -> str | None:
     return None
 
 
+def _is_draw_bet_type(bet_type: str) -> bool:
+    """
+    True when the BET TYPE itself is a bare 'Draw' label (5 Sep 2026: row 340,
+    Fiorentina vs Torino, bet type 'Draw' / pick 'Draw'). The prompt offers
+    Draw only as a Match Winner PICK, so this is Claude's own label — but it is
+    the same bet, and it stranded because no branch below dispatched on it.
+    Matched on the whole label, never by substring, so 'Draw No Bet' (a
+    different market with a refund leg) can never be swept in.
+    """
+    label = re.sub(r'\s*\([^)]*\)$', '', bet_type.lower()).strip()
+    return re.fullmatch(r'(?:the\s+|match\s+)?draw(?:\s*/\s*x)?', label) is not None
+
+
 def _pending_reason(
     bet_type: str,
     pick: str,
@@ -503,6 +516,20 @@ def evaluate_pick(
     scope = _pick_scope(pk)
     if scope:
         pk = re.sub(r'\s*\([^)]*\)$', '', pk).strip()
+
+    # A bare 'Draw' bet type is the Match Winner draw outcome, so it is folded
+    # into that branch rather than given a second copy of its rule: WIN when
+    # the 90-minute score is level, LOSS otherwise, with the identical
+    # two-legged extra-time handling — settled off the derived margin, PENDING
+    # when that margin cannot be derived. Only when the pick text agrees it is
+    # a draw (or is blank): a pick naming a side under a 'Draw' bet type is
+    # contradictory and stays unhandled, so it alerts for manual settlement
+    # instead of being settled on a guess.
+    if _is_draw_bet_type(bt) and (
+        pk in ("", "draw", "x", "tie", "the draw")
+        or ("draw" in pk and "no bet" not in pk and hn not in pk and an not in pk)
+    ):
+        bt, pk = "match winner", "draw"
 
     # Extra time was PLAYED and the pick settles on regulation time (the
     # default), so the published score overshoots the 90-minute one. A shootout

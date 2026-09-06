@@ -12,6 +12,11 @@ Arguments:
     result  — WIN | LOSS | VOID
 """
 import sys
+
+from env_loader import load_env
+
+load_env()
+
 from excel_tracker import update_result, get_weekly_data, EXCEL_PATH
 
 

@@ -251,6 +251,13 @@ with no score at all, `football-get-match-score` gives only the final score, and
   **Match Winner, Double Chance and Asian Handicap** — all pay on the margin.
   **Over/Under and BTTS stay PENDING** unless a bound closes them: the margin
   does not pin the total. Do not "finish the job" by inventing a total.
+- **A bare `Draw` BET TYPE is the Match Winner draw and settles as one** (6 Sep
+  2026). The prompt only offers Draw as a Match Winner *pick*, so the label is
+  Claude's own — row 340 (Fiorentina vs Torino, 5 Sep 2026) carried it and
+  stranded because no branch dispatched on it. `evaluate_pick` now normalises
+  the label into the Match Winner branch (`_is_draw_bet_type`), so there is one
+  draw rule, not two copies. It matches the whole label, never a substring:
+  `Draw No Bet` is a different market and must stay unhandled.
 - **`_regulation_goal_difference()` returning None means PENDING, always.** It
   returns None when the aggregate is missing, unparseable, below this leg's
   score for either side, or implies a margin unreachable inside the final score.

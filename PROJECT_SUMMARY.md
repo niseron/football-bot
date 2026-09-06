@@ -276,7 +276,12 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
   **Extended** — see "Per-league picks and global Core selection" below. Was up to 10 globally
   13-15 Aug 2026, and a flat top 5 before that.
 - Picks use actual team names (never generic "Home Win" / "Away Win")
-- Supported bet types: Match Winner, Both Teams to Score, Over/Under Goals, Asian Handicap, Double Chance
+- Supported bet types: Match Winner, Both Teams to Score, Over/Under Goals, Asian Handicap, Double Chance. A bare `Draw` bet-type label is also settled (since 6 Sep 2026) — it is folded into Match Winner
+  with pick `Draw`, so it follows that market's 90-minute and two-legged extra-time rules exactly.
+  The prompt never offers `Draw` as a bet type (only as a Match Winner PICK), so the label is
+  Claude's own; it first appeared on row 340 (Fiorentina vs Torino, 5 Sep 2026), matched no
+  settlement branch, and stranded as PENDING until settled by hand. `Draw No Bet` is deliberately
+  NOT matched — it is a different market with a refund leg.
 - Knockout Match Winner picks carry an explicit time scope (since 12 Jul 2026): "(90 min)" =
   regulation only (3-way market, a 90-minute draw loses it), "(Full-Time incl. ET/Pens)" = team to
   advance (2-way market). WC fixtures on non-group-stage leagueIds are sent to Claude with

@@ -1015,7 +1015,7 @@ async def daily_tennis_picks_job():
             pick["kelly"] = kelly
             stake = float(kelly.get("stake") or 0)
             pick["stake_display"] = (
-                f"€{stake:.2f} · SIM" if stake > 0 else "€0 — negative edge · SIM"
+                f"€{stake:.2f} · SIM" if stake > 0 else "No stake — skip · SIM"
             )
     except Exception as exc:
         log.warning("Tennis Kelly stake calculation failed (picks send without it): %s", exc)

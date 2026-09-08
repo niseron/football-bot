@@ -1946,10 +1946,11 @@ def _discord_pick_embed(p: dict) -> dict:
     if kelly is not None and p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE:
         stake = float(kelly.get("stake") or 0)
         if stake == 0:
-            p = {**p, "stake_display": "⛔ No stake — negative edge"}
+            p = {**p, "stake_display": "⛔ No stake — skip"}
         else:
-            note = f" — {kelly['note']}" if kelly.get("note") else ""
-            p = {**p, "stake_display": f"€{stake:.2f} (Kelly{note})"}
+            # Display only (8 Sep 2026): the euro amount, nothing else. The
+            # Kelly label and the sizing note stay in the 'kelly' dict and logs.
+            p = {**p, "stake_display": f"€{stake:.2f}"}
 
     league = p.get("league", "")
     rank   = p.get("league_rank")

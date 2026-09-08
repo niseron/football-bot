@@ -27,8 +27,10 @@ from discord_bot import send_to_discord
 from excel_tracker import (
     PICK_TIER_CORE,
     BatchLogResult,
+    apply_daily_stake_cap,
     calculate_kelly_stake,
-    get_bet_type_breakdown,
+    get_kelly_breakdown,
+    kelly_odds_for_pick,
 )
 from tracker import log_picks_batch, picks_exist_for_session
 
@@ -71,17 +73,20 @@ async def run():
     # main.daily_picks_job: per-pick reads exhaust the Sheets per-minute quota
     # and the batch write below silently eats the 429.
     try:
-        bet_type_breakdown = get_bet_type_breakdown()
+        kelly_breakdown = get_kelly_breakdown()
     except Exception as exc:
-        log.warning("Bet-type breakdown read failed — Kelly falls back to flat stakes: %s", exc)
-        bet_type_breakdown = []
+        log.warning("Kelly breakdown read failed — stakes fall back to flat: %s", exc)
+        kelly_breakdown = {}
 
+    # Core only, sized on the market price when matched, then capped as a day.
     try:
         for pick in picks:
+            if pick.get("pick_tier", PICK_TIER_CORE) != PICK_TIER_CORE:
+                continue
             pick["kelly"] = calculate_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", ""),
-                breakdown=bet_type_breakdown,
+                kelly_odds_for_pick(pick), kelly_breakdown, bet_type=pick["bet_type"],
             )
+        apply_daily_stake_cap(picks)
     except Exception as exc:
         log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
 

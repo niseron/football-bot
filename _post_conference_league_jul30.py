@@ -25,7 +25,7 @@ load_env()
 
 from card_generator import generate_picks_card          # noqa: E402
 from discord_bot import send_to_discord                 # noqa: E402
-from excel_tracker import calculate_kelly_stake         # noqa: E402
+from excel_tracker import calculate_kelly_stake, get_kelly_breakdown, kelly_odds_for_pick  # noqa: E402
 from main import (                                      # noqa: E402
     analyse_with_claude,
     enrich_with_context,
@@ -72,10 +72,11 @@ def main() -> None:
         log.warning("Kickoff lookup failed (non-fatal): %s", exc)
         kickoff_lookup = {}
 
+    kelly_breakdown = get_kelly_breakdown()  # ONE Sheets read for the slate
     for pick in picks:
         try:
             pick["kelly"] = calculate_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+                kelly_odds_for_pick(pick), kelly_breakdown, bet_type=pick["bet_type"]
             )
         except Exception as exc:
             log.warning("Kelly stake failed for %s: %s", pick.get("match"), exc)

@@ -63,6 +63,8 @@ from excel_tracker import (                                       # noqa: E402
     PICK_TIER_CORE,
     PICK_TIER_EXTENDED,
     calculate_kelly_stake,
+    get_kelly_breakdown,
+    kelly_odds_for_pick,
 )
 from main import (                                                # noqa: E402
     CORE_PICKS_PER_RUN,
@@ -163,10 +165,11 @@ def main() -> None:
         log.warning("Kickoff lookup failed (non-fatal): %s", exc)
         kickoff_lookup = {}
 
+    kelly_breakdown = get_kelly_breakdown()  # ONE Sheets read for the slate
     for pick in picks:
         try:
             pick["kelly"] = calculate_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+                kelly_odds_for_pick(pick), kelly_breakdown, bet_type=pick["bet_type"]
             )
         except Exception as exc:
             log.warning("Kelly stake failed for %s: %s", pick.get("match"), exc)

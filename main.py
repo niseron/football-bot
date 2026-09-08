@@ -18,8 +18,10 @@ from excel_tracker import (
     PICK_TIER_CORE,
     PICK_TIER_EXTENDED,
     BatchLogResult,
+    apply_daily_stake_cap,
     calculate_kelly_stake,
-    get_bet_type_breakdown,
+    get_kelly_breakdown,
+    kelly_odds_for_pick,
 )
 from card_generator import generate_picks_card, generate_picks_card_ig
 from discord_bot import build_pick_embed, send_to_discord
@@ -2085,19 +2087,26 @@ async def daily_picks_job():
     # per pick — at 20-30 picks that alone exceeded Google's 60-reads-per-minute
     # quota and the batch sheet write immediately below took the resulting 429,
     # silently losing six whole slates (20-29 Aug 2026, 128 picks). Never move
-    # this read back inside the loop.
+    # this read back inside the loop. get_kelly_breakdown returns an EMPTY
+    # breakdown on a read failure, which sizes the run at the flat UNIT_STAKE.
     try:
-        bet_type_breakdown = get_bet_type_breakdown()
+        kelly_breakdown = get_kelly_breakdown()
     except Exception as exc:
-        log.warning("Bet-type breakdown read failed — Kelly falls back to flat stakes: %s", exc)
-        bet_type_breakdown = []
+        log.warning("Kelly breakdown read failed — stakes fall back to flat: %s", exc)
+        kelly_breakdown = {}
 
+    # Core only: Extended picks sit outside the staked book and get no stake.
+    # Sized on the market price when one was matched — that is what settlement
+    # pays at — else Claude's estimate; then the day's Core stakes are scaled
+    # together down to DAILY_STAKE_CAP_FRACTION of REAL_BANKROLL (8 Sep 2026).
     try:
         for pick in picks:
+            if pick.get("pick_tier", PICK_TIER_CORE) != PICK_TIER_CORE:
+                continue
             pick["kelly"] = calculate_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", ""),
-                breakdown=bet_type_breakdown,
+                kelly_odds_for_pick(pick), kelly_breakdown, bet_type=pick["bet_type"],
             )
+        apply_daily_stake_cap(picks)
     except Exception as exc:
         log.warning("Kelly stake calculation failed (picks will send without it): %s", exc)
 

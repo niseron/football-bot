@@ -301,7 +301,9 @@ Details, the validation set and the audit history in PROJECT_SUMMARY.md,
 every form, the Draw fold, extra time, two-legged margins), `_find_api_match`
 (senior beats youth, exact beats containment, ambiguity refuses) and the
 PENDING reason, plus `run_auto_results` end to end on row 357 with the feed
-stubbed. Pure — no network, no Sheets, no Discord. Run from `football-bot/`:
+stubbed. `tests/test_staking.py` pins Kelly sizing (exact €0 below break-even,
+the 5% and 15% caps, the market-odds basis, the club-only sample). Pure — no
+network, no Sheets, no Discord. Run from `football-bot/`:
 
 ```
 python -m unittest discover -s tests -t . -v
@@ -312,6 +314,38 @@ Edit/Write to a football-bot `.py` file and blocks with the failure output, so
 a change to the Match Winner branch or the matcher cannot break the most common
 bet type unnoticed. There is no CI and Railway never runs tests: keep the suite
 green before pushing, and extend it whenever a settlement rule changes.
+
+## Kelly Staking — shrunk, bucketed, capped (8 Sep 2026)
+
+Stakes are advice on the Core embed only; the sheet's flat-unit P&L is untouched.
+The first slate sized this way is 9 Sep 2026 — the real-money stake series changes
+there, the tracked series does not. Details and the stake table in
+PROJECT_SUMMARY.md, "Kelly Criterion staking".
+
+- **`REAL_BANKROLL` is a MANUAL constant** (€3,500 since 8 Sep 2026). Nothing reads
+  the bookmaker balance. When it changes, change the constant; both caps derive
+  from it.
+- **Club football only.** `is_club_football()` drops World Cup, friendlies and any
+  international label, plus blank leagues. Do not size club bets on tournament data.
+- **Odds bucket is the ONLY sizing dimension.** No bet-type layer — it was computed,
+  gives identical stakes today, and is deferred until club data supports it. Do not
+  add it back without re-running the table in PROJECT_SUMMARY.md.
+- **Shrink with `n/(n+KELLY_SHRINK_K)` toward the club overall, and a bucket that
+  cannot clear break-even after shrinking returns EXACTLY 0.0.** Not a token
+  stake, not the flat unit. About 29% of Core picks skip under today's sample;
+  that is the intended outcome, not a regression.
+- **Size on the price that will be paid**: `kelly_odds_for_pick()` — market odds
+  when matched, else the estimate. Never size on the estimate when a market price
+  exists.
+- **Half-Kelly, 5% per pick, 15% per run, Core only.** `apply_daily_stake_cap()`
+  runs once per slate AFTER every Core stake is computed, and scales them together.
+  Do not raise either cap; do not give Extended picks a stake.
+- **Flat `UNIT_STAKE` is a safety, not a rule**: only when fewer than
+  `KELLY_MIN_CLUB_SAMPLE` club Core picks exist in total, or the Sheets read failed.
+- **One Sheets read per run**: `get_kelly_breakdown()` once, then
+  `calculate_kelly_stake(odds, breakdown, bet_type=…)` per pick. A per-pick read
+  lost six slates in Aug 2026.
+- `tests/test_staking.py` pins all of the above; keep it green.
 
 ## Odds Matching — rank candidates, never take the first (1 Sep 2026)
 

@@ -202,7 +202,36 @@ def _extended_rows(rows: list[list[str]], header: list[str] | None = None) -> li
 
 STARTING_BANKROLL = 100.0    # € tracked bankroll (used for running P&L in the sheet)
 UNIT_STAKE        = 10.0     # € per pick (1 unit)
-REAL_BANKROLL     = 1500.0   # € actual bankroll on the betting site (used for Kelly sizing)
+
+# € actual bankroll on the betting site — the base every Kelly stake and both
+# caps are computed from. MANUAL: nothing here reads the bookmaker balance, so
+# this must be edited by hand whenever the real bankroll changes (deposits,
+# withdrawals, drift). €1,500 → €3,500 on 8 Sep 2026.
+REAL_BANKROLL     = 3500.0
+
+# ── Kelly sizing parameters (rebuilt 8 Sep 2026; first slate 9 Sep 2026) ────
+# Stakes are sized from settled CLUB-football Core picks grouped by ODDS BUCKET,
+# each bucket's win rate shrunk toward the club overall by n/(n+K). Bet type is
+# deliberately NOT a sizing dimension yet: a bet-type-within-bucket layer gives
+# identical stakes at today's sample sizes (only Match Winner has cells above
+# six picks), so it is deferred until club data supports it.
+KELLY_FRACTION           = 0.5     # half-Kelly
+KELLY_MAX_FRACTION       = 0.05    # per-pick cap: 5% of REAL_BANKROLL
+DAILY_STAKE_CAP_FRACTION = 0.15    # per-run cap on the SUM of Core stakes (15%)
+KELLY_SHRINK_K           = 50      # bucket weight n/(n+K); the remainder on the club overall
+KELLY_MIN_CLUB_SAMPLE    = 50      # below this many settled club Core picks: flat UNIT_STAKE
+KELLY_ODDS_BUCKETS: tuple[tuple[float, str], ...] = (
+    (1.30, "<1.30"), (1.50, "1.30-1.50"), (1.75, "1.50-1.75"),
+    (2.00, "1.75-2.00"), (float("inf"), "2.00+"),
+)
+# League labels that are NOT club football. The World Cup (148 of the first
+# 235 Core picks) has a materially different profile — 66.9% at 1.83 against
+# club's 64.4% at 1.78 — and sizing club bets on it overstates the edge. A
+# blank league (rows older than the column) is treated as non-club too.
+KELLY_NON_CLUB_MARKERS = (
+    "world cup", "friendl", "nations league", "euro 20", "copa america",
+    "qualif", "international", "afcon", "gold cup", "asian cup",
+)
 
 # Dates excluded from win-rate calculations (backfill / bad-data days)
 _WIN_RATE_EXCLUDE: frozenset[date] = frozenset([date(2026, 6, 15)])
@@ -1655,54 +1684,181 @@ def get_bet_type_breakdown() -> list[dict]:
     return breakdown
 
 
-# ── Kelly stake recommendation ────────────────────────────────────────────────
+# ── Kelly stake recommendation (rebuilt 8 Sep 2026) ─────────────────────────
+
+def kelly_odds_bucket(odds: float) -> str:
+    """The KELLY_ODDS_BUCKETS label for a decimal price; upper bounds exclusive."""
+    for upper, label in KELLY_ODDS_BUCKETS:
+        if odds < upper:
+            return label
+    return KELLY_ODDS_BUCKETS[-1][1]
+
+
+def is_club_football(league: str) -> bool:
+    """False for international competitions and for a blank league label."""
+    label = (league or "").strip().lower()
+    if not label:
+        return False
+    return not any(marker in label for marker in KELLY_NON_CLUB_MARKERS)
+
+
+def kelly_breakdown_from_rows(rows: list[list[str]]) -> dict:
+    """
+    Settled CLUB-football CORE picks by odds bucket, from raw Picks rows
+    (header first). Pure — this is what get_kelly_breakdown() computes after
+    its one Sheets read, split out so it can be tested without a sheet.
+
+    Counts WIN and LOSS only (HALF results and VOID are excluded, as
+    get_bet_type_breakdown does). The bucket is taken from the SETTLEMENT
+    price — the market price when one was matched, else the estimate — which
+    is the price the stake is sized on for new picks too.
+    """
+    header = rows[0] if rows else []
+    core = _core_rows(rows[1:], header) if rows else []
+    league_idx = _col(header, "League")
+    buckets = {label: {"wins": 0, "total": 0} for _, label in KELLY_ODDS_BUCKETS}
+    overall = {"wins": 0, "total": 0}
+    for row in core:
+        if not row or not row[0]:
+            continue
+        result = row[6].strip().upper() if len(row) > 6 else ""
+        if result not in ("WIN", "LOSS"):
+            continue
+        league = row[league_idx] if league_idx is not None and len(row) > league_idx else ""
+        if not is_club_football(league):
+            continue
+        bucket = buckets[kelly_odds_bucket(settlement_odds_from_row(row, header))]
+        bucket["total"] += 1
+        overall["total"] += 1
+        if result == "WIN":
+            bucket["wins"] += 1
+            overall["wins"] += 1
+    return {"overall": overall, "buckets": buckets}
+
+
+def get_kelly_breakdown() -> dict:
+    """
+    ONE Sheets read → kelly_breakdown_from_rows(). On a read failure returns an
+    EMPTY breakdown (zero club picks), which makes calculate_kelly_stake fall
+    back to the flat UNIT_STAKE for every pick of the run — never re-read
+    per pick (see the quota postmortem, 1 Sep 2026).
+    """
+    try:
+        rows = _picks_ws().get_all_values()
+    except Exception as exc:
+        log.error("Sheets read failed (Kelly breakdown): %s", exc)
+        return kelly_breakdown_from_rows([])
+    return kelly_breakdown_from_rows(rows)
+
 
 def calculate_kelly_stake(
-    bet_type: str,
     odds: float,
-    confidence: str,
-    breakdown: list[dict] | None = None,
+    breakdown: dict | None = None,
+    *,
+    bet_type: str = "",
 ) -> dict:
     """
-    Return {"stake": euros, "note": str} for a half-Kelly recommendation.
+    Half-Kelly stake in euros for one Core pick at `odds`, capped at
+    KELLY_MAX_FRACTION of REAL_BANKROLL.
 
-    Uses historical win rate for this bet type from settled Sheets data.
-    Stake is based on REAL_BANKROLL, capped at 5%.
-    Returns a flat UNIT_STAKE with note="insufficient data" when fewer than
-    10 settled picks exist for this bet type.
+    The win probability is the pick's ODDS BUCKET rate among settled club
+    Core picks, shrunk toward the club overall: p = w·bucket + (1−w)·overall
+    with w = n/(n+KELLY_SHRINK_K). Thin buckets therefore sit close to the
+    overall, and a bucket whose shrunk rate cannot clear break-even at the
+    pick's price returns EXACTLY 0.0 — not a token stake. At the sample sizes
+    of 8 Sep 2026 that zeroes every pick under ~1.55 (roughly 29% of Core
+    picks), which is the intended outcome, not a bug.
 
-    PASS `breakdown` WHEN SIZING MORE THAN ONE PICK. It is the result of
-    get_bet_type_breakdown(), which reads the ENTIRE Picks tab — one Sheets
-    read per call. Left to fetch its own, this function costs one full-sheet
-    read per pick, and callers size every pick of a run in a loop.
+    Pass `odds` as the price that will be PAID — kelly_odds_for_pick() gives
+    the market price when one was matched, else the estimate — and pass
+    `breakdown` from ONE get_kelly_breakdown() call per run (a per-pick read
+    exhausted the Sheets quota and silently lost six slates in Aug 2026).
 
-    That is not a theoretical cost. Google allows 60 reads per minute per
-    service account across the whole spreadsheet; once the per-league cap
-    (15 Aug 2026) took a slate to 20-30 picks, the loop alone exhausted the
-    minute and the batch sheet write that ran straight afterwards took the
-    429 — silently. Six slates were lost that way (20/22/26/27/28/29 Aug 2026,
-    128 picks) before the cause was found. One read per RUN, not per pick.
+    Returns {"stake", "note", "fraction", "win_rate", "sample", "bucket",
+    "odds_used", "bet_type"}; the embed reads "stake" only. The flat
+    UNIT_STAKE fallback survives ONLY as a safety when fewer than
+    KELLY_MIN_CLUB_SAMPLE settled club Core picks exist in total.
     """
     if breakdown is None:
-        breakdown = get_bet_type_breakdown()
-    record = next(
-        (b for b in breakdown if b["bet_type"].strip().lower() == bet_type.strip().lower()),
-        None,
-    )
+        breakdown = get_kelly_breakdown()
+    overall    = breakdown.get("overall") or {}
+    club_total = int(overall.get("total") or 0)
+    club_wins  = int(overall.get("wins") or 0)
+    bucket     = kelly_odds_bucket(odds)
+    base = {"odds_used": odds, "bucket": bucket, "bet_type": bet_type}
 
-    if record is None or record["total"] < 10:
-        count = record["total"] if record else 0
-        return {"stake": UNIT_STAKE, "note": f"insufficient data ({count} settled picks)"}
+    if club_total < KELLY_MIN_CLUB_SAMPLE:
+        return {**base, "stake": UNIT_STAKE, "fraction": None, "win_rate": None,
+                "sample": club_total,
+                "note": f"insufficient data ({club_total} settled club picks)"}
 
-    win_rate = record["win_rate"] / 100.0
-    kelly = (win_rate * (odds - 1) - (1 - win_rate)) / (odds - 1)
+    prior  = club_wins / club_total
+    group  = (breakdown.get("buckets") or {}).get(bucket) or {}
+    n      = int(group.get("total") or 0)
+    raw    = (int(group.get("wins") or 0) / n) if n else prior
+    weight = n / (n + KELLY_SHRINK_K)
+    p      = weight * raw + (1 - weight) * prior
+    base.update(win_rate=round(p, 4), sample=n)
 
-    if kelly <= 0:
-        return {"stake": 0.0, "note": "negative edge"}
+    if odds <= 1.0:
+        return {**base, "stake": 0.0, "fraction": 0.0, "note": "invalid odds"}
+    full = (p * (odds - 1) - (1 - p)) / (odds - 1)
+    if full <= 0:
+        return {**base, "stake": 0.0, "fraction": 0.0, "note": "negative edge"}
+    fraction = min(full * KELLY_FRACTION, KELLY_MAX_FRACTION)
+    return {**base, "stake": round(fraction * REAL_BANKROLL, 2),
+            "fraction": fraction, "note": ""}
 
-    fraction = min(kelly * 0.5, 0.05)  # half-Kelly, capped at 5% of bankroll
-    stake = round(fraction * REAL_BANKROLL, 2)
-    return {"stake": stake, "note": ""}
+
+def kelly_odds_for_pick(pick: dict) -> float:
+    """
+    The price to size on: the matched market price when there is one (that is
+    what settlement pays at, and the card shows it), else Claude's estimate.
+    A market price that failed _flag_suspicious_market_odds never reaches
+    'market_odds', so anything present here is trusted.
+    """
+    market = pick.get("market_odds")
+    try:
+        market = float(market) if market is not None else None
+    except (TypeError, ValueError):
+        market = None
+    if market is not None and market > 1.0:
+        return market
+    return float(pick.get("odds") or 0)
+
+
+def apply_daily_stake_cap(picks: list[dict], bankroll: float = REAL_BANKROLL) -> float:
+    """
+    Scale the run's CORE stakes down together so their SUM does not exceed
+    DAILY_STAKE_CAP_FRACTION of `bankroll` (15% of €3,500 = €525). Five picks
+    at the €175 per-pick cap would expose €875; they become €105 each. Three
+    capped picks sit exactly on the cap and are untouched. Zero stakes and
+    Extended picks are ignored. Mutates each pick's 'kelly' dict in place
+    (keeping the pre-cap figure as 'stake_uncapped') and returns the factor
+    applied, 1.0 when the cap did not bind.
+
+    One run is one day in normal operation (daily_picks_job runs once); a
+    supplementary run the same day is capped on its own slate only.
+    """
+    cap = round(DAILY_STAKE_CAP_FRACTION * bankroll, 2)
+    staked = [
+        p for p in picks
+        if p.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_CORE
+        and isinstance(p.get("kelly"), dict)
+        and float(p["kelly"].get("stake") or 0) > 0
+    ]
+    total = sum(float(p["kelly"]["stake"]) for p in staked)
+    if total <= cap:
+        return 1.0
+    factor = cap / total
+    for p in staked:
+        k = p["kelly"]
+        k["stake_uncapped"] = k["stake"]
+        k["stake"] = round(float(k["stake"]) * factor, 2)
+        k["note"] = (f"{k['note']}; " if k.get("note") else "") + f"scaled x{factor:.2f} to the daily cap"
+    log.info("Daily stake cap: %d Core stake(s) totalling EUR %.2f scaled x%.2f to EUR %.2f",
+             len(staked), total, factor, cap)
+    return factor
 
 
 def get_overall_win_rate() -> float:

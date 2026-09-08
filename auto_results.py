@@ -177,6 +177,8 @@ def _pending_reason(
     two_legged: bool,
     scope_ft: bool,
     margin_known: bool = False,
+    home_name: str = "",
+    away_name: str = "",
 ) -> str:
     """
     Why evaluate_pick() could not settle this pick, in one human sentence.
@@ -204,6 +206,22 @@ def _pending_reason(
                     "90-minute margin could not be derived")
         return ("went past 90 minutes — the API publishes no period scores, so "
                 "the 90-minute outcome cannot be derived")
+    if home_name and away_name and _is_match_winner_bet(bet_type.lower()):
+        pk = re.sub(r'\s*\([^)]*\)$', '', pick.lower().strip()).strip()
+        home_pick, away_pick, draw_pick = _match_winner_sides(
+            pk, home_name.lower(), away_name.lower()
+        )
+        if not (home_pick or away_pick or draw_pick):
+            # 8 Sep 2026, row 357: the fixture was 'FC Porto U19 vs Manchester
+            # City U19'. Say which fixture the row was matched to, so the reader
+            # checks THAT before suspecting the settlement rule.
+            return (f"the pick names neither side of the fixture the row was "
+                    f"matched to, '{home_name} vs {away_name}' — check that this "
+                    f"is the right game (a youth, reserve or women's fixture "
+                    f"carries the same club names)")
+        if home_pick and away_pick:
+            return (f"the pick matches both sides of '{home_name} vs {away_name}', "
+                    f"so the side it backs cannot be read")
     return f"no settlement rule matched bet type '{bet_type}' / pick '{pick}'"
 
 
@@ -217,6 +235,7 @@ def _format_pending_notification(p: dict) -> str:
         f"Bet: {p['bet_type']}",
         f"Pick: {p['pick']}",
         f"Score: {p['score']}{' ' + p['status_note'] if p['status_note'] else ''}",
+        f"Fixture: {p.get('fixture') or p['match']} (as listed by the API)",
         f"Why: {p['reason']}",
         f"Sheet row {p['sheet_row']} — settle with: "
         f"python update_result.py \"{p['match']}\" \"{p['pick']}\" WIN|LOSS",
@@ -291,11 +310,63 @@ def _normalise_team(name: str) -> str:
     return " ".join(s.split())
 
 
-def _side_matches(query: str, api_name: str) -> bool:
-    """Loose containment either way, but never on an empty string."""
+# Words that mark a DIFFERENT squad of the same club — youth, reserve, B and
+# women's sides. The feed lists them beside the senior fixture with the club name
+# intact: on 8 Sep 2026 its 8 Sep bucket carried the UEFA Youth League game
+# 'FC Porto U19 vs Manchester City U19' while the senior 'FC Porto vs Manchester
+# City' sat in the 9 Sep bucket. Plain containment cannot tell them apart —
+# 'fc porto' sits inside 'fc porto u19' — so row 357 was matched to the youth
+# game and alerted as 'no settlement rule matched', rows 358 and 359 were on
+# the same path, and the senior fixture would never have been looked at.
+#
+# Checked ONLY against the words left over once the shorter name is removed
+# from the longer one, so a club whose real name carries one of these words is
+# never affected. 'u-19', 'u 19' and 'under 19' are folded to 'u19' first.
+_SQUAD_QUALIFIER = re.compile(
+    r"^(?:u\d{1,2}|b|c|ii|iii|iv|w|xi|women|womens|ladies|female|feminine|"
+    r"feminino|femenino|femenina|femini|frauen|kvinner|kvinnor|damer|dames|"
+    r"reserves?|youth|academy|jong|castilla|amateurs?)$"
+)
+
+_SIDE_EXACT   = 3   # normalised names identical
+_SIDE_CONTAIN = 1   # one name inside the other; the remainder is not a squad marker
+
+
+def _side_score(query: str, api_name: str) -> int:
+    """
+    How well a pick's team name fits an API team name, on normalised strings:
+    _SIDE_EXACT for the same name, _SIDE_CONTAIN when one sits inside the
+    other and the words left over do not mark another squad of the club, and 0
+    when they do not fit at all.
+
+    Containment is still needed — the sheet says 'Porto' where the feed says
+    'FC Porto' — but until 8 Sep 2026 it was the ONLY rule, and it accepted
+    'FC Porto U19' for 'FC Porto'. Row 357 only escaped a wrong settlement
+    because its Match Winner pick named 'Manchester City' and the youth fixture
+    did not; an Over/Under, BTTS or handicap pick on the same fixture would have
+    paid out on the youth score without a word of warning.
+    """
     if not query or not api_name:
-        return False
-    return query in api_name or api_name in query
+        return 0
+    if query == api_name:
+        return _SIDE_EXACT
+    if query in api_name:
+        longer, shorter = api_name, query
+    elif api_name in query:
+        longer, shorter = query, api_name
+    else:
+        return 0
+    remainder = longer.replace(shorter, " ", 1)
+    remainder = re.sub(r"\b(?:u|under)[\s-]*(\d{1,2})\b", r"u\1", remainder)
+    for word in re.findall(r"[^\W_]+", remainder):
+        if _SQUAD_QUALIFIER.fullmatch(word):
+            return 0
+    return _SIDE_CONTAIN
+
+
+def _side_matches(query: str, api_name: str) -> bool:
+    """True when the two normalised names fit at all — exact or clean containment."""
+    return _side_score(query, api_name) > 0
 
 
 def _find_api_match(
@@ -306,7 +377,16 @@ def _find_api_match(
     reversed_sides: bool = False,
 ) -> dict | None:
     """
-    The fixture matching '<home_q> vs <away_q>', or None.
+    The fixture best matching '<home_q> vs <away_q>' among `matches`, or None.
+
+    Every candidate is scored (_side_score per side, summed) and the highest
+    wins, so an exact fixture beats a containment hit wherever it sits in the
+    list. Since 8 Sep 2026 the caller passes BOTH date buckets in one list for
+    the same reason: searched bucket by bucket, the first bucket's youth game
+    was returned before the next bucket's senior fixture was ever looked at.
+    Two DIFFERENT fixtures tied at the top score are ambiguous, and an
+    ambiguous match is no match — a warning is logged and None returned,
+    because a wrong fixture settles a real bet off someone else's result.
 
     `reversed_sides` looks for the SAME pair with the sides swapped. Claude
     occasionally emits a fixture with home and away the wrong way round (row
@@ -326,14 +406,32 @@ def _find_api_match(
     aq = _normalise_team(away_q)
     if not hq or not aq:
         return None
+    best: dict | None = None
+    best_score = 0
+    tied_with: dict | None = None
     for m in matches:
         h = _normalise_team(m["home"]["longName"])
         a = _normalise_team(m["away"]["longName"])
         if reversed_sides:
             h, a = a, h
-        if _side_matches(hq, h) and _side_matches(aq, a):
-            return m
-    return None
+        hs, as_ = _side_score(hq, h), _side_score(aq, a)
+        if not hs or not as_:
+            continue
+        score = hs + as_
+        if score > best_score:
+            best, best_score, tied_with = m, score, None
+        elif score == best_score and m.get("id") != best.get("id"):
+            tied_with = m
+    if best is not None and tied_with is not None:
+        log.warning(
+            "'%s vs %s' matches two different fixtures equally well — '%s vs %s' "
+            "and '%s vs %s' — so neither is used; settle manually via update_result.py",
+            home_q, away_q,
+            best["home"]["longName"], best["away"]["longName"],
+            tied_with["home"]["longName"], tied_with["away"]["longName"],
+        )
+        return None
+    return best
 
 
 # ── Bet-type evaluation ───────────────────────────────────────────────────────
@@ -453,6 +551,30 @@ def _combine_ah_halves(r1: str, r2: str) -> str:
     return "VOID"  # WIN + LOSS edge case — treat as push
 
 
+_MATCH_WINNER_LABELS = ("match winner", "1x2", "result", "moneyline")
+
+
+def _is_match_winner_bet(bt: str) -> bool:
+    """True for a lower-cased bet type that settles as a 3-way match result."""
+    return any(x in bt for x in _MATCH_WINNER_LABELS)
+
+
+def _match_winner_sides(pk: str, hn: str, an: str) -> tuple[bool, bool, bool]:
+    """
+    (home_pick, away_pick, draw_pick) for a lower-cased, scope-stripped pick
+    against the matched fixture's lower-cased names. Generic labels ('Home Win',
+    '2') or a team name anywhere in the pick. A draw label is a draw and nothing
+    else — 'X' must never read as a home pick because the letter sits inside
+    'Ajax'. Shared by evaluate_pick() and _pending_reason() so the alert can
+    never disagree with the verdict about which side the pick names.
+    """
+    if pk in ("draw", "x", "tie"):
+        return False, False, True
+    home_pick = pk in ("home", "home win", "1") or hn in pk or pk in hn
+    away_pick = pk in ("away", "away win", "2") or an in pk or pk in an
+    return home_pick, away_pick, False
+
+
 def evaluate_pick(
     bet_type: str,
     pick: str,
@@ -548,11 +670,25 @@ def evaluate_pick(
     reg_unknown = past_90 and reg_gd is None
 
     # ── Match Winner ─────────────────────────────────────────────────────────
-    if any(x in bt for x in ("match winner", "1x2", "result", "moneyline")):
-        # Generic terms OR team name anywhere in pick string
-        home_pick = pk in ("home", "home win", "1") or hn in pk or pk in hn
-        away_pick = pk in ("away", "away win", "2") or an in pk or pk in an
-        draw_pick = pk in ("draw", "x", "tie")
+    if _is_match_winner_bet(bt):
+        home_pick, away_pick, draw_pick = _match_winner_sides(pk, hn, an)
+
+        # The pick names a side this fixture does not have. Either the pick text
+        # is unreadable or — the 8 Sep 2026 case — the fixture is the wrong one:
+        # a youth, reserve or women's game carrying the same club names. There
+        # is nothing to settle and no side to guess, and the reason must say so
+        # (it used to fall through to "no settlement rule matched bet type
+        # Match Winner", which sent the fix hunting in the wrong place).
+        if not (home_pick or away_pick or draw_pick):
+            log.warning("Match Winner pick '%s' names neither side of '%s vs %s' — "
+                        "settle manually via update_result.py",
+                        pick, home_name, away_name)
+            return "PENDING"
+        if home_pick and away_pick:
+            log.warning("Match Winner pick '%s' matches BOTH sides of '%s vs %s' — "
+                        "settle manually via update_result.py",
+                        pick, home_name, away_name)
+            return "PENDING"
 
         if reg_unknown:
             log.warning("Pick '%s' (%s) went past 90 minutes and the 90-minute "
@@ -562,9 +698,9 @@ def evaluate_pick(
         if reg_known:
             # Settle on the derived 90-minute margin, not the published score
             # (which includes extra-time goals).
-            if draw_pick:              return "WIN" if reg_gd == 0 else "LOSS"
-            if home_pick and not away_pick: return "WIN" if reg_gd > 0 else "LOSS"
-            if away_pick and not home_pick: return "WIN" if reg_gd < 0 else "LOSS"
+            if draw_pick: return "WIN" if reg_gd == 0 else "LOSS"
+            if home_pick: return "WIN" if reg_gd > 0 else "LOSS"
+            if away_pick: return "WIN" if reg_gd < 0 else "LOSS"
         if penalties and scope == "ft":
             # After a shootout the API score is level — the winner cannot be
             # derived here. Settle manually via update_result.py.
@@ -572,9 +708,9 @@ def evaluate_pick(
                         "via update_result.py", pick)
             return "PENDING"
 
-        if home_pick and not away_pick: return "WIN" if hw else "LOSS"
-        if away_pick and not home_pick: return "WIN" if aw else "LOSS"
-        if draw_pick:                   return "WIN" if dr else "LOSS"
+        if home_pick: return "WIN" if hw else "LOSS"
+        if away_pick: return "WIN" if aw else "LOSS"
+        if draw_pick: return "WIN" if dr else "LOSS"
 
     # ── Both Teams to Score ──────────────────────────────────────────────────
     elif any(x in bt for x in ("both teams to score", "btts", "gg/ng", "goal goal")):
@@ -767,28 +903,26 @@ def run_auto_results(
 
         home_q, away_q = [s.strip() for s in match.split(" vs ", 1)]
 
-        # Correct orientation first, across EVERY candidate date, before trying
-        # the reversed one. Both orientations are real fixtures in a two-legged
+        # Both date buckets are searched TOGETHER, not one after the other, so
+        # the best-fitting fixture wins wherever it sits. On 8 Sep 2026 the
+        # feed's 8 Sep bucket held only the Youth League game 'FC Porto U19 vs
+        # Manchester City U19' and the senior fixture sat in the 9 Sep bucket; a
+        # bucket-by-bucket search took the youth game and never looked further.
+        # The correct orientation across both buckets still comes before the
+        # reversed one: both orientations are real fixtures in a two-legged
         # tie, so a greedy reversed match could settle against the wrong leg.
         candidate_dates = (p["date"], p["date"] + timedelta(days=1))
-        api_match = None
-        for dt in candidate_dates:
-            api_match = _find_api_match(api_cache.get(dt, []), home_q, away_q)
-            if api_match:
-                break
+        pool = [m for dt in candidate_dates for m in api_cache.get(dt, [])]
+        api_match = _find_api_match(pool, home_q, away_q)
 
         if api_match is None:
-            for dt in candidate_dates:
-                api_match = _find_api_match(
-                    api_cache.get(dt, []), home_q, away_q, reversed_sides=True
+            api_match = _find_api_match(pool, home_q, away_q, reversed_sides=True)
+            if api_match:
+                log.warning(
+                    "'%s' matched with home/away REVERSED — the API lists it as "
+                    "'%s vs %s'. Settling on the API's orientation.",
+                    match, api_match["home"]["longName"], api_match["away"]["longName"],
                 )
-                if api_match:
-                    log.warning(
-                        "'%s' matched with home/away REVERSED — the API lists it as "
-                        "'%s vs %s'. Settling on the API's orientation.",
-                        match, api_match["home"]["longName"], api_match["away"]["longName"],
-                    )
-                    break
 
         if api_match is None:
             log.info("'%s' — not found in API yet", match)
@@ -886,8 +1020,10 @@ def run_auto_results(
                     "status_note": status_note.strip(),
                     "kickoff_utc": kickoff,
                     "hours_since_kickoff": hours,
+                    "fixture":     f"{home_name} vs {away_name}",
                     "reason": _pending_reason(
                         bet_type, pick,
+                        home_name=home_name, away_name=away_name,
                         extra_time=extra_time, penalties=penalties,
                         two_legged=two_legged,
                         scope_ft=_pick_scope(pick) == "ft",

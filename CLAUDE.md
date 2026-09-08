@@ -272,6 +272,20 @@ with no score at all, `football-get-match-score` gives only the final score, and
 - **Reversed home/away is a LAST RESORT.** Exhaust the correct orientation
   across every candidate date first. Both orientations are real fixtures in a
   two-legged tie, so a greedy reversed match settles against the wrong leg.
+- **Fixture matching scores candidates and rejects other squads of the same
+  club** (8 Sep 2026). The feed lists youth, reserve, B and women's games with
+  the club name intact — `FC Porto U19 vs Manchester City U19` sat in the 8 Sep
+  bucket while the senior fixture sat in the 9 Sep bucket — and plain
+  containment took the youth game, so row 357 alerted as "no settlement rule
+  matched bet type 'Match Winner'" off a 3-1 the senior sides never played.
+  `_side_score` now scores each side (exact beats containment) and returns 0
+  when the words left over after removing the shorter name mark another squad
+  (`_SQUAD_QUALIFIER`: U19, II, B, W, Women, Castilla, Jong …); both date
+  buckets are searched as one pool so the best fixture wins wherever it sits;
+  two different fixtures tied at the top are refused with a warning. A Match
+  Winner pick that names neither side of the matched fixture is PENDING with a
+  reason that names that fixture — never the generic "no settlement rule"
+  line, which sent this fix hunting in the wrong branch.
 - **`_normalise_team()` folds case, diacritics and whitespace — nothing else.**
   `ø æ å ð þ đ ł ß œ ı` need explicit transliteration because NFKD does not
   decompose them. Do not extend it to punctuation: looser matching starts
@@ -280,6 +294,24 @@ with no score at all, `football-get-match-score` gives only the final score, and
 
 Details, the validation set and the audit history in PROJECT_SUMMARY.md,
 "Extra-time settlement" and "Fixture name matching".
+
+## Settlement regression tests (8 Sep 2026)
+
+`tests/test_settlement.py` pins `evaluate_pick` (a plain Match Winner pick in
+every form, the Draw fold, extra time, two-legged margins), `_find_api_match`
+(senior beats youth, exact beats containment, ambiguity refuses) and the
+PENDING reason, plus `run_auto_results` end to end on row 357 with the feed
+stubbed. Pure — no network, no Sheets, no Discord. Run from `football-bot/`:
+
+```
+python -m unittest discover -s tests -t . -v
+```
+
+The workspace hook `.claude/hooks/run_settlement_tests.py` runs it after every
+Edit/Write to a football-bot `.py` file and blocks with the failure output, so
+a change to the Match Winner branch or the matcher cannot break the most common
+bet type unnoticed. There is no CI and Railway never runs tests: keep the suite
+green before pushing, and extend it whenever a settlement rule changes.
 
 ## Odds Matching — rank candidates, never take the first (1 Sep 2026)
 

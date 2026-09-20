@@ -134,6 +134,16 @@ split — route any new Core aggregation through it rather than writing an inlin
 check. A **blank** `Pick Tier` cell means Core, which is what keeps every row logged
 before 13 Aug 2026 valid without a backfill: never fill that column in on historical rows.
 
+The Summary tab shows Extended in exactly three labelled blocks (20 Sep 2026): an
+**EXTENDED BET TYPE BREAKDOWN** and an **EXTENDED LEAGUE BREAKDOWN** directly under their
+Core twins, plus the tier comparison at the bottom. Both tables come from the same
+tier-agnostic helpers as the Core ones (`_bet_type_breakdown_rows`, `_league_breakdown_rows`)
+fed `_extended_rows`, so the numbers are computed identically; each carries a 'Core tier
+only' / 'Extended tier only' label line and the Extended money column is headed
+`Total P&L (unstaked units)` — never plain `Total P&L`, because the tier carries no stake.
+The headline figures and every other section stay Core-only. `_summary_data()` is pure
+and `tests/test_summary.py` pins the layout; keep it green when touching the tab.
+
 Tennis is untouched by all of this — no tiers, no ranking, `tennis_*` modules
 unchanged. Details in PROJECT_SUMMARY.md, "Ranked picks and the Core/Extended split".
 

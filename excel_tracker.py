@@ -1085,19 +1085,132 @@ def _recalculate_running_total(ws: gspread.Worksheet) -> None:
             log.warning("Bankroll formatting failed (non-fatal): %s", exc)
 
 
-def _refresh_summary(ss: gspread.Spreadsheet) -> None:
-    # CORE ONLY — this drives the Summary tab, which in turn feeds the picks
-    # card footer win rate. The Extended tier gets its own separate block,
-    # appended below by _append_tier_breakdown(), never mixed into these totals.
-    all_picks_rows = ss.worksheet("Picks").get_all_values()
-    picks_header   = all_picks_rows[0] if all_picks_rows else []
-    rows = _core_rows(all_picks_rows[1:], picks_header)
+def _row_pnl(row: list) -> float:
+    """The row's booked flat-unit P&L (column H); 0.0 when blank or unparseable."""
+    try:
+        return float(row[7]) if len(row) > 7 and row[7] else 0.0
+    except ValueError:
+        return 0.0
 
-    def _pnl(row: list) -> float:
-        try:
-            return float(row[7]) if len(row) > 7 and row[7] else 0.0
-        except ValueError:
-            return 0.0
+
+def _bet_type_breakdown_rows(rows: list[list[str]]) -> list[list]:
+    """
+    One Summary row per bet type — wins, losses, win rate, P&L, decided picks —
+    sorted by win rate descending. VOIDs are skipped; half wins/losses count in
+    P&L but not in the W/L rate.
+
+    Tier-AGNOSTIC on purpose: it aggregates whatever rows it is handed, so the
+    Core table and the Extended table (20 Sep 2026) are produced by the same
+    code and can differ only in their input. Callers choose the tier via
+    _core_rows / _extended_rows — never filter in here.
+    """
+    groups: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
+    for r in rows:
+        result = r[6] if len(r) > 6 else ""
+        if result not in _SETTLED_RESULTS or result == "VOID":
+            continue
+        bt = r[2].strip() if len(r) > 2 else ""
+        if not bt:
+            continue
+        groups[bt]["pnl"] += _row_pnl(r)
+        if result == "WIN":
+            groups[bt]["wins"] += 1
+        elif result == "LOSS":
+            groups[bt]["losses"] += 1
+
+    out = []
+    for bt, g in groups.items():
+        total = g["wins"] + g["losses"]
+        wr = round(g["wins"] / total * 100, 1) if total else 0.0
+        out.append([bt, g["wins"], g["losses"], f"{wr:.1f}%", round(g["pnl"], 2), total])
+    out.sort(key=lambda x: float(x[3].rstrip("%")), reverse=True)
+    return out
+
+
+def _league_breakdown_rows(rows: list[list[str]]) -> list[list]:
+    """
+    One Summary row per competition — wins, losses, win rate, P&L, and EVERY
+    logged pick (settled or not) — sorted by P&L descending.
+
+    Every tracked competition gets a row even with no picks yet: several open
+    their 2026-27 season mid-to-late August, so zeros are the expected state,
+    and an absent row would be indistinguishable from a routing bug. Any league
+    present in the sheet but not listed is appended rather than dropped, and
+    picks logged before the League column existed group under _NO_LEAGUE —
+    without that bucket the section's P&L would silently fail to reconcile
+    with the headline total.
+
+    Tier-agnostic like _bet_type_breakdown_rows, and for the same reason.
+    """
+    groups: dict[str, dict] = {
+        name: {"wins": 0, "losses": 0, "pnl": 0.0, "picks": 0}
+        for name in TRACKED_LEAGUES
+    }
+    for r in rows:
+        name = r[12].strip() if len(r) > 12 and r[12].strip() else _NO_LEAGUE
+        g = groups.setdefault(name, {"wins": 0, "losses": 0, "pnl": 0.0, "picks": 0})
+        g["picks"] += 1                      # every logged pick, settled or not
+        result = r[6] if len(r) > 6 else ""
+        if result not in _SETTLED_RESULTS or result == "VOID":
+            continue
+        g["pnl"] += _row_pnl(r)              # half wins/losses count here...
+        if result == "WIN":
+            g["wins"] += 1                   # ...but not in the W/L win rate,
+        elif result == "LOSS":
+            g["losses"] += 1                 # matching the bet-type section
+
+    out = []
+    for name, g in groups.items():
+        decided = g["wins"] + g["losses"]
+        wr = round(g["wins"] / decided * 100, 1) if decided else 0.0
+        out.append([name, g["wins"], g["losses"], f"{wr:.1f}%",
+                    round(g["pnl"], 2), g["picks"]])
+    # P&L descending, as asked. Ties break on pick count then name so the
+    # not-yet-in-season leagues — all identically zero — hold a stable order
+    # instead of shuffling between refreshes.
+    out.sort(key=lambda x: (-x[4], -x[5], x[0]))
+    return out
+
+
+# Label lines written under the section headers. The Core ones exist so the
+# Core and Extended tables — same columns, same sort, stacked one under the
+# other — cannot be mistaken for each other; the Extended ones carry the
+# standing caveat that its P&L is paper, the same rule the weekly summary
+# text follows (1 Sep 2026).
+_CORE_SECTION_NOTE = (
+    "Core tier only — the 5 highest-conviction picks across all competitions "
+    "that day: the staked, tracked baseline series."
+)
+_EXTENDED_SECTION_NOTE = (
+    "Extended tier only — every pick outside the day's Core 5 (tracked since "
+    "13 Aug 2026). Extended carries NO stake: 'Total P&L' here is unstaked "
+    "paper units outside the tracked book. Never add it to the Core figures "
+    "above."
+)
+_EXTENDED_PNL_HEADER = "Total P&L (unstaked units)"
+
+
+def _refresh_summary(ss: gspread.Spreadsheet) -> None:
+    all_picks_rows = ss.worksheet("Picks").get_all_values()
+    data = _summary_data(all_picks_rows)
+    ws_sum = ss.worksheet("Summary")
+    ws_sum.clear()
+    ws_sum.update("A1", data, value_input_option="RAW")
+
+
+def _summary_data(all_picks_rows: list[list[str]]) -> list[list]:
+    """
+    The Summary tab's cell block, built from the raw Picks tab rows (header
+    included). Pure — no Sheets access — so the layout is testable.
+
+    CORE ONLY for every headline figure and for the first table of each pair:
+    the Summary feeds the picks-card footer win rate, so nothing Extended may
+    reach those totals. The Extended tier appears in exactly three places, each
+    its own labelled block: the Extended bet-type and league tables directly
+    under their Core twins (20 Sep 2026) and the tier comparison at the bottom.
+    """
+    picks_header = all_picks_rows[0] if all_picks_rows else []
+    rows = _core_rows(all_picks_rows[1:], picks_header)
 
     settled     = [r for r in rows if len(r) > 6 and r[6] in _SETTLED_RESULTS]
     wins        = [r for r in settled if r[6] == "WIN"]
@@ -1107,7 +1220,7 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
     voids       = [r for r in settled if r[6] == "VOID"]
     pending     = [r for r in rows if not (len(r) > 6 and r[6])]
 
-    total_pnl_units  = round(sum(_pnl(r) for r in settled), 2)
+    total_pnl_units  = round(sum(_row_pnl(r) for r in settled), 2)
     total_pnl_euros  = round(total_pnl_units * UNIT_STAKE, 2)
     full_wr_settled  = [r for r in settled if r[6] in ("WIN", "LOSS")]
     win_rate         = round(len(wins) / len(full_wr_settled) * 100, 1) if full_wr_settled else 0.0
@@ -1125,73 +1238,29 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
 
     bt_pnl: dict[str, float] = defaultdict(float)
     for r in settled:
-        bt_pnl[r[2]] += _pnl(r)
+        bt_pnl[r[2]] += _row_pnl(r)
     best_bt     = max(bt_pnl, key=bt_pnl.get) if bt_pnl else "N/A"
     best_bt_pnl = round(bt_pnl.get(best_bt, 0), 2)
 
     conf_pnl: dict[str, float] = defaultdict(float)
     for r in settled:
-        conf_pnl[r[5]] += _pnl(r)
+        conf_pnl[r[5]] += _row_pnl(r)
     best_conf     = max(conf_pnl, key=conf_pnl.get) if conf_pnl else "N/A"
     best_conf_pnl = round(conf_pnl.get(best_conf, 0), 2)
 
     pnl_str = f"+EUR {total_pnl_euros:.2f}" if total_pnl_euros >= 0 else f"-EUR {abs(total_pnl_euros):.2f}"
     roi_str = f"+{roi:.1f}%" if roi >= 0 else f"{roi:.1f}%"
 
-    # ── Bet type breakdown (reuse settled rows already in memory) ────────────
-    bt_groups: dict[str, dict] = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0.0})
-    for r in settled:
-        bt = r[2].strip() if len(r) > 2 else ""
-        if not bt or r[6] == "VOID":
-            continue
-        bt_groups[bt]["pnl"] += _pnl(r)
-        if r[6] == "WIN":
-            bt_groups[bt]["wins"] += 1
-        elif r[6] == "LOSS":
-            bt_groups[bt]["losses"] += 1
-
-    bt_rows = []
-    for bt, g in bt_groups.items():
-        total    = g["wins"] + g["losses"]
-        win_rate_bt = round(g["wins"] / total * 100, 1) if total else 0.0
-        bt_rows.append([bt, g["wins"], g["losses"], f"{win_rate_bt:.1f}%", round(g["pnl"], 2), total])
-    bt_rows.sort(key=lambda x: float(x[3].rstrip("%")), reverse=True)
-
-    # ── League breakdown (uses the League column, index 12) ──────────────────
-    # Every tracked competition gets a row even with no picks yet: several open
-    # their 2026-27 season mid-to-late August, so zeros are the expected state
-    # for now, and an absent row would be indistinguishable from a routing bug.
-    # Any league present in the sheet but not listed here is appended rather
-    # than dropped, and picks logged before the League column existed group
-    # under _NO_LEAGUE — without that bucket this section's P&L would silently
-    # fail to reconcile with 'Total P&L (units)' above.
-    lg_groups: dict[str, dict] = {
-        name: {"wins": 0, "losses": 0, "pnl": 0.0, "picks": 0}
-        for name in TRACKED_LEAGUES
-    }
-    for r in rows:
-        name = r[12].strip() if len(r) > 12 and r[12].strip() else _NO_LEAGUE
-        g = lg_groups.setdefault(name, {"wins": 0, "losses": 0, "pnl": 0.0, "picks": 0})
-        g["picks"] += 1                      # every logged pick, settled or not
-        result = r[6] if len(r) > 6 else ""
-        if result not in _SETTLED_RESULTS or result == "VOID":
-            continue
-        g["pnl"] += _pnl(r)                  # half wins/losses count here...
-        if result == "WIN":
-            g["wins"] += 1                   # ...but not in the W/L win rate,
-        elif result == "LOSS":
-            g["losses"] += 1                 # matching the bet-type section
-
-    lg_rows = []
-    for name, g in lg_groups.items():
-        decided = g["wins"] + g["losses"]
-        wr = round(g["wins"] / decided * 100, 1) if decided else 0.0
-        lg_rows.append([name, g["wins"], g["losses"], f"{wr:.1f}%",
-                        round(g["pnl"], 2), g["picks"]])
-    # P&L descending, as asked. Ties break on pick count then name so the
-    # not-yet-in-season leagues — all identically zero — hold a stable order
-    # instead of shuffling between refreshes.
-    lg_rows.sort(key=lambda x: (-x[4], -x[5], x[0]))
+    # ── Bet type + league breakdowns, Core and Extended ─────────────────────
+    # Same helper, same columns, same sort for both tiers; only the input rows
+    # differ. The Extended tables are the user's view of WHERE the paper tier
+    # is weak — by market and by competition — and must never be summed into
+    # the Core figures, which is why each carries its own label line below.
+    bt_rows     = _bet_type_breakdown_rows(rows)
+    lg_rows     = _league_breakdown_rows(rows)
+    ext_rows    = _extended_rows(all_picks_rows[1:], picks_header)
+    ext_bt_rows = _bet_type_breakdown_rows(ext_rows)
+    ext_lg_rows = _league_breakdown_rows(ext_rows)
 
     # ── Bet type × league cross-breakdown ────────────────────────────────────
     # Win rate is suppressed below _MIN_CELL_SAMPLE and replaced with
@@ -1223,7 +1292,7 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         cell["picks"] += 1                   # every logged pick, settled or not
         if result not in _SETTLED_RESULTS or result == "VOID":
             continue
-        cell["pnl"] += _pnl(r)
+        cell["pnl"] += _row_pnl(r)
         if result == "WIN":
             cell["wins"] += 1
         elif result == "LOSS":
@@ -1277,15 +1346,27 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         ["  P&L from this level",   best_conf_pnl],
         ["", ""],
         ["BET TYPE BREAKDOWN", "", "", "", "", ""],
+        [_CORE_SECTION_NOTE, "", "", "", "", ""],
         ["Bet Type", "Wins", "Losses", "Win Rate %", "Total P&L", "Total Picks"],
     ] + bt_rows + [
         ["", ""],
+        ["EXTENDED BET TYPE BREAKDOWN", "", "", "", "", ""],
+        [_EXTENDED_SECTION_NOTE, "", "", "", "", ""],
+        ["Bet Type", "Wins", "Losses", "Win Rate %", _EXTENDED_PNL_HEADER, "Total Picks"],
+    ] + ext_bt_rows + [
+        ["", ""],
         ["LEAGUE BREAKDOWN", "", "", "", "", ""],
+        [_CORE_SECTION_NOTE, "", "", "", "", ""],
         # 'Picks' counts every logged pick incl. pending and void, unlike the
         # bet-type table's 'Total Picks' (settled wins + losses only) — it is
         # what shows a competition is tracked but not yet in season.
         ["League", "Wins", "Losses", "Win Rate %", "Total P&L", "Picks"],
     ] + lg_rows + [
+        ["", ""],
+        ["EXTENDED LEAGUE BREAKDOWN", "", "", "", "", ""],
+        [_EXTENDED_SECTION_NOTE, "", "", "", "", ""],
+        ["League", "Wins", "Losses", "Win Rate %", _EXTENDED_PNL_HEADER, "Picks"],
+    ] + ext_lg_rows + [
         ["", ""],
         ["BET TYPE × LEAGUE BREAKDOWN", "", "", "", ""],
         # Spelled out in the sheet so 'insufficient data' needs no explaining
@@ -1306,18 +1387,11 @@ def _refresh_summary(ss: gspread.Spreadsheet) -> None:
         ["Tier", "Wins", "Losses", "Win Rate %", "Total P&L", "Picks"],
     ] + _tier_breakdown_rows(all_picks_rows)
 
-    ws_sum = ss.worksheet("Summary")
-    ws_sum.clear()
-    ws_sum.update("A1", data, value_input_option="RAW")
+    return data
 
 
 def _tier_stats(rows: list[list[str]]) -> dict:
     """Wins/losses/win rate/P&L/pick count for a set of Picks rows."""
-    def _pnl(row: list) -> float:
-        try:
-            return float(row[7]) if len(row) > 7 and row[7] else 0.0
-        except ValueError:
-            return 0.0
 
     settled = [r for r in rows if len(r) > 6 and r[6] in _SETTLED_RESULTS]
     wins    = [r for r in settled if r[6] == "WIN"]
@@ -1329,8 +1403,8 @@ def _tier_stats(rows: list[list[str]]) -> dict:
         "wins":     len(wins),
         "losses":   len(losses),
         "win_rate": round(len(wins) / decided * 100, 1) if decided else 0.0,
-        "pnl":      round(sum(_pnl(r) for r in settled), 2),
-        "pnl_eur":  round(sum(_pnl(r) for r in settled) * UNIT_STAKE, 2),
+        "pnl":      round(sum(_row_pnl(r) for r in settled), 2),
+        "pnl_eur":  round(sum(_row_pnl(r) for r in settled) * UNIT_STAKE, 2),
     }
 
 

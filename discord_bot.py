@@ -17,7 +17,13 @@ Config (both must be set for any send to happen):
 Channel keys used by the pipeline (any key may be omitted — it is skipped):
     picks-cards         daily picks PNG card, plus the IG-variant card
                         (both land here every run, intentional)  (main.py)
-    results-cards       results PNG card                (auto_results.py)
+    results-cards       CORE settled-result text with P&L, from the 30-min
+                        poller; plus the results PNG card on the manual
+                        --results path                  (run_all.py / auto_results.py)
+    extended-results    EXTENDED settled-result text — verdict and score
+                        only, NO P&L or bankroll figure: Extended picks
+                        carry no stake, so units here would read as money
+                        bet. Same poller, same dedup   (run_all.py / auto_results.py)
     weekly-cards        weekly summary PNG card         (weekly_summary.py)
     premier-league      per-pick embed                  (main.py)
     jupiler-pro-league  per-pick embed                  (main.py)

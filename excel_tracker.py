@@ -913,6 +913,7 @@ def get_pending_picks_rows(lookback_days: int = 7) -> list[dict]:
 
     cutoff = date.today() - timedelta(days=lookback_days)
     header = rows[0] if rows else []
+    tier_idx = _col(header, "Pick Tier")
     pending = []
 
     for i, row in enumerate(rows[1:], start=2):  # row 1 = header; Sheets rows are 1-based
@@ -938,6 +939,12 @@ def get_pending_picks_rows(lookback_days: int = 7) -> list[dict]:
             "odds":        settlement_odds_from_row(row, header),
             "est_odds":    _cell_float(row, _col(header, "Odds")) or 1.0,
             "market_odds": market_odds_from_row(row, header),
+            # The tier rides along so the settled result can be ROUTED by it
+            # (20 Sep 2026): Core results go to 'results-cards' with P&L,
+            # Extended to 'extended-results' without. This reader itself stays
+            # tier-blind — both tiers must settle — so the routing decision is
+            # made downstream, never here. Blank means Core (_row_tier).
+            "pick_tier":   _row_tier(row, tier_idx),
         })
     return pending
 

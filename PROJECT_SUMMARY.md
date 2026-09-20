@@ -79,7 +79,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 | `GOOGLE_SHEETS_ID` | ID from the Google Sheet URL (between /d/ and /edit) |
 | `GOOGLE_CREDENTIALS_JSON` | Full service account JSON (minified, single line) |
 | `DISCORD_BOT_TOKEN` | **Required.** Discord bot token (Developer Portal → Bot → Reset Token). If unset, all delivery is skipped silently and NOTHING is posted anywhere — since 18 Aug 2026 Discord is the only surface, so this is no longer an optional extra. |
-| `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","bundesliga":"999...","la-liga":"aaa...","serie-a":"bbb...","ligue-1":"ccc...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-picks-lower` / `tennis-results` keys carry ALL tennis delivery. |
+| `DISCORD_CHANNELS_JSON` | *Optional per key.* Single-line JSON dict mapping channel keys to Discord channel IDs, e.g. `{"picks-cards":"111...","results-cards":"222...","extended-results":"223...","weekly-cards":"333...","premier-league":"444...","jupiler-pro-league":"555...","world-cup":"666...","bundesliga":"999...","la-liga":"aaa...","serie-a":"bbb...","ligue-1":"ccc...","tennis-picks":"777...","tennis-results":"888..."}`. Any missing key is skipped silently; several keys may point at the same channel ID. The `tennis-picks` / `tennis-picks-lower` / `tennis-results` keys carry ALL tennis delivery. |
 | `TENNIS_RAPIDAPI_HOST` | *Optional (tennis system).* Overrides the tennis data API host. Defaults to `tennis-api-atp-wta-itf.p.rapidapi.com` ("Tennis API - ATP WTA ITF" by MatchStat). The RapidAPI account behind `RAPIDAPI_KEY` must be subscribed to this API. |
 | `TENNIS_RANK_THRESHOLD` | *Optional (tennis system).* Rank tier cutoff, default `150`. No fixtures are excluded by rank — picks where BOTH players rank inside the top N go to the `tennis-picks` Discord channel; all others (either player outside, or unranked) go to `tennis-picks-lower`. The tier ('Top 150' / 'Lower Ranked') is also logged to the Sheet's 'Rank Tier' column. Per-tier pick counts are logged every run. |
 
@@ -165,7 +165,8 @@ Delivery via `discord_bot.py` — no changes to pick generation or calibration. 
 | Key | Content | Sent from |
 |---|---|---|
 | `picks-cards` | Daily picks PNG card, **plus** the Instagram-variant card (`generate_picks_card_ig`) — both land in this same channel every run (since 11 Jul 2026, intentional) | `main.py` (after the Telegram card send; IG card sent right after its optional `TELEGRAM_IG_CHANNEL_ID` send) |
-| `results-cards` | Football live result notifications (text) from the 30-min automatic trigger; plus the results PNG card when the manual football `--results` path runs | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
+| `results-cards` | **Core** football result notifications (text, with the `P&L: ±x.xx units` line) from the 30-min automatic trigger; plus the results PNG card when the manual football `--results` path runs. Core-only since 20 Sep 2026 — see `extended-results` | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
+| `extended-results` | **Extended** football result notifications (text) from the same 30-min trigger, same dedup — verdict (WIN / LOSS / VOID / HALF …) and score ONLY, **no P&L, bankroll or unit figure**: an Extended pick carries no stake, so units would read as money bet. Routed by `auto_results.result_notification()` off the row's `Pick Tier` (added 20 Sep 2026) | `run_all.py` `live_results_check` / `auto_results.py --live` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
 | `premier-league` | Each Premier League pick as an embed | `main.py` |
 | `jupiler-pro-league` | Each Jupiler Pro League pick as an embed | `main.py` |
@@ -1032,7 +1033,7 @@ place — and `MAX_PICKS_PER_RUN` rose 5 → 10 (`CORE_PICKS_PER_RUN = 5` marks 
 | Tier | Ranks (13-15 Aug 2026) | Sheet / settlement | Card | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
 |---|---|---|---|---|---|---|
 | **Core** | 1-5 | logged + settled | **yes** | league channel | **yes** | **yes** |
-| **Extended** | 6-10 | logged + settled | no | league channel, labelled `· EXTENDED #n` | **no** | **no** |
+| **Extended** | 6-10 | logged + settled | no | league channel, labelled `· EXTENDED #n`; result → `extended-results`, no P&L (20 Sep 2026) | **no** | **no** |
 
 **The Core baseline is unaffected.** This is the whole point of the design, and it holds in the
 strongest sense available: not one historical row was rewritten. Core keeps its own card, Telegram
@@ -1067,7 +1068,8 @@ aggregation routes through it rather than repeating an inline tier check:
 | `calibration.clv_report` | closing odds ARE collected for Extended, but never scored here |
 | `get_weekly_data` | weekly card + `update_result.py` recap |
 | `get_bet_type_breakdown` | weekly card breakdown (and `get_overall_win_rate` via it) |
-| `get_picks_for_date` | results card + per-pick result notifications |
+| `get_picks_for_date` | results card + the manual `--results` per-pick notifications |
+| `result_notification` (auto_results) | the 30-min poller's per-pick notifications — not a Core *filter* but a Core/Extended *router*: Core → `results-cards` with P&L, Extended → `extended-results` without (20 Sep 2026) |
 
 Deliberately **not** filtered: `get_pending_picks_rows` (both tiers must settle) and
 `get_unsettled_picks_with_kickoff` (both tiers collect closing odds).
@@ -1142,8 +1144,8 @@ each other for space. Each competition now gets its own call and is judged on it
 
 | Tier | How it is chosen | Volume | Sheet / settlement | Card | Discord | Calibration / edge / CLV | Running total, Bankroll, Summary totals |
 |---|---|---|---|---|---|---|---|
-| **Core** | best 5 on the whole slate, selected globally each run | exactly 5/day (fewer if the slate offers fewer) | logged + settled | **yes** | league channel | **yes** | **yes** |
-| **Extended** | every other returned pick | up to 10 per competition per day | logged + settled | no | league channel, labelled `· EXTENDED · league rank n` | **no** | **no** |
+| **Core** | best 5 on the whole slate, selected globally each run | exactly 5/day (fewer if the slate offers fewer) | logged + settled | **yes** | league channel; result → `results-cards` with P&L | **yes** | **yes** |
+| **Extended** | every other returned pick | up to 10 per competition per day | logged + settled | no | league channel, labelled `· EXTENDED · league rank n`; result → `extended-results`, no P&L (20 Sep 2026) | **no** | **no** |
 
 **Core is unchanged in every respect that matters.** Still 5, still global, still the only tier
 reaching the card, the running total, the bankroll, the Summary figures and every
@@ -1313,6 +1315,47 @@ tracked and settled but never read.
   independent, so an empty Core week is not necessarily an empty week.
 - The all-time bet-type table underneath is Core-only (`get_bet_type_breakdown`)
   and is now labelled as such, which it needed once a second tier appeared above it.
+
+### Extended results get their own channel, without units (20 Sep 2026)
+
+**What was actually happening.** The 30-minute settlement poller (`run_all.live_results_check`)
+announced every row `run_auto_results` settled — and `get_pending_picks_rows` is deliberately
+tier-blind, so that was both tiers. Every Extended result therefore landed in `results-cards`,
+in the Core format, **with a `P&L: ±x.xx units` line** on a pick that was never staked. Measured
+on 18 Sep 2026: 3 Core and 16 Extended rows settled, and `results-cards` carried 19 result messages.
+The results feed was running at roughly four times Core volume and putting units on paper picks.
+(The docs' "one filter, seven sites" table listed `get_picks_for_date` as the results-notification
+filter, but that only covers the manual `--results` path; the poller never went through it.)
+
+**The fix is a router, not a filter.** `auto_results.result_notification(r)` returns
+`(channel_key, message)` for a settled row and is the single place that decides:
+
+| Tier on the row | Channel | Message |
+|---|---|---|
+| Core, blank (pre-13 Aug 2026), Duplicate | `results-cards` | unchanged — body + `P&L: ±x.xx units` |
+| Extended | `extended-results` | body only: verdict, match, bet, odds, pick, score line |
+
+Both pollers (`run_all.live_results_check` and `auto_results.py --live`) call it; the trigger and
+the `_notified` dedup set are the same for both tiers — a fixture carries at most one open bet, so
+the `(match, bet_type, pick)` key is unique across tiers. The tier travels from the sheet as a new
+`pick_tier` field on `get_pending_picks_rows()` rows and on each `resolved` entry; a
+`pending_source` that predates the field (the Opus shadow's — whose `resolved` is dropped anyway)
+reads as Core, i.e. the previous behaviour.
+
+**Why no P&L, bankroll or unit figure at all.** An Extended pick carries no stake — no Kelly
+figure on its embed, no running total, no bankroll column — so a unit figure beside its result
+would read as money that was bet, the exact claim the tier's design exists to avoid. The sheet
+still books a flat-unit P&L on Extended rows for the tier comparison; that number is deliberately
+not published. `_format_extended_result_notification` is `_format_result_notification` minus its
+last line, built from one shared `_result_notification_body`, so the two channels cannot drift
+apart in anything but the money line. Pinned by `tests/test_settlement.py` (`ResultRouting`,
+`PendingRowsCarryTheTier`, and the tier passthrough in `SettlementLoop`).
+
+**Operational note.** `send_to_discord` is fail-silent, so until `extended-results` is mapped in
+`DISCORD_CHANNELS_JSON` on Railway an Extended result is logged as "not mapped — skipping" and
+announced nowhere; rows settled in that window are not re-sent later. Map the key on Railway in
+the same deploy. PENDING alerts (`⏳ NEEDS MANUAL SETTLEMENT`) are unchanged and still go to
+`results-cards` for both tiers — they are an operator prompt, not a result.
 
 ### Odds matched to the wrong team: the Club Brugge mispricing (fixed 1 Sep 2026)
 
@@ -1820,7 +1863,7 @@ Completion estimates per area — update these percentages whenever a related ch
 | Bot core | 99% | Picks analysed **one competition per Claude call** since 15 Aug 2026, with a global selection step naming the day's Core 5 — the sheet write path batched and Discord sends paced to carry the resulting 30+ picks a day. Extra-time settlement made two-legged-aware and every `PENDING` now alerts to `results-cards` on sight and again 24h after kickoff (12 Aug 2026), so a pick can no longer strand unsettled until it ages out of the lookback window. Live — picks, results, sheets, cards, Telegram all automated on Railway; Summary tab gained a per-league breakdown and all user-facing output is model-name-free (4 Aug 2026). Settlement now pays the market price shown on the card rather than Claude's estimate, via a new 'Market Odds' column (9 Aug 2026). Total-failure alerting closed its last blind spot on 18 Aug 2026: the football picks-failed alert now fires on Telegram AND Discord independently and states the upstream reason, the tennis job alerts on API failure at all, and `_run_now.py` delivers to Discord like the job it stands in for — an exhausted API credit balance had silently killed three consecutive slates. Telegram removed entirely 18 Aug 2026 — Discord is the sole delivery surface, the weekly summary text / monthly calibration report / Kelly stake were ported rather than dropped, and the bot-token-in-URL log leak went with it. API health is now visible in `usage`: a credit-balance 400 alerts immediately (deduped per day) and the daily summary opens with the last call's outcome plus the age of the last success, so a zero-cost day can no longer be mistaken for a quiet one. Credit BALANCE stays absent by design — no Anthropic endpoint exposes it (Console only), and a guessed figure would be worse than none. Two-legged extra-time settlement stopped needing a human on 1 Sep 2026: the 90-minute goal DIFFERENCE is derived from the aggregate (`h90-a90 = (agg_away-final_away) - (agg_home-final_home)`), which settles Match Winner, Double Chance and Asian Handicap automatically — validated against all 15 real two-legged AET/shootout ties — while Over/Under and BTTS correctly stay PENDING because the margin does not pin the total; a shootout with no extra time now settles exactly on the final score, and fixture matching folds diacritics and tries reversed sides, clearing four rows stranded since 10-19 Aug. 1 Sep 2026 also closed the matching blind spot on the SHEET side: a pick batch that does not fully land now alerts to `usage` with written/skipped/failed counts, so a partial write is as visible as a total one — previously both printed one INFO line and nothing else |
 | Data quality | 96% | Picks-per-run hard-capped in `analyse_with_claude()` (12 Aug 2026), closing a gap where the card rendered `picks[:5]` while the sheet logged every pick the model returned — so a 6th+ pick was settled into P&L without ever being shown (last bit 29-30 Jun 2026, 7 picks). That cap became **per competition** (`MAX_PICKS_PER_LEAGUE = 10`) on 15 Aug 2026, so card and sheet now diverge *by design*: the sheet carries 30+ picks and the card the 5 Core ones, and it is the tier split — not the cap — that keeps them consistent. The card's backstop was re-cut as a tier filter rather than a positional `[:5]` in the same change, and picks-run Odds API enrichment was re-keyed per competition instead of per fixture, which cut its worst case from ~300 to ~30 units/day. Jupiler Pro League fixed 8 Aug 2026 — a stale pinned leagueId (`900433`) had kept it at **zero picks for the bot's entire history**; moved onto the self-healing parent-id path (parent `40`) with roster-ranked discovery, and all five remaining pinned domestic ids audited as stable parents so this cannot recur at the next season rollover. The Odds API on the 20,000-unit paid tier since 6 Aug 2026 — polling caps raised 12→60 (football) and 12→40 (tennis), single-region `eu` calls at 3 units, tier-proportional hard stop; Europa/Conference qualifying confirmed to have **no market data at any tier** (provider gap). Odds API + closing odds (CLV) live since 4 Jul 2026. **Form/H2H enrichment was NOT live despite this line previously claiming it was** — both its endpoints 404'd from 29 Jun to 14 Aug 2026 and the failures were logged at DEBUG under an INFO root logger, so every football pick in that window was made on team names alone; repaired 14 Aug 2026 onto `football-get-matches-by-date` (form) + `football-get-head-to-head` (H2H) with failures now at WARNING/ERROR. Knockout picks time-scoped (90 min vs incl. ET/Pens) with ET/pens-aware settlement for ALL bet types — Match Winner, O/U, AH, BTTS, Double Chance — since 12 Jul 2026; UEFA Conference League added 30 Jul 2026 with self-healing leagueId resolution (its qualifying rounds have no Odds API key, so those picks are Claude-odds-only); UEFA Champions League added 4 Aug 2026 on that same resolution path, with a qualifying→main Odds API key fallback so its qualifying picks DO get market odds; no injuries/lineups. **The sheet write path stopped losing data silently on 1 Sep 2026**: sizing every pick in a loop made one full-sheet read PER PICK (`calculate_kelly_stake` → `get_bet_type_breakdown`), which exceeded Google's 60-reads-per-minute quota once the per-league cap took slates past ~20 picks and silently 429'd the batch write — 128 picks over six days reached Discord and never the sheet. The read is now once per run (29→1), `log_picks_batch` returns written/skipped/**failed** and any non-zero `failed` alerts to `usage` whether the loss is partial or total, the batch read/append retry 429s with backoff, and the interval jobs are phase-shifted so their reads no longer land in one minute. Settlement coverage improved the same day: the 90-minute goal difference on two-legged extra-time ties is now derived from the aggregate rather than sent to manual settlement, shootouts with no extra time settle exactly on the final score, and fixture matching folds diacritics and tries reversed home/away — four rows stranded since 10-19 Aug 2026 (r203, r243, r246, r251) settled automatically, leaving only genuinely ambiguous totals pending. **Odds are no longer matched to the wrong team** (1 Sep 2026): stripping `club` as a noise word had collapsed "Club Brugge" to bare "brugge", a substring of "Cercle Brugge KSV", and first-substring-wins then paid a 1.26 favourite at the underdog's 8.98 — 7.72 units of phantom P&L, a fifth of the reported Core total, plus a doubled positive-edge ROI. Every candidate is now ranked with a margin and ambiguity refuses rather than guesses; the row is corrected and cascaded; and three guards watch it — a payout invariant on settlement, a 3.0x estimate-vs-market divergence guard that discards the price and alerts, and a weekly summary that prints the price it settled at. **Fixture matching no longer takes another squad's game** (8 Sep 2026): the feed lists youth, reserve and women's fixtures with the club names intact, and substring containment matched FC Porto vs Manchester City to that afternoon's U19 game (row 357), which alerted with a score the senior sides never played and would have paid out silently on any total, BTTS or handicap pick. Sides are now scored (exact beats containment, other-squad markers reject), both date buckets are searched as one pool, ambiguity refuses, and a Match Winner pick that names neither side of its fixture says so in the alert. Pinned by `tests/test_settlement.py`, the repo's first regression suite. **Kelly staking rebuilt 8 Sep 2026** (first slate 9 Sep): bankroll €3,500 (manual constant), club-football Core picks only, sized by odds bucket with n/(n+50) shrinkage toward the club overall, on the market price when matched, half-Kelly with a 5% per-pick cap (€175) and a new 15% daily aggregate cap (€525) that scales a day's Core stakes proportionally; a bucket that cannot clear break-even after shrinkage returns exactly €0, which currently skips ~29% of Core picks by design. Pinned by `tests/test_staking.py` |
 | Calibration engine | 15% | Infrastructure done, collecting since 30 Jun 2026 (+ CLV since 4 Jul); verdict ~Oct at 300 picks. First spot check logged 6 Aug 2026 (n=3, favourite underconfidence) — an observation on the record, no engine change. **Regime break at 14 Aug 2026:** every pick logged before that date was made with no form and no H2H (see "Form & H2H enrichment"), so the pre-14-Aug rows measure the model reasoning from team names alone. Treat the series as two samples rather than one when the verdict is read, and do not attribute a change in calibration after this date to model drift. **Second break at 15 Aug 2026:** Core is selected by a different mechanism from that date — one call per competition plus a global selection call, instead of one cross-competition ranking (see "Per-league picks and global Core selection"), so it is the third boundary in the series alongside 13 and 14 Aug. **Staking changed 9 Sep 2026** (see "Kelly Criterion staking") — this does NOT touch the calibration inputs (Claude's probabilities, market probabilities, flat-unit P&L), so the series continues unbroken here; it only changes the real-money stake advice shown on the embeds |
-| Content pipeline | 96% | Cards automatic; auto-posted to Discord (Telegram removed 18 Aug 2026), only IG posting still manual. The weekly summary text gained an Extended-tier section on 1 Sep 2026 — picks/wins/losses/win rate/P&L reported beside Core and never merged into it, with the card and the Core figures deliberately untouched |
+| Content pipeline | 97% | Cards automatic; auto-posted to Discord (Telegram removed 18 Aug 2026), only IG posting still manual. The weekly summary text gained an Extended-tier section on 1 Sep 2026 — picks/wins/losses/win rate/P&L reported beside Core and never merged into it, with the card and the Core figures deliberately untouched. Extended results moved out of `results-cards` into their own `extended-results` channel on 20 Sep 2026, announced with the verdict and score only — no P&L or bankroll figure, since the tier carries no stake |
 | Socials | 40% | Accounts + branding + IG-formatted card (`generate_picks_card_ig`, 1080×1350, top 3 picks) done; auto-delivered to Discord's `picks-cards` channel every run (11 Jul 2026) and optionally to a Telegram chat via `TELEGRAM_IG_CHANNEL_ID` for manual download — actual Instagram posting is still manual, zero posts so far |
 | Proven edge | 5% | Blocked on calibration data |
 | Site/app/monetization | 0% | Deliberately parked until edge is proven |

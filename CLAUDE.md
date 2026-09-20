@@ -22,11 +22,23 @@ already carry the same picks in richer form.
 `discord_bot.py` handles all Discord delivery (send-only, REST via
 `requests` — no discord.py). Env vars: `DISCORD_BOT_TOKEN` plus
 `DISCORD_CHANNELS_JSON`, a single-line JSON dict mapping the keys
-`picks-cards`, `results-cards`, `weekly-cards`, `premier-league`,
+`picks-cards`, `results-cards`, `extended-results`, `weekly-cards`, `premier-league`,
 `jupiler-pro-league`, `world-cup`, `bundesliga`, `la-liga`, `serie-a`,
 `ligue-1`, `champions-league`, `europa-league`, `conference-league`, `tennis-picks`, `tennis-picks-lower`,
 `tennis-results`, `usage` to Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
 missing token/key skips that piece without touching the rest of the flow.
+
+**Settled football results are routed by tier** (20 Sep 2026):
+`auto_results.result_notification(r)` is the ONE place that decides, and both
+30-minute pollers (`run_all.live_results_check`, `auto_results.py --live`) go
+through it. Core → `results-cards` with the `P&L: ±x.xx units` line, exactly
+as before. Extended → `extended-results` with the verdict and score ONLY — no
+P&L, no bankroll, no units — because an Extended pick carries no stake and a
+unit figure would read as money that was bet. Same trigger, same `_notified`
+dedup set for both. Before this every tier went to `results-cards` with units,
+so the results feed was announcing ~4x the Core volume on unstaked picks. The
+tier reaches the poller via `get_pending_picks_rows()`' `pick_tier` field;
+that reader stays tier-BLIND (both tiers must settle) — never filter there.
 Individual pick messages (league channels + `tennis-picks`) are Discord EMBEDS
 built by `discord_bot.py`'s `build_pick_embed()` — never plain text; card and
 result sends stay plain text/images. A **Core** football embed also carries a

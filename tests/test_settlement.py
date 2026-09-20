@@ -304,6 +304,123 @@ class SettlementLoop(unittest.TestCase):
         self.assertEqual(stats["pending"], 0)
         self.assertEqual(writes, [])
 
+    def test_tier_rides_through_to_the_resolved_row(self):
+        # A row without the field (a pending_source that predates it) is Core.
+        senior = _fx(6106286, "FC Porto", "Manchester City", hs=0, as_=2, finished=True)
+        stats, resolved, writes = self._run({date(2026, 9, 9): [senior]}, "test-357-tier-default")
+        self.assertEqual(resolved[0]["pick_tier"], "Core")
+
+        ext = dict(self.ROW_357, pick_tier="Extended")
+        writes: list[tuple] = []
+        with mock.patch.object(ar, "init_excel"), \
+             mock.patch.object(ar, "_fetch_matches_cached",
+                               side_effect=lambda d: {date(2026, 9, 9): [senior]}.get(d, [])):
+            stats, resolved = ar.run_auto_results(
+                7, pending_source=lambda _d: [ext],
+                row_writer=lambda row, res, pnl: writes.append((row, res, pnl)),
+                finalizer=lambda: None, alert_scope="test-357-tier-extended",
+            )
+        self.assertEqual(resolved[0]["pick_tier"], "Extended")
+        # Extended settles and books to the sheet exactly like Core — only the
+        # announcement differs (see ResultRouting).
+        self.assertEqual(writes, [(357, "WIN", ar.pnl_for_result("WIN", 1.68))])
+
+
+class ResultRouting(unittest.TestCase):
+    """
+    Where a settled row is announced, by tier (20 Sep 2026). Core keeps
+    'results-cards' with its P&L line; Extended goes to 'extended-results'
+    with the verdict and score only — no P&L, no bankroll, no units, because
+    an Extended pick carries no stake.
+    """
+
+    BASE = {
+        "match": "FC Porto vs Manchester City", "bet_type": "Match Winner",
+        "pick": "Manchester City Win", "odds": 1.68, "result": "WIN", "pnl": 0.68,
+        "home_name": "FC Porto", "away_name": "Manchester City",
+        "home_score": 0, "away_score": 2, "extra_time": False, "penalties": False,
+    }
+
+    def test_core_goes_to_results_cards_with_pnl(self):
+        channel, msg = ar.result_notification(dict(self.BASE, pick_tier="Core"))
+        self.assertEqual(channel, "results-cards")
+        self.assertIn("P&L: +0.68 units", msg)
+
+    def test_blank_tier_is_core(self):
+        # Rows logged before 13 Aug 2026 have no tier and must keep announcing
+        # exactly as they always have.
+        channel, msg = ar.result_notification(dict(self.BASE))
+        self.assertEqual(channel, "results-cards")
+        self.assertIn("units", msg)
+
+    def test_extended_goes_to_extended_results_without_any_money_figure(self):
+        channel, msg = ar.result_notification(dict(self.BASE, pick_tier="Extended"))
+        self.assertEqual(channel, "extended-results")
+        self.assertNotIn("P&L", msg)
+        self.assertNotIn("unit", msg)
+        self.assertNotIn("bankroll", msg.lower())
+        self.assertNotIn("0.68", msg)
+        # …but everything else is the Core format, line for line.
+        self.assertEqual(
+            msg,
+            "✅ WIN — FC Porto vs Manchester City\n"
+            "Bet: Match Winner | Odds: 1.68\n"
+            "Pick: Manchester City Win\n"
+            "Result: Manchester City won 0-2",
+        )
+
+    def test_extended_is_the_core_message_minus_the_last_line(self):
+        core = ar.result_notification(dict(self.BASE, pick_tier="Core"))[1]
+        ext  = ar.result_notification(dict(self.BASE, pick_tier="Extended"))[1]
+        self.assertEqual(core.rsplit("\n", 1)[0], ext)
+
+    def test_extended_loss_and_void_carry_the_verdict(self):
+        for verdict, emoji in (("LOSS", "❌"), ("VOID", "⬜"), ("HALF WIN", "🟡")):
+            channel, msg = ar.result_notification(
+                dict(self.BASE, pick_tier="Extended", result=verdict, pnl=-1.0)
+            )
+            self.assertEqual(channel, "extended-results")
+            self.assertTrue(msg.startswith(f"{emoji} {verdict} — "), msg)
+            self.assertNotIn("units", msg)
+
+    def test_duplicate_tier_is_not_extended(self):
+        # Duplicate-tagged rows are neither tier; they keep the pre-existing
+        # route rather than being mistaken for paper picks.
+        channel, _ = ar.result_notification(dict(self.BASE, pick_tier="Duplicate"))
+        self.assertEqual(channel, "results-cards")
+
+
+class PendingRowsCarryTheTier(unittest.TestCase):
+    """get_pending_picks_rows reads the tier off the sheet and never filters on it."""
+
+    def _rows(self, header, body):
+        import excel_tracker as et
+        ws = mock.Mock()
+        ws.get_all_values.return_value = [header] + body
+        with mock.patch.object(et, "_picks_ws", return_value=ws), \
+             mock.patch.object(et, "date") as d:
+            d.today.return_value = date(2026, 9, 20)
+            return et.get_pending_picks_rows(7)
+
+    def test_tier_column_is_read_and_blank_means_core(self):
+        import excel_tracker as et
+        header = list(et.PICKS_HEADERS)
+        tier = header.index("Pick Tier")
+        def row(match, tier_value):
+            r = [""] * len(header)
+            r[0], r[1], r[2], r[3], r[4] = "19-Sep-2026", match, "Match Winner", "Home Win", "1.80"
+            r[tier] = tier_value
+            return r
+        pending = self._rows(header, [row("A vs B", "Core"), row("C vs D", "Extended"),
+                                      row("E vs F", ""), row("G vs H", "Duplicate")])
+        self.assertEqual([p["pick_tier"] for p in pending],
+                         ["Core", "Extended", "Core", "Duplicate"])
+
+    def test_sheet_without_the_tier_column_reads_as_core(self):
+        header = ["Date", "Match", "Bet Type", "Pick", "Odds", "Confidence", "Result"]
+        pending = self._rows(header, [["19-Sep-2026", "A vs B", "Match Winner", "Home Win", "1.8", "High", ""]])
+        self.assertEqual(pending[0]["pick_tier"], "Core")
+
 
 if __name__ == "__main__":
     unittest.main()

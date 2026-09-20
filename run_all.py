@@ -26,7 +26,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from auto_results import (
     _format_pending_notification,
-    _format_result_notification,
+    result_notification,
     run_auto_results,
 )
 from closing_odds import run_closing_odds_check
@@ -52,13 +52,20 @@ async def live_results_check() -> None:
     except Exception as exc:
         log.error("Live results check failed: %s", exc)
         return
+    # One dedup set for both tiers, keyed the same way as before: a fixture
+    # carries at most one open bet, so the key is unique across tiers and a
+    # row can never be announced twice whichever channel it lands in. Routing
+    # is result_notification's call — Core → 'results-cards' with P&L,
+    # Extended → 'extended-results' with the verdict and score only
+    # (20 Sep 2026; both tiers went to 'results-cards' with units before).
     for r in resolved:
         key = (r["match"], r["bet_type"], r["pick"])
         if key in _notified:
             continue
-        msg = _format_result_notification(r)
-        log.info("Sending result notification: %s | %s", r["match"], r["result"])
-        await asyncio.to_thread(send_to_discord, "results-cards", msg)
+        channel_key, msg = result_notification(r)
+        log.info("Sending result notification to '%s': %s | %s",
+                 channel_key, r["match"], r["result"])
+        await asyncio.to_thread(send_to_discord, channel_key, msg)
         _notified.add(key)
 
     # Picks evaluate_pick() could not settle. Discord-only and deliberately

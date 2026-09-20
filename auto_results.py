@@ -24,6 +24,8 @@ from discord_bot import send_to_discord
 from env_loader import load_env
 from excel_tracker import (
     EXCEL_PATH,
+    PICK_TIER_CORE,
+    PICK_TIER_EXTENDED,
     finalize_workbook,
     get_pending_picks_rows,
     get_picks_for_date,
@@ -115,11 +117,17 @@ def _score_description(
     return base
 
 
-def _format_result_notification(r: dict) -> str:
-    _EMOJI  = {"WIN": "✅", "HALF WIN": "🟡", "HALF LOSS": "🟠", "LOSS": "❌"}
-    emoji   = _EMOJI.get(r["result"], "⬜")
-    pnl_str = f"+{r['pnl']:.2f}" if r["pnl"] >= 0 else f"{r['pnl']:.2f}"
-    desc    = _score_description(
+_RESULT_EMOJI = {"WIN": "✅", "HALF WIN": "🟡", "HALF LOSS": "🟠", "LOSS": "❌"}
+
+
+def _result_notification_body(r: dict) -> str:
+    """
+    The tier-neutral part of a settled-pick notification: verdict, match, bet,
+    price, pick and the score line. Both tier formatters build on this so the
+    two channels can never drift apart in anything but the money line.
+    """
+    emoji = _RESULT_EMOJI.get(r["result"], "⬜")
+    desc  = _score_description(
         r["bet_type"], r["pick"],
         r["home_name"], r["away_name"],
         r["home_score"], r["away_score"],
@@ -132,9 +140,44 @@ def _format_result_notification(r: dict) -> str:
         f"{emoji} {r['result']} — {r['match']}\n"
         f"Bet: {r['bet_type']} | Odds: {r['odds']:.2f}\n"
         f"Pick: {r['pick']}\n"
-        f"Result: {desc}\n"
-        f"P&L: {pnl_str} units"
+        f"Result: {desc}"
     )
+
+
+def _format_result_notification(r: dict) -> str:
+    """Core result for 'results-cards': the body plus the flat-unit P&L line."""
+    pnl_str = f"+{r['pnl']:.2f}" if r["pnl"] >= 0 else f"{r['pnl']:.2f}"
+    return f"{_result_notification_body(r)}\nP&L: {pnl_str} units"
+
+
+def _format_extended_result_notification(r: dict) -> str:
+    """
+    Extended result for 'extended-results': verdict and score ONLY — no P&L,
+    no bankroll, no units (20 Sep 2026). Extended picks carry no stake and sit
+    outside the tracked book, so a unit figure here would read as money that
+    was bet. The sheet still books a flat-unit P&L on these rows for the tier
+    comparison; that figure is deliberately not published.
+    """
+    return _result_notification_body(r)
+
+
+def result_notification(r: dict) -> tuple[str, str]:
+    """
+    (channel_key, message) for one newly settled row, routed by tier. THE one
+    place that decides where a settled football pick is announced — every
+    30-minute poller (run_all.live_results_check, `--live` here) goes through
+    it, so the two can never disagree.
+
+    Extended → 'extended-results', without a money line. Anything else — Core,
+    the blank-tier rows logged before 13 Aug 2026, and the handful of
+    Duplicate-tagged rows — → 'results-cards' with P&L, exactly as before.
+    Until 20 Sep 2026 every tier went to 'results-cards' with a P&L line, so
+    the results feed was announcing ~4x the Core volume with units on picks
+    that were never staked.
+    """
+    if r.get("pick_tier", PICK_TIER_CORE) == PICK_TIER_EXTENDED:
+        return "extended-results", _format_extended_result_notification(r)
+    return "results-cards", _format_result_notification(r)
 
 
 def _pick_scope(pick: str) -> str | None:
@@ -1083,6 +1126,10 @@ def run_auto_results(
             "away_score": away_score,
             "extra_time": extra_time,
             "penalties":  penalties,
+            # Routing key for result_notification(). A pending_source that
+            # predates the field (the Opus shadow's, whose resolved list is
+            # dropped anyway) reads as Core, which is the pre-20-Sep behaviour.
+            "pick_tier":  p.get("pick_tier", PICK_TIER_CORE),
         })
 
     # ── 4. Recalculate running totals + refresh Summary ───────────────────────
@@ -1146,9 +1193,9 @@ if __name__ == "__main__":
                 key = (r["match"], r["bet_type"], r["pick"])
                 if key in notified:
                     continue
-                msg = _format_result_notification(r)
-                print(f"\nSending notification:\n{msg}")
-                send_to_discord("results-cards", message=msg)
+                channel_key, msg = result_notification(r)
+                print(f"\nSending notification to '{channel_key}':\n{msg}")
+                send_to_discord(channel_key, message=msg)
                 notified.add(key)
 
         _live_check()

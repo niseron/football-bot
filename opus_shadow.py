@@ -178,11 +178,35 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
         )
         deduped = deduped[:OPUS_MAX_PICKS_PER_RUN]
 
+    # Core eligibility follows production's probation list (22 Sep 2026). Rank
+    # stays purely positional — it is what the embed and the sheet show — but a
+    # pick from an EXTENDED_ONLY_COMPETITIONS competition is never tagged Core,
+    # so Core here counts the first OPUS_CORE_PICKS_PER_RUN ELIGIBLE picks.
+    #
+    # This is the one production constant the shadow deliberately inherits, and
+    # the reason is the experiment itself: the whole value of the shadow is
+    # Core-vs-Core, and on an international break the Nations League can be the
+    # entire slate. Left alone, production would post 0 Core that day while the
+    # shadow posted 5, and the two Core series would stop measuring the same
+    # thing. It costs nothing to inherit — same single call, same 10-pick cap,
+    # same 5 Core; only WHICH picks carry the Core tag changes. (Contrast the
+    # per-competition fan-out, which is frozen for cost reasons — see the header.)
+    #
+    # Rank and tier therefore decouple here exactly as they did in production on
+    # 15 Aug 2026: a rank-3 pick can be Extended and a rank-7 pick Core. Never
+    # re-derive the tier from the rank number.
+    from main import EXTENDED_ONLY_COMPETITIONS
+
+    n_core = 0
     for i, pick in enumerate(deduped, 1):
         pick["rank"] = i
-        pick["pick_tier"] = PICK_TIER_CORE if i <= OPUS_CORE_PICKS_PER_RUN else PICK_TIER_EXTENDED
+        eligible = pick.get("league") not in EXTENDED_ONLY_COMPETITIONS
+        if eligible and n_core < OPUS_CORE_PICKS_PER_RUN:
+            pick["pick_tier"] = PICK_TIER_CORE
+            n_core += 1
+        else:
+            pick["pick_tier"] = PICK_TIER_EXTENDED
 
-    n_core = sum(1 for p in deduped if p["pick_tier"] == PICK_TIER_CORE)
     log.info("opus_shadow: %d pick(s) — %d Core, %d Extended",
              len(deduped), n_core, len(deduped) - n_core)
     return deduped

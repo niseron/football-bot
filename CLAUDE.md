@@ -86,6 +86,12 @@ posted to their league's Discord channel (Extended embeds are labelled
 CARD, the `Stake` embed field, the running total/bankroll columns, the Summary totals,
 and the calibration/edge/CLV reports.
 
+**A competition can be barred from Core outright** — `EXTENDED_ONLY_COMPETITIONS`
+(22 Sep 2026, currently Nations League). Its picks are tagged Extended whatever
+their conviction, which is how a competition earns a settled sample of its own
+before it is allowed to move the bankroll or the calibration curve. That can leave
+a day with ZERO Core picks; the card is then skipped rather than posted empty.
+
 The weekly summary TEXT is the one exception (1 Sep 2026): it reports Extended in its
 own labelled section **beside** Core, never merged in. `get_weekly_data()` keeps the
 Core figures at the top level untouched and puts Extended under an `"extended"` key,
@@ -229,6 +235,29 @@ Two things about it break assumptions that hold for every club competition:
   pick as form-backed, and do not widen `FORM_LOOKBACK_DAYS` to chase it: reaching the
   World Cup would take ~120 days and drag in a tournament played under other
   conditions.
+
+**Extended-only, and unstaked.** `EXTENDED_ONLY_COMPETITIONS` holds this
+competition, so its picks can never be promoted to Core: no Kelly stake, no `Stake`
+embed field, out of the picks card, the running total, the bankroll, the Summary
+headline and the calibration/edge/CLV reports. They are still logged, still settled,
+and still posted to `nations-league` — being Extended is what keeps them visible in
+the Summary tab's EXTENDED LEAGUE BREAKDOWN, which is the evidence the probation gets
+reviewed on. Removing the entry is a decision, not a cleanup.
+
+- **Enforced in ONE place**: `_select_core_picks()`, filtering candidates *before* the
+  Core selection call. Filtering before is what keeps the book five deep — a pick
+  demoted afterwards would already have consumed a Core slot. Everything downstream
+  keys off the tier (calibration/edge/CLV all read through
+  `excel_tracker._core_rows`), so do not add a second league check anywhere.
+- **Zero Core picks is a normal day now.** An international break stops club football,
+  so this competition can be the whole slate. `generate_picks_card([])` does not fail —
+  it renders the header over empty space, which reads as "found nothing today" on a day
+  the bot found plenty — so the picks card AND the Instagram card are skipped when
+  `core_picks` is empty. Do not "restore" the card there.
+- **The Opus shadow inherits this one constant**, deliberately: its value is
+  Core-vs-Core, and otherwise production would post 0 Core on an international break
+  while the shadow posted 5. It costs nothing (same single call, same caps) — unlike
+  the per-competition fan-out, which stays frozen for cost reasons.
 
 The Odds API **does** cover it — `soccer_uefa_nations_league`, active, one key for all
 four tiers, no qualifying gap. 25 of 26 live fixtures matched; the one name failure

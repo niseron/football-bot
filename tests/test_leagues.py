@@ -23,6 +23,7 @@ A test that passes both with and without the mechanism pins nothing.
 """
 from __future__ import annotations
 
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -186,6 +187,144 @@ class DiscoveryRanking(unittest.TestCase):
                 if m["leagueId"] != nl_id or m["home"]["longName"] != "Serbia"]
         feed.append(_match(99999, nl_id, "Elbonia", "Greece"))
         self.assertEqual(self._sweep(feed, nl_id, [NL]), {NL: {nl_id}})
+
+
+class ExtendedOnlyProbation(unittest.TestCase):
+    """Nations League picks can never be Core, so they can never be staked.
+
+    The rule is enforced in ONE place — _select_core_picks — and everything
+    downstream keys off the resulting tier. These tests check both halves: that
+    the tier comes out Extended, and that each downstream consumer really does
+    filter on the tier rather than on something that merely correlates with it.
+    """
+
+    @staticmethod
+    def _picks(n_club=8, n_nl=4):
+        out = [{"league": "Premier League", "match": f"C{i} vs D{i}",
+                "bet_type": "Match Winner", "odds": 2.0} for i in range(n_club)]
+        out += [{"league": NL, "match": f"N{i} vs M{i}",
+                 "bet_type": "Match Winner", "odds": 2.0} for i in range(n_nl)]
+        return out
+
+    def _select(self, picks):
+        # The Core selection call is a network call; the deterministic fallback
+        # is the same ordering the real path uses when it fails.
+        with mock.patch.object(M, "_select_core_with_claude", return_value=None):
+            return M._select_core_picks(picks)
+
+    def test_a_nations_league_pick_is_never_core(self):
+        ordered = self._select(self._picks())
+        for p in ordered:
+            if p["league"] == NL:
+                self.assertEqual(p["pick_tier"], M.PICK_TIER_EXTENDED, p["match"])
+                self.assertIsNone(p["rank"])
+
+    def test_it_does_not_consume_a_core_slot(self):
+        # The point of filtering BEFORE selection rather than demoting after:
+        # the book stays five deep, it does not silently shrink.
+        ordered = self._select(self._picks(n_club=8, n_nl=4))
+        core = [p for p in ordered if p["pick_tier"] == M.PICK_TIER_CORE]
+        self.assertEqual(len(core), M.CORE_PICKS_PER_RUN)
+        self.assertTrue(all(p["league"] != NL for p in core))
+
+    def test_a_slate_that_is_only_nations_league_produces_no_core_at_all(self):
+        # A real and expected day: an international break stops club football,
+        # so this competition can be the entire slate. Everything still gets a
+        # tier, and nothing is dropped.
+        picks = self._picks(n_club=0, n_nl=6)
+        ordered = self._select(picks)
+        self.assertEqual(len(ordered), 6)
+        self.assertTrue(all(p["pick_tier"] == M.PICK_TIER_EXTENDED for p in ordered))
+
+    def test_it_is_never_offered_to_the_core_selection_call(self):
+        # Filtered out before the call, so the model cannot rank a bet it is
+        # not allowed to choose.
+        with mock.patch.object(M, "_select_core_with_claude", return_value=None) as sel:
+            M._select_core_picks(self._picks())
+        candidates = sel.call_args[0][0]
+        self.assertTrue(all(p["league"] != NL for p in candidates))
+
+    def test_every_pick_still_survives_the_selection(self):
+        picks = self._picks()
+        ordered = self._select(picks)
+        self.assertEqual(len(ordered), len(picks))
+        self.assertEqual({id(p) for p in ordered}, {id(p) for p in picks})
+
+    def test_an_extended_pick_gets_no_stake_on_its_embed(self):
+        # The Stake field is Core-gated, which is what makes "no Core" mean
+        # "no stake" without a second league check anywhere.
+        pick = {"league": NL, "match": "Netherlands vs Germany",
+                "bet_type": "Match Winner", "pick": "Netherlands Win", "odds": 2.45,
+                "confidence": "Medium", "league_rank": 1,
+                "pick_tier": M.PICK_TIER_EXTENDED, "kelly": {"stake": 85.0}}
+        embed = M._discord_pick_embed(pick)
+        self.assertNotIn("Stake", [f["name"] for f in embed["fields"]])
+        self.assertIn("EXTENDED", embed["author"]["name"])
+
+    def test_the_shadow_applies_the_same_probation(self):
+        # The shadow's whole value is Core-vs-Core; if its Core could hold a
+        # competition production's cannot, the two series stop comparing.
+        import opus_shadow
+        self.assertIn(
+            "EXTENDED_ONLY_COMPETITIONS",
+            io.open(opus_shadow.__file__, encoding="utf-8").read(),
+        )
+
+
+class ExtendedRowsReachNoCoreReport(unittest.TestCase):
+    """calibration, edge and CLV all read through _core_rows — verified, not assumed."""
+
+    def setUp(self):
+        import excel_tracker as et
+        self.et = et
+        self.H = list(et.PICKS_HEADERS)
+        self.i = {name: n for n, name in enumerate(self.H)}
+
+    def _row(self, tier, league=NL, result="WIN"):
+        r = [""] * len(self.H)
+        r[self.i["Date"]] = "24-Sep-2026"
+        r[self.i["Match"]] = "Netherlands vs Germany"
+        r[self.i["Bet Type"]] = "Match Winner"
+        r[self.i["Pick"]] = "Netherlands Win"
+        r[self.i["Odds"]] = "2.45"
+        r[self.i["Result"]] = result
+        r[self.i["Profit/Loss"]] = "1.45"
+        r[self.i["Claude Prob %"]] = "44"
+        r[self.i["Market Prob %"]] = "41"
+        r[self.i["League"]] = league
+        r[self.i["Pick Tier"]] = tier
+        return r
+
+    def test_core_rows_drops_the_extended_nations_league_row(self):
+        rows = [self._row(self.et.PICK_TIER_EXTENDED),
+                self._row(self.et.PICK_TIER_CORE, league="Premier League")]
+        kept = self.et._core_rows(rows, self.H)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0][self.i["League"]], "Premier League")
+
+    def test_calibration_edge_and_clv_see_only_core(self):
+        import calibration
+        rows = [self.H,
+                self._row(self.et.PICK_TIER_EXTENDED),
+                self._row(self.et.PICK_TIER_CORE, league="Premier League")]
+        ws = mock.Mock()
+        ws.get_all_values.return_value = rows
+
+        seen = calibration._settled_prob_rows(ws_getter=lambda: ws)
+        self.assertEqual(len(seen), 1, "calibration_report and edge_report share this reader")
+
+        clv = calibration.clv_report(ws_getter=lambda: ws)
+        self.assertIsNotNone(clv)
+        self.assertLessEqual(clv.get("picks", 0), 1)
+
+    def test_it_still_shows_up_in_the_extended_breakdown(self):
+        # The point of tracking it apart rather than hiding it: this row is the
+        # evidence the probation gets reviewed on.
+        rows = [self._row(self.et.PICK_TIER_EXTENDED),
+                self._row(self.et.PICK_TIER_CORE, league="Premier League")]
+        ext = self.et._extended_rows(rows, self.H)
+        self.assertEqual(len(ext), 1)
+        self.assertEqual(ext[0][self.i["League"]], NL)
 
 
 class OddsApiTeamAliases(unittest.TestCase):

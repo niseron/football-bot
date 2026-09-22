@@ -289,6 +289,37 @@ MAX_PICKS_PER_LEAGUE = 10
 # selected explicitly by _select_core_picks() instead.
 CORE_PICKS_PER_RUN = 5
 
+# Competitions that may NEVER be promoted to Core, whatever their conviction.
+#
+# This is a probation list, not a quality judgement on the individual bets: a
+# pick here is still a bet the model judged worth placing, and it is logged,
+# settled, and posted to its league channel exactly like any other Extended pick.
+# What it does not do is enter the staked book, move the bankroll, or join the
+# calibration series.
+#
+# Nations League, added 22 Sep 2026 on the day the competition shipped. The
+# reason is that its picks are made on a measurably different information base:
+# form enrichment for national teams is EMPTY, not thin (0 of 52 teams had a
+# single match inside FORM_LOOKBACK_DAYS on the 24-26 Sep matchday), so these
+# bets are priced on squad quality and market knowledge alone. Folding that into
+# a Core series running unbroken since 30 Jun 2026 would move the measured
+# calibration curve without the model having changed, and the bankroll would be
+# staking a profile nothing has measured yet.
+#
+# Being Extended is what produces the evidence to lift this: the Summary tab's
+# EXTENDED LEAGUE BREAKDOWN gives the competition its own settled row, tracked
+# apart from Core the whole time. Revisit when that row carries a sample worth
+# reading; until then removing an entry here is a decision, not a cleanup.
+#
+# Enforced in exactly one place — _select_core_picks(), which filters candidates
+# BEFORE the selection call. Everything downstream already keys off the tier
+# (no Kelly stake, no card, no running total, and calibration/edge/CLV all read
+# through excel_tracker._core_rows), so there is no second check to add and none
+# should be added — a parallel league test is how the two drift apart.
+EXTENDED_ONLY_COMPETITIONS: frozenset[str] = frozenset({
+    "Nations League",
+})
+
 # Regex to identify youth-team suffixes  e.g. "U19", "U-21", "U 23"
 _YOUTH_RE = re.compile(r"\bU[\s-]?1[5-9]\b|\bU[\s-]?2[0-3]\b|youth|junior", re.IGNORECASE)
 
@@ -1952,17 +1983,34 @@ def _select_core_picks(picks: list[dict]) -> list[dict]:
     Core is deliberately ordered first: excel_tracker's logging guard allows one
     open bet per fixture, so if a fixture somehow carries two picks, the Core one
     is the one that reaches the sheet.
+
+    A pick from an EXTENDED_ONLY_COMPETITIONS competition is never a candidate.
+    It is filtered out BEFORE the selection call rather than demoted after it, so
+    the model never ranks a bet it cannot choose and the Core five are genuinely
+    the best five of the eligible slate — demoting afterwards would silently
+    shrink the book instead, because the excluded pick would have taken a slot.
     """
     if not picks:
         return []
 
-    n_core = min(CORE_PICKS_PER_RUN, len(picks))
-    if len(picks) <= CORE_PICKS_PER_RUN:
-        # Every pick is Core anyway — the only open question is their order, and
-        # that is not worth a model call.
-        core = _deterministic_core_order(picks)
+    eligible = [p for p in picks if p.get("league") not in EXTENDED_ONLY_COMPETITIONS]
+
+    if not eligible:
+        # Every pick on the slate is from a competition on probation. That is a
+        # real and expected day, not a failure: an international break stops club
+        # football entirely, so the Nations League can be the whole slate. The run
+        # still logs, posts and settles — it just stakes nothing.
+        core: list[dict] = []
+    elif len(eligible) <= CORE_PICKS_PER_RUN:
+        # Every eligible pick is Core anyway — the only open question is their
+        # order, and that is not worth a model call.
+        core = _deterministic_core_order(eligible)
     else:
-        core = _select_core_with_claude(picks, n_core) or _deterministic_core_order(picks)[:n_core]
+        n_core = min(CORE_PICKS_PER_RUN, len(eligible))
+        core = (
+            _select_core_with_claude(eligible, n_core)
+            or _deterministic_core_order(eligible)[:n_core]
+        )
 
     core_ids = {id(p) for p in core}
     for i, pick in enumerate(core, 1):
@@ -2303,14 +2351,28 @@ async def daily_picks_job():
     # per-pick embeds below already carry in richer form, and its one piece of
     # unique content — the Kelly stake — moved into the Core embed itself.
     card = None
-    try:
-        # Core only, passed explicitly: generate_picks_card also slices to 5
-        # internally, but relying on that would make the card's contents an
-        # accident of ordering rather than a stated choice.
-        card = generate_picks_card(core_picks, session="morning")
-        log.info("Picks card generated: %s", card.name)
-    except Exception as exc:
-        log.warning("Picks card failed (non-fatal): %s", exc)
+    if not core_picks:
+        # generate_picks_card([]) does not fail — it renders the header over empty
+        # space, which reads as "the bot found nothing today" on a day it may have
+        # found plenty. Since 22 Sep 2026 that is a routine outcome rather than a
+        # freak one: an international break leaves the Nations League as the entire
+        # slate, and it is EXTENDED_ONLY, so an empty Core list means "nothing
+        # staked today", not "nothing found". Posting nothing is the honest option;
+        # the picks themselves still reach their league channel and the sheet.
+        log.info(
+            "No Core picks today — skipping the picks card; %d Extended pick(s) "
+            "still go to their league channels and the sheet",
+            len(extended_picks),
+        )
+    else:
+        try:
+            # Core only, passed explicitly: generate_picks_card also slices to 5
+            # internally, but relying on that would make the card's contents an
+            # accident of ordering rather than a stated choice.
+            card = generate_picks_card(core_picks, session="morning")
+            log.info("Picks card generated: %s", card.name)
+        except Exception as exc:
+            log.warning("Picks card failed (non-fatal): %s", exc)
 
     # Discord delivery — the only delivery; send_to_discord never raises.
     # Both tiers post to their league channel; the embed marks which is which.
@@ -2355,18 +2417,24 @@ async def daily_picks_job():
         except Exception as inner:
             log.debug("failure alert skipped: %s", inner)
 
-    try:
-        ig_card = generate_picks_card_ig(core_picks)
-        log.info("Instagram picks card saved: %s", ig_card.name)
-        # Same 'picks-cards' channel as the regular card, intentional (both card
-        # variants land in one place). Until 18 Aug 2026 this card ALSO went to a
-        # dedicated Telegram channel (TELEGRAM_IG_CHANNEL_ID) used for sourcing
-        # Instagram posts; that destination is gone, and the card is now pulled
-        # from Discord instead. It is still generated and saved to cards/ either
-        # way, so nothing about the artefact itself changed.
-        send_to_discord("picks-cards", image_path=ig_card)
-    except Exception as exc:
-        log.warning("Instagram picks card failed (non-fatal): %s", exc)
+    if not core_picks:
+        # Same reason the regular card is skipped above — an empty Core book
+        # renders as a header over empty space. Written as if/else rather than an
+        # early return so that anything appended to this job later still runs.
+        log.info("No Core picks today — skipping the Instagram card too")
+    else:
+        try:
+            ig_card = generate_picks_card_ig(core_picks)
+            log.info("Instagram picks card saved: %s", ig_card.name)
+            # Same 'picks-cards' channel as the regular card, intentional (both
+            # card variants land in one place). Until 18 Aug 2026 this card ALSO
+            # went to a dedicated Telegram channel (TELEGRAM_IG_CHANNEL_ID) used
+            # for sourcing Instagram posts; that destination is gone, and the card
+            # is now pulled from Discord instead. It is still generated and saved
+            # to cards/ either way, so nothing about the artefact itself changed.
+            send_to_discord("picks-cards", image_path=ig_card)
+        except Exception as exc:
+            log.warning("Instagram picks card failed (non-fatal): %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ from excel_tracker import (
     kelly_odds_for_pick,
 )
 from card_generator import generate_picks_card, generate_picks_card_ig
-from discord_bot import build_pick_embed, send_to_discord
+from discord_bot import DISCORD_CHANNELS, build_pick_embed, send_to_discord
 
 load_env()
 
@@ -1690,6 +1690,72 @@ def _notify_picks_failed(reason: str, detail: str = "") -> None:
         log.error("Could not deliver picks-failed alert to Discord ('picks-cards')")
 
 
+def _channel_mention(channel_key: str) -> str | None:
+    """
+    A clickable Discord channel link for a DISCORD_CHANNELS_JSON key, or None
+    when that key is not configured. `<#id>` renders as #channel-name in the
+    client, so the reader can jump straight there instead of hunting for it.
+    """
+    channel_id = DISCORD_CHANNELS.get(channel_key)
+    return f"<#{channel_id}>" if channel_id else None
+
+
+def _notify_no_core_picks(extended: list[dict], analysed: int) -> None:
+    """
+    Say SOMETHING in 'picks-cards' on a day that stakes nothing.
+
+    The card is that channel's only regular content and it is Core-only, so a
+    day with no Core picks used to post nothing at all — and an empty channel is
+    indistinguishable from a failed run. That stopped being a freak outcome on
+    22 Sep 2026: an international break stops club football and leaves the
+    Nations League as the whole slate, and it is EXTENDED_ONLY, so a perfectly
+    healthy run can stake nothing.
+
+    Deliberately NOT shaped like _notify_picks_failed — no warning sign, no
+    "Check logs". The whole job of this message is to say the run worked, so it
+    must not be mistakable for the alert that says it did not.
+
+    Delivery is checked for the same reason that one checks it: an undelivered
+    "all is well" leaves exactly the silence it exists to break.
+    """
+    if extended:
+        by_league: dict[str, int] = {}
+        for pick in extended:
+            league = pick.get("league") or "other competitions"
+            by_league[league] = by_league.get(league, 0) + 1
+        where = ", ".join(
+            _channel_mention(DISCORD_LEAGUE_CHANNEL_KEYS.get(league, "")) or league
+            for league, _n in sorted(by_league.items(), key=lambda kv: -kv[1])
+        )
+        n = len(extended)
+        text = (
+            f"📋 **No staked picks today.**\n"
+            f"{n} unstaked pick{'' if n == 1 else 's'} "
+            f"{'is' if n == 1 else 'are'} posted in {where} — "
+            f"no stake, and outside the running total."
+        )
+    elif analysed == 0:
+        # A real answer, not a gap: the prompt forbids padding, so a slate where
+        # nothing clears the bar returns nothing.
+        text = (
+            "📋 **No picks today.**\n"
+            "Today's fixtures were analysed and none met the bar. Nothing failed."
+        )
+    else:
+        # Picks were made but every one was withheld as already tracked — the
+        # 48-hour window offers a fixture on two consecutive days and the book
+        # carries one open bet per fixture. Saying "no picks" here would be
+        # wrong; saying nothing would be the silence this function exists for.
+        text = (
+            "📋 **No new picks today.**\n"
+            "Everything today's fixtures produced is already on the book from an "
+            "earlier run."
+        )
+
+    if not send_to_discord("picks-cards", message=text):
+        log.error("Could not deliver the no-staked-picks note to Discord ('picks-cards')")
+
+
 def _notify_sheet_write_gap(job: str, result, attempted: int) -> None:
     """
     Raise the alarm when picks were delivered but did not all reach the Sheet.
@@ -2361,7 +2427,8 @@ async def daily_picks_job():
         # the picks themselves still reach their league channel and the sheet.
         log.info(
             "No Core picks today — skipping the picks card; %d Extended pick(s) "
-            "still go to their league channels and the sheet",
+            "still go to their league channels and the sheet, and 'picks-cards' "
+            "gets a short note instead so the silence is not read as a failure",
             len(extended_picks),
         )
     else:
@@ -2384,6 +2451,12 @@ async def daily_picks_job():
     try:
         if card is not None:
             send_to_discord("picks-cards", image_path=card)
+        elif not core_picks:
+            # In place of the card, never alongside it. `card is None` with a
+            # non-empty Core book means generation failed, which is not this
+            # message's business — hence the explicit re-check rather than a
+            # bare else.
+            _notify_no_core_picks(extended_picks, analysed=len(picks))
         sent = 0
         for pick in publishable:
             channel_key = DISCORD_LEAGUE_CHANNEL_KEYS.get(pick.get("league", ""))

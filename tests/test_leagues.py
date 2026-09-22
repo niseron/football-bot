@@ -271,6 +271,82 @@ class ExtendedOnlyProbation(unittest.TestCase):
         )
 
 
+class NoCorePicksNote(unittest.TestCase):
+    """A day that stakes nothing must still say so in picks-cards.
+
+    The card is that channel's only regular content and it is Core-only, so
+    before 22 Sep 2026 a no-Core day posted nothing — and an empty channel reads
+    exactly like a failed run. These tests pin the three things that matter: it
+    goes out, it says the right thing for the situation, and it can never be
+    mistaken for the failure alert.
+    """
+
+    def _send(self, extended, analysed, delivered=True):
+        with mock.patch.object(M, "send_to_discord", return_value=delivered) as snd:
+            M._notify_no_core_picks(extended, analysed=analysed)
+        self.assertEqual(snd.call_count, 1)
+        return snd.call_args[0][0], snd.call_args[1]["message"]
+
+    def test_it_posts_to_picks_cards(self):
+        channel, _ = self._send([{"league": NL}], analysed=1)
+        self.assertEqual(channel, "picks-cards")
+
+    def test_it_links_the_channel_the_unstaked_picks_are_in(self):
+        # A clickable <#id>, not the bare competition name — the reader should
+        # not have to go hunting for where the picks actually went.
+        _, msg = self._send([{"league": NL}] * 8, analysed=8)
+        self.assertIn(f"<#{M.DISCORD_CHANNELS['nations-league']}>", msg)
+        self.assertIn("8 unstaked picks", msg)
+        self.assertIn("no stake", msg)
+
+    def test_it_names_every_competition_that_has_picks(self):
+        _, msg = self._send(
+            [{"league": NL}] * 8 + [{"league": "Conference League"}] * 2, analysed=10)
+        self.assertIn(f"<#{M.DISCORD_CHANNELS['nations-league']}>", msg)
+        self.assertIn(f"<#{M.DISCORD_CHANNELS['conference-league']}>", msg)
+
+    def test_it_falls_back_to_the_name_when_no_channel_is_configured(self):
+        # An unconfigured key must not render as a broken mention or vanish.
+        with mock.patch.dict(M.DISCORD_CHANNELS, clear=True):
+            _, msg = self._send([{"league": NL}], analysed=1)
+        self.assertIn(NL, msg)
+        self.assertNotIn("<#", msg)
+
+    def test_singular_reads_as_singular(self):
+        _, msg = self._send([{"league": NL}], analysed=1)
+        self.assertIn("1 unstaked pick is", msg)
+
+    def test_a_genuinely_empty_slate_says_nothing_failed(self):
+        # The prompt forbids padding, so an empty answer is a real answer — and
+        # this is the case most easily mistaken for an outage.
+        _, msg = self._send([], analysed=0)
+        self.assertIn("none met the bar", msg)
+        self.assertIn("Nothing failed", msg)
+
+    def test_picks_all_withheld_as_already_tracked_says_so_instead(self):
+        # Claiming "no picks" here would be false: picks were made, the 48-hour
+        # window just means the book already holds them.
+        _, msg = self._send([], analysed=6)
+        self.assertIn("already on the book", msg)
+        self.assertNotIn("none met the bar", msg)
+
+    def test_it_never_looks_like_the_failure_alert(self):
+        # _notify_picks_failed owns the same channel. This message exists to say
+        # the run WORKED, so it must not borrow the alert's vocabulary.
+        for extended, analysed in (([{"league": NL}], 1), ([], 0), ([], 6)):
+            _, msg = self._send(extended, analysed)
+            self.assertNotIn("⚠️", msg)
+            self.assertNotIn("Check logs", msg)
+            self.assertNotIn("failed today", msg)
+
+    def test_undelivered_is_logged_as_an_error(self):
+        # An undelivered "all is well" leaves exactly the silence it exists to
+        # break, so it cannot be fire-and-forget.
+        with self.assertLogs(M.log, level="ERROR") as caught:
+            self._send([{"league": NL}], analysed=1, delivered=False)
+        self.assertTrue(any("picks-cards" in line for line in caught.output))
+
+
 class ExtendedRowsReachNoCoreReport(unittest.TestCase):
     """calibration, edge and CLV all read through _core_rows — verified, not assumed."""
 

@@ -90,7 +90,9 @@ and the calibration/edge/CLV reports.
 (22 Sep 2026, currently Nations League). Its picks are tagged Extended whatever
 their conviction, which is how a competition earns a settled sample of its own
 before it is allowed to move the bankroll or the calibration curve. That can leave
-a day with ZERO Core picks; the card is then skipped rather than posted empty.
+a day with ZERO Core picks; the card is then skipped rather than posted empty, and
+`_notify_no_core_picks()` posts a short note so `picks-cards` is never silent on a
+healthy run.
 
 The weekly summary TEXT is the one exception (1 Sep 2026): it reports Extended in its
 own labelled section **beside** Core, never merged in. `get_weekly_data()` keeps the
@@ -254,6 +256,15 @@ reviewed on. Removing the entry is a decision, not a cleanup.
   it renders the header over empty space, which reads as "found nothing today" on a day
   the bot found plenty — so the picks card AND the Instagram card are skipped when
   `core_picks` is empty. Do not "restore" the card there.
+- **But the channel must not go silent**: `_notify_no_core_picks()` posts a short note
+  in the card's place, because an empty channel is indistinguishable from a failed run
+  — the same ambiguity that hid three dead slates in Aug 2026. It must never look like
+  `_notify_picks_failed` (no warning sign, no "Check logs"): its job is to say the run
+  WORKED. It checks its own delivery for the same reason that alert does, and it has
+  three true forms — unstaked picks exist (links the channels they are in), no picks at
+  all ("none met the bar. Nothing failed."), and picks made but all withheld as already
+  tracked ("already on the book from an earlier run"). Keep all three; collapsing them
+  means the message is wrong on two days out of three.
 - **The Opus shadow inherits this one constant**, deliberately: its value is
   Core-vs-Core, and otherwise production would post 0 Core on an international break
   while the shadow posted 5. It costs nothing (same single call, same caps) — unlike

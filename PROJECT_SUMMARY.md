@@ -164,7 +164,7 @@ Delivery via `discord_bot.py` — no changes to pick generation or calibration. 
 
 | Key | Content | Sent from |
 |---|---|---|
-| `picks-cards` | Daily picks PNG card, **plus** the Instagram-variant card (`generate_picks_card_ig`) — both land in this same channel every run (since 11 Jul 2026, intentional) | `main.py` (after the Telegram card send; IG card sent right after its optional `TELEGRAM_IG_CHANNEL_ID` send) |
+| `picks-cards` | Daily picks PNG card, **plus** the Instagram-variant card (`generate_picks_card_ig`) — both land in this same channel every run (since 11 Jul 2026, intentional). On a day with **no Core picks** neither card is posted and `_notify_no_core_picks()` posts a short note instead (22 Sep 2026), so the channel is never silent on a healthy run. Also carries the picks-failed alert | `main.py` (after the Telegram card send; IG card sent right after its optional `TELEGRAM_IG_CHANNEL_ID` send) |
 | `results-cards` | **Core** football result notifications (text, with the `P&L: ±x.xx units` line) from the 30-min automatic trigger; plus the results PNG card when the manual football `--results` path runs. Core-only since 20 Sep 2026 — see `extended-results` | `run_all.py` `live_results_check` / `auto_results.py --live` / `auto_results.py --results` |
 | `extended-results` | **Extended** football result notifications (text) from the same 30-min trigger, same dedup — verdict (WIN / LOSS / VOID / HALF …) and score ONLY, **no P&L, bankroll or unit figure**: an Extended pick carries no stake, so units would read as money bet. Routed by `auto_results.result_notification()` off the row's `Pick Tier` (added 20 Sep 2026) | `run_all.py` `live_results_check` / `auto_results.py --live` |
 | `weekly-cards` | Weekly summary PNG card | `weekly_summary.py` |
@@ -537,8 +537,23 @@ Two consequences worth knowing:
   run still logs, posts and settles; it just stakes nothing. `generate_picks_card([])`
   does not fail, it renders the header over empty space, which would read as "the bot
   found nothing today" on a day it found plenty — so **the picks card and the
-  Instagram card are now skipped entirely when there are no Core picks**, rather than
-  posting an empty one.
+  Instagram card are skipped entirely when there are no Core picks**, and
+  `_notify_no_core_picks()` posts a short note in their place. Posting nothing was the
+  first answer and it was the wrong one: an empty channel is indistinguishable from a
+  failed run, which is the exact ambiguity that let three dead slates pass unnoticed in
+  Aug 2026. The note is deliberately NOT shaped like `_notify_picks_failed` — no
+  warning sign, no "Check logs" — because its whole job is to say the run worked, and
+  it checks its own delivery for the same reason that alert does. It has three forms,
+  and picks the true one:
+
+  | Situation | What it says |
+  |---|---|
+  | Core empty, Extended picks exist | "No staked picks today" + how many, linked to the channel(s) they are in as clickable `<#id>` mentions, + "no stake, and outside the running total" |
+  | No picks at all | "No picks today — today's fixtures were analysed and none met the bar. **Nothing failed.**" |
+  | Picks made but all withheld as already tracked | "No new picks today — everything today's fixtures produced is already on the book from an earlier run" |
+
+  The third exists because the 48-hour window offers a fixture on two consecutive days
+  and the book carries one open bet per fixture, so "no picks" would be false there.
 - **The Opus 5 shadow honours the same list** (`opus_shadow.analyse_with_opus`). It is
   the one production constant the shadow deliberately inherits, and the experiment is
   the reason: its whole value is Core-vs-Core, so if its Core could hold a competition

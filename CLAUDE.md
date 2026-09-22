@@ -24,7 +24,8 @@ already carry the same picks in richer form.
 `DISCORD_CHANNELS_JSON`, a single-line JSON dict mapping the keys
 `picks-cards`, `results-cards`, `extended-results`, `weekly-cards`, `premier-league`,
 `jupiler-pro-league`, `world-cup`, `bundesliga`, `la-liga`, `serie-a`,
-`ligue-1`, `champions-league`, `europa-league`, `conference-league`, `tennis-picks`, `tennis-picks-lower`,
+`ligue-1`, `champions-league`, `europa-league`, `conference-league`, `nations-league`,
+`tennis-picks`, `tennis-picks-lower`,
 `tennis-results`, `usage` to Discord channel IDs. Fail-silent: `send_to_discord()` never raises, and any
 missing token/key skips that piece without touching the rest of the flow.
 
@@ -153,8 +154,15 @@ unchanged. Details in PROJECT_SUMMARY.md, "Ranked picks and the Core/Extended sp
 fixture pool `daily_picks_job` just used (no second RapidAPI fetch). **The model
 stopped being the only variable on 15 Aug 2026:** production went per-competition
 while the shadow deliberately stayed ONE whole-slate call capped at 10, on its own
-frozen `OPUS_MAX_PICKS_PER_RUN` / `OPUS_CORE_PICKS_PER_RUN` and the unchanged
-`main.SYSTEM_PROMPT` (byte-identical to the pre-change prompt). Both models still
+frozen `OPUS_MAX_PICKS_PER_RUN` / `OPUS_CORE_PICKS_PER_RUN` and `main.SYSTEM_PROMPT`.
+**That prompt stopped being byte-identical to the pre-15-Aug one on 22 Sep 2026**,
+when the Nations League was named in both heads and a national-team paragraph was
+added to the shared body. That was deliberate and is not a drift to undo: the shadow
+reads the same enriched fixture pool production does, so it now sees Nations League
+fixtures whose form context is empty, and a prompt that did not name the competition
+or explain the empty enrichment would have made the shadow worse on them, not more
+comparable. Core-vs-Core still means something because BOTH prompts changed in the
+same way, in `_PROMPT_BODY` and in matching heads — keep it that way. Both models still
 answer "the best 5 bets in this pool", so Core-vs-Core still means something — but
 the harness differs, and fanning the shadow out would take it from ~$4.29 to
 ~$17-25/month. Do not change that by inheriting a production constant; re-cost first. Picks go to the `Opus Shadow Picks` tab and the
@@ -193,6 +201,42 @@ the harness differs, and fanning the shadow out would take it from ~$4.29 to
   than guessing a rate.
 
 Details in PROJECT_SUMMARY.md, "Claude Opus 5 shadow experiment".
+
+## Nations League — the first national-team competition (22 Sep 2026)
+
+On the parent-resolution path, never `LEAGUES`: every group id resolves to its
+**tier's** parent (`9806` A / `9807` B / `9808` C / `9809` D) rather than to itself,
+and there is no single competition id above the four. Its feed id is also not *one*
+id — all fourteen groups carry their own, seeded as `920741`-`920754`.
+
+Two things about it break assumptions that hold for every club competition:
+
+- **`ROSTER_PARENTS` does not work for national teams.** `_roster_team_ids()` reads
+  `football-get-all-matches-by-league`, which answers 0 matches for all four parents.
+  Discovery therefore ranks these blocks by team NAME, via `NATION_ROSTERS` /
+  `UEFA_NATIONS`, and the ranking scores each block against both kinds of roster and
+  keeps the better one. This is not optional polish: a group plays two matches a
+  matchday, so measured on the live 3-4 Oct 2026 window its blocks ranked **#90-#112
+  of 114** by fixture count against a 12-lookup cap — the Jupiler failure mode, worse.
+  With the name roster they rank **#1-#9**. `tests/test_leagues.py` pins the ordering
+  *and* the negative control; do not delete either half.
+- **Form enrichment is empty, not thin.** Measured 22 Sep 2026 over the real 24-26 Sep
+  pool: **0 of 52 teams** had a single match inside `FORM_LOOKBACK_DAYS = 35`. National
+  sides play ~10 matches a year and the previous window was the World Cup, 65 days
+  back. Both prompt heads' shared body now states this outright — that the absence is
+  the calendar and not a signal about the teams, that `h2h` may be seasons old, and
+  that it means *lower* conviction and fewer picks. Never present a Nations League
+  pick as form-backed, and do not widen `FORM_LOOKBACK_DAYS` to chase it: reaching the
+  World Cup would take ~120 days and drag in a tournament played under other
+  conditions.
+
+The Odds API **does** cover it — `soccer_uefa_nations_league`, active, one key for all
+four tiers, no qualifying gap. 25 of 26 live fixtures matched; the one name failure
+(Czechia vs the API's "Czech Republic") is fixed by `_TEAM_ALIASES`, a whole-name exact
+substitution. Keep it whole-name: keyed on the entire name it cannot widen a partial
+match, which is what keeps the 23 Aug 2026 Club Brugge mispricing shut. One fixture,
+Albania vs Belarus, is simply not offered by the books and falls back to estimated
+odds, as designed.
 
 ## Duplicate Logging Guard (13 Aug 2026)
 
@@ -324,7 +368,11 @@ every form, the Draw fold, extra time, two-legged margins), `_find_api_match`
 (senior beats youth, exact beats containment, ambiguity refuses) and the
 PENDING reason, plus `run_auto_results` end to end on row 357 with the feed
 stubbed. `tests/test_staking.py` pins Kelly sizing (exact €0 below break-even,
-the 5% and 15% caps, the market-odds basis, the club-only sample). Pure — no
+the 5% and 15% caps, the market-odds basis, the club-only sample).
+`tests/test_leagues.py` pins how a competition is registered and, above all, the
+discovery RANKING that decides whether a small competition is ever found at all —
+each ordering test carries the negative control that fails without the mechanism.
+It also pins the Odds API name aliases. Pure — no
 network, no Sheets, no Discord. Run from `football-bot/`:
 
 ```

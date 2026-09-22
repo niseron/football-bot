@@ -13,7 +13,7 @@ An automated football betting analysis bot that:
 - Posts a weekly performance summary every Monday at 09:05 Brussels time with a PNG card
 - Tracks all picks and P&L in a Google Sheet with conditional formatting, a Picks tab and a Summary tab
 
-Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), UEFA Champions League (added 4 Aug 2026 — qualifying rounds, league phase and knockouts; **already producing fixtures**, Q3 is under way), UEFA Conference League (added 30 Jul 2026, same three stages), and FIFA World Cup 2026 (ended 19 Jul 2026). Both UEFA competitions and the Jupiler Pro League are matched by stable parent id rather than a pinned feed id — see "Parent-id leagueId resolution" below.
+Covered competitions: Premier League, Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1 (the last four added 19 Jul 2026; their 2026-27 seasons open 15-28 Aug 2026, so they produce no fixtures before then), UEFA Champions League (added 4 Aug 2026 — qualifying rounds, league phase and knockouts; **already producing fixtures**, Q3 is under way), UEFA Conference League (added 30 Jul 2026, same three stages), UEFA Nations League (added 22 Sep 2026 — all four tiers A-D, first matchday in the window 24-26 Sep 2026), and FIFA World Cup 2026 (ended 19 Jul 2026). The three UEFA club competitions, the Nations League and the Jupiler Pro League are all matched by stable parent id rather than a pinned feed id — see "Parent-id leagueId resolution" below.
 
 ⚠️ **The Jupiler Pro League produced zero picks from the initial commit until 8 Aug 2026.** It was pinned in `LEAGUES` as leagueId `900433`, which the live feed never returns — the Belgian fixtures carry a season-scoped id (`937988` in 2026-27, parent `40`). `partition_fixtures()` therefore matched nothing for it on every run, so its fixtures were never fetched, never analysed and never rejected: the pipeline simply never saw them. Confirmed 8 Aug 2026 against the Google Sheet's Picks tab — 187 logged picks, **0 with League = Jupiler Pro League** (164 FIFA World Cup 2026, 21 Conference League, 2 Friendlies). Fixed 8 Aug 2026 by moving Belgium onto the parent-resolution path. Consequence for calibration: there is no Belgian sample at all, and the League Breakdown's Jupiler row reading zero is a real absence of data, not variance.
 
@@ -178,6 +178,7 @@ Delivery via `discord_bot.py` — no changes to pick generation or calibration. 
 | `champions-league` | Each Champions League pick as an embed (tracked since 4 Aug 2026; live immediately — Q3 fixtures were already in the 48h window that day) | `main.py` |
 | `conference-league` | Each Conference League pick as an embed (key added 12 Aug 2026; channel id `1537177968999268444` mapped and verified reachable 13 Aug 2026) | `main.py` |
 | `europa-league` | Each Europa League pick as an embed (tracked since 13 Aug 2026; live immediately — 12 Q3 fixtures were already in the 48h window that day). Channel id `1537453739252908123`, verified reachable 13 Aug 2026 | `main.py` |
+| `nations-league` | Each UEFA Nations League pick as an embed (tracked since 22 Sep 2026; live two days later — the 24-26 Sep matchday was the first the pipeline saw). Channel id `1552041023314731058`, verified reachable 22 Sep 2026 via a read-only `GET /channels` as the bot | `main.py` |
 | `tennis-picks` | **TENNIS (Discord-only)** — dated header (text) + each TOP-TIER tennis pick as an embed (both players inside `TENNIS_RANK_THRESHOLD`) at 12:30 Brussels, plus the picks-failed alert, plus the branded daily tennis picks PNG card (`generate_tennis_picks_card`, all of the day's picks across both tiers — added 11 Jul 2026) | `tennis_main.py` |
 | `tennis-picks-lower` | **TENNIS (Discord-only)** — dated header (text) + each LOWER-TIER tennis pick as an embed (either player outside the threshold, or unranked). *New key 10 Jul 2026 — awaiting a Discord channel ID; until it is added to `DISCORD_CHANNELS_JSON`, lower-tier picks are skipped silently (still logged to Sheets).* | `tennis_main.py` |
 | `tennis-results` | **TENNIS (Discord-only)** — each settled tennis pick's result text from the 30-min automatic checker | `run_all.py` `tennis_live_results_check` |
@@ -304,7 +305,7 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 - Duplicate pick prevention (won't re-post same pick same day)
 - Single daily job at 12:00 Brussels — evening picks job removed
 
-### Parent-id leagueId resolution (Conference League 30 Jul 2026; Champions League 4 Aug 2026; Jupiler Pro League 8 Aug 2026; Europa League 13 Aug 2026)
+### Parent-id leagueId resolution (Conference League 30 Jul 2026; Champions League 4 Aug 2026; Jupiler Pro League 8 Aug 2026; Europa League 13 Aug 2026; Nations League 22 Sep 2026)
 The by-date fixtures feed returns no competition name — only a `leagueId`, and for
 some competitions that id is **season-specific** (and for UEFA, stage-specific too).
 It rotates when qualifying ends and the league phase begins, and again every season,
@@ -322,9 +323,17 @@ Instead `partition_fixtures()` matches against the *stable* fotmob parent ids in
 | Champions League | `10611` | `42` |
 | Europa League | `10613` | `73` |
 | Conference League | `10615` | `10216` |
+| Nations League | — | `9806` A, `9807` B, `9808` C, `9809` D |
 
 - Fast path: any match whose `leagueId` is in `FEED_LEAGUE_IDS[competition]` (seeded
-  with `937988` / `937348` / `937349` / `937351`) is bucketed straight away — **zero extra API calls**.
+  with `937988` / `937348` / `937349` / `937351`, plus the Nations League's fourteen
+  group ids `920741`-`920754`) is bucketed straight away — **zero extra API calls**.
+- **The Nations League is the one competition whose feed id is not one id.** Every
+  group carries its own, and each resolves to its *tier's* parent rather than to a
+  single competition id: `920743` → `9806` (League A), `920745` → `9807` (B),
+  `920749` → `9808` (C), `920754` → `9809` (D). All fourteen were resolved
+  individually on 22 Sep 2026 — the range is contiguous but was not assumed to be,
+  since `920748` and `920753` only appear on matchdays the others skip.
 - Self-heal: only when some tracked competition yields nothing does
   `_discover_feed_ids()` run. It resolves unfamiliar `leagueId`s to their
   `parentLeagueId` via `football-get-match-detail` (one lookup per distinct id,
@@ -340,6 +349,26 @@ Instead `partition_fixtures()` matches against the *stable* fotmob parent ids in
   team ids appear in a missing competition's known roster, from `ROSTER_PARENTS`
   via `football-get-all-matches-by-league` — one cached call per parent), then by
   fixture count. That moved the Belgian block from #62 to **#1**.
+- **A national-team competition cannot be ranked that way at all**, which is why
+  `NATION_ROSTERS` exists beside `ROSTER_PARENTS` and the ranking scores a block
+  against both, keeping the better result. `_roster_team_ids()` reads
+  `football-get-all-matches-by-league`, and that endpoint answers **0 matches** for
+  all four Nations League parents (checked 22 Sep 2026) — so an id-based overlap
+  would be `0.00` for every block and the ranking would silently fall back to
+  fixture count. Which is fatal here: a group plays two matches on a matchday (one
+  for a group of three), so its block is among the *smallest* on the feed. Measured
+  on the live 3-4 Oct 2026 window — 114 unfamiliar ids, the nine Nations League
+  blocks ranked **#90 to #112**. That is the Jupiler failure mode again and worse;
+  Jupiler at least ranked #62. `NATION_ROSTERS` ranks by team **name** instead, and
+  names are the sturdier key: a national team is never promoted or relegated out of
+  existence and its feed name is fixed, so unlike a club roster it cannot go stale
+  between seasons. Women's sides carry a `(W)` suffix and so never collide.
+- One limit of the roster ranking, worth knowing before adding another competition
+  like this: a competition leaves `missing` — and so leaves the roster ranking — as
+  soon as **any** of its ids is known. A competition whose ids rotate as a *set*
+  therefore wants all of them found in one sweep. For the Nations League that holds
+  comfortably: at most nine of the fourteen groups play inside any 48-hour window,
+  against a cap of twelve.
 - Roster overlap only *ranks*; the `parentLeagueId` lookup still decides. That split
   matters: the roster is the parent's last completed season, so it misses promoted
   clubs — on 8 Aug 2026 parent `40` covered 13 of the 16 clubs in the 2026-27 Belgian
@@ -405,6 +434,89 @@ ones. Whether to backfill that gap with a supplementary run is the same call as
 30 Jul (see `_post_conference_league_jul30.py`); the mechanics that make it safe are
 in section 9.
 
+### Nations League added (22 Sep 2026)
+
+The first **national-team** competition tracked since the World Cup ended, and it
+behaves differently enough from a club competition to be worth reading before the
+next one is added. Live on the 24-26 Sep 2026 matchday, two days after the change.
+
+| Where | Added |
+|---|---|
+| `PARENT_RESOLVED_IDS` | `"Nations League": {9806, 9807, 9808, 9809}` — one parent per tier; there is no competition id above them, so omitting one drops a whole tier |
+| `FEED_LEAGUE_IDS` | all fourteen group ids, `920741`-`920754` (A1-A4, B1-B4, C1-C4, D1-D2) |
+| `NATION_ROSTERS` / `UEFA_NATIONS` | **new** — name-based discovery ranking, see below |
+| `ODDS_API_SPORT_KEYS` | `soccer_uefa_nations_league` — one key covers all four tiers, with no qualifying/main split |
+| `DISCORD_LEAGUE_CHANNEL_KEYS` | `"Nations League": "nations-league"` (channel `1552041023314731058`) |
+| `SYSTEM_PROMPT` / `LEAGUE_SYSTEM_PROMPT` | named in the competition list of both heads, plus a national-team paragraph in the shared body — see "the enrichment is empty" below |
+| `_TEAM_ALIASES` | **new** — `czechia` → `czech republic`, the one measured name failure against The Odds API |
+
+**Verified 22 Sep 2026 against the live feed.** `partition_fixtures()` bucketed
+**26 fixtures** across 24-26 Sep (8 + 8 + 10) on the fast path with zero extra API
+calls. Those three days carried **no other tracked competition at all** — an
+international break stops club football, so on a Nations League matchday this is the
+only thing the bot has to work with, and before 22 Sep those days produced nothing.
+
+#### Its blocks are tiny, and that nearly hid it
+A Nations League group plays two matches a matchday. Simulated against the live
+3-4 Oct 2026 window under the old ranking: **114 unfamiliar leagueIds, and the nine
+Nations League blocks ranked #90 to #112** against a 12-lookup cap — the Jupiler
+failure mode over again, and worse (Jupiler ranked #62). `ROSTER_PARENTS` cannot
+rescue it, because `football-get-all-matches-by-league` returns 0 matches for parents
+`9806`-`9809`. With `NATION_ROSTERS` the same simulation, feed ids wiped, puts all
+nine blocks at **ranks #1 to #9** of 76 (24-25 Sep) and of 136 (25-26 Sep), every one
+inside the cap, at overlap `1.00`. `tests/test_leagues.py` pins that ordering and
+carries the negative control: with `NATION_ROSTERS` emptied the same slate must fail
+to find the block.
+
+#### Form enrichment is EMPTY for national teams — by measurement, not by theory
+A national side plays about ten matches a year, in short windows. `FORM_LOOKBACK_DAYS`
+is 35. Running the real `_build_form_index()` over the real 24-26 Sep pool as of
+23 Sep 2026:
+
+| | Teams |
+|---|---|
+| Full 5-match history | **0** |
+| Partial (1-4 matches) | **0** |
+| Nothing at all | **52 of 52** |
+
+Not thin — **empty**. The last competitive window before it was the World Cup, which
+ended 19 Jul 2026, 65 days earlier. So every Nations League fixture reaches Claude with
+no `home_form`, no `away_form` and no `home_recent`/`away_recent`. `h2h` is the one
+field that usually survives, because national sides meet repeatedly over many years —
+but those meetings can be seasons old with the squads entirely turned over.
+
+This is a standing property of the competition, not a season-start edge case, and
+widening the window does not fix it: 65 days would have to become ~120 to reach the
+World Cup, which would pull in a tournament played under different conditions and cost
+a proportional number of by-date calls. It is left as it is, and the prompt now
+**says** it outright — that the absence is the international calendar rather than a
+signal about the teams, that h2h may be old, and that it is a reason for *lower*
+conviction and fewer picks, never higher. Without that, an empty enrichment block
+reads as "no recent losses".
+
+One cost note: `_build_form_index()` stops early only when *every* team in the pool has
+5 matches, which on an international matchday can never happen — so the walk always
+runs the full 35 days (~34 by-date calls). `_day_feed_cache` holds those for the process
+lifetime, so it is a one-off per Railway deploy plus one new day per day, and the club
+pool already rarely reached full coverage anyway.
+
+#### The Odds API does cover it
+`soccer_uefa_nations_league` is **active** and listed all 45 fixtures of the Sep 24-29
+matchdays on 22 Sep 2026 — no qualifying-key gap of the kind that leaves Conference
+League and Europa League qualifying Claude-odds-only. Matching the live fotmob fixture
+names against that event list resolved **25 of 26**:
+
+- Three spelling divergences already bridge on their own: Turkiye/Turkey,
+  Ireland/Republic of Ireland, Bosnia and Herzegovina/Bosnia & Herzegovina.
+- **Czechia/Czech Republic did not** — 0.48 character ratio against a 0.72 floor, which
+  no scoring bridges. Fixed with `_TEAM_ALIASES`, a whole-name exact substitution
+  applied inside `_normalize_team()`. Keyed on the *entire* name, it rewrites one name
+  to one other name and cannot widen what a partial name matches, so it cannot reopen
+  the 23 Aug 2026 substring collapse (`tests/test_leagues.py` pins both).
+- The last one, **Albania vs Belarus, is genuinely absent from the bookmakers' list** —
+  a coverage gap, not a matching failure. That fixture falls back to Claude's estimated
+  odds, as designed.
+
 ### Which pinned ids can go stale (audit, 8 Aug 2026)
 Run this check before adding any league, and re-check if a league ever goes quiet:
 resolve one of its live fixtures through `football-get-match-detail` and compare
@@ -422,8 +534,11 @@ anything else is season-scoped and belongs in `PARENT_RESOLVED_IDS`.**
 
 So this does **not** recur next August: all five remaining `LEAGUES` entries are
 stable parent ids that the feed uses directly, and Belgium — the only season-scoped
-one — is now on the self-healing path. The shape is a useful tell: the stable ids are
-small (2 digits), while season-scoped ids are 6-digit (`900433`, `937988`, `937348`).
+one — is now on the self-healing path. The shape is a loose tell: season-scoped ids
+are 6-digit (`900433`, `937988`, `937348`, and the Nations League's `920741`-`920754`),
+while stable parents are shorter — though not always 2 digits (`10216` Conference
+League, `9806`-`9809` Nations League). **Digit count is a hint; the self-resolution
+check above is the actual test.** Run that, not the eyeball.
 
 **Odds caveat (Conference League and Europa League):** The Odds API has no key for
 either competition's *qualifying* rounds — only `soccer_uefa_europa_conference_league`

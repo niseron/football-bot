@@ -152,6 +152,17 @@ PARENT_RESOLVED_IDS: dict[str, set[int]] = {
         10216,   # Conference League — league phase + knockout rounds
         10615,   # Conference League Qualification
     },
+    # The Nations League has FOUR stable parents, one per tier, and every group
+    # in a tier resolves to its tier's parent — there is no single competition
+    # id above them. Confirmed 22 Sep 2026 against live 2026-27 fixtures: all
+    # fourteen group ids resolve through football-get-match-detail to one of
+    # these, and none resolves to itself, so none of them belongs in LEAGUES.
+    "Nations League": {
+        9806,    # UEFA Nations League A
+        9807,    # UEFA Nations League B
+        9808,    # UEFA Nations League C
+        9809,    # UEFA Nations League D
+    },
 }
 
 # Feed leagueIds already known, per competition. Seeded with the ids live on
@@ -163,6 +174,17 @@ FEED_LEAGUE_IDS: dict[str, set[int]] = {
     "Champions League": {937348},    # Champions League Qualification 2026-27
     "Europa League": {937349},       # Europa League Qualification 2026-27
     "Conference League": {937351},   # Conference League Qualification 2026-27
+    # Nations League 2026-27 — one feed id PER GROUP, not per competition, so
+    # the seed is fourteen ids rather than one. All fourteen were read off the
+    # live by-date feed and parent-resolved individually on 22 Sep 2026; the
+    # range is contiguous but was NOT assumed to be — 920748 and 920753 sit on
+    # matchdays the others skip and were resolved from their own fixtures.
+    "Nations League": {
+        920741, 920742, 920743, 920744,   # League A, groups 1-4 (parent 9806)
+        920745, 920746, 920747, 920748,   # League B, groups 1-4 (parent 9807)
+        920749, 920750, 920751, 920752,   # League C, groups 1-4 (parent 9808)
+        920753, 920754,                   # League D, groups 1-2 (parent 9809)
+    },
 }
 
 # Competitions identifiable by a stable club roster, mapped to the parent
@@ -177,6 +199,51 @@ FEED_LEAGUE_IDS: dict[str, set[int]] = {
 # season, and the fixture-count heuristic already surfaces them.
 ROSTER_PARENTS: dict[str, int] = {
     "Jupiler Pro League": 40,
+}
+
+# The 54 national teams contesting the 2026-27 Nations League, harvested from
+# the live feed's own longNames on 22 Sep 2026 (all fourteen group blocks across
+# the Sep, Oct and Nov matchdays). UEFA's membership minus the suspended side.
+#
+# Spelled as THIS API spells them — "Turkiye", "Czechia", "Ireland" — because
+# they are compared against feed names verbatim. Women's national sides carry a
+# "(W)" suffix in the same feed and so can never collide with these.
+UEFA_NATIONS: frozenset[str] = frozenset({
+    "Albania", "Andorra", "Armenia", "Austria", "Azerbaijan", "Belarus",
+    "Belgium", "Bosnia and Herzegovina", "Bulgaria", "Croatia", "Cyprus",
+    "Czechia", "Denmark", "England", "Estonia", "Faroe Islands", "Finland",
+    "France", "Georgia", "Germany", "Gibraltar", "Greece", "Hungary",
+    "Iceland", "Ireland", "Israel", "Italy", "Kazakhstan", "Kosovo", "Latvia",
+    "Liechtenstein", "Lithuania", "Luxembourg", "Malta", "Moldova",
+    "Montenegro", "Netherlands", "North Macedonia", "Northern Ireland",
+    "Norway", "Poland", "Portugal", "Romania", "San Marino", "Scotland",
+    "Serbia", "Slovakia", "Slovenia", "Spain", "Sweden", "Switzerland",
+    "Turkiye", "Ukraine", "Wales",
+})
+
+# Competitions ranked for discovery by team NAME rather than by a parent roster.
+#
+# ROSTER_PARENTS cannot serve a national-team competition: _roster_team_ids()
+# reads football-get-all-matches-by-league, and that endpoint answers 0 matches
+# for all four Nations League parents (9806-9809, checked 22 Sep 2026). The
+# overlap would be 0.00 for every block and the ranking would silently collapse
+# back to fixture count alone.
+#
+# Which is fatal here, and measurably so. A Nations League group plays TWO
+# matches on a matchday (one for a group of three), so its block is among the
+# smallest on the feed. Simulated against the live 3-4 Oct 2026 window: 114
+# unfamiliar leagueIds, and the nine Nations League blocks ranked 90th to 112th
+# by fixture count — nowhere near MAX_PARENT_LOOKUPS_PER_RUN. That is the
+# Jupiler failure mode over again and worse; Jupiler at least ranked 62nd.
+#
+# Names are the right key for this, and a safer one than a club roster: a
+# national team is never promoted or relegated out of existence and its feed
+# name is fixed, so unlike ROSTER_PARENTS this cannot go stale between seasons.
+# It degrades gracefully too — overlap is a fraction, so an unlisted entrant
+# (a reinstated federation, a renamed side) drops a four-team block to 0.75 and
+# still sorts it far above the 0.00 that every club block scores.
+NATION_ROSTERS: dict[str, frozenset[str]] = {
+    "Nations League": UEFA_NATIONS,
 }
 
 # Feed leagueId -> stable parent leagueId, cached for the process lifetime
@@ -257,6 +324,11 @@ ODDS_API_SPORT_KEYS: dict[str, str | tuple[str, ...]] = {
     # qualifying-round picks stay Claude-odds-only (fetch_real_odds returns
     # None and the caller falls back) until the league phase makes this live.
     "Conference League": "soccer_uefa_europa_conference_league",
+    # Nations League is covered and in season — checked 22 Sep 2026 against
+    # /v4/sports (active: true) and /events, which listed all 45 fixtures of the
+    # Sep 24-29 matchdays. One key covers every tier: leagues A-D share it, so
+    # unlike the UEFA club competitions there is no qualifying-key split here.
+    "Nations League": "soccer_uefa_nations_league",
 }
 
 # Seconds between individual pick embeds. Discord's per-channel ceiling is about
@@ -277,6 +349,7 @@ DISCORD_LEAGUE_CHANNEL_KEYS: dict[str, str] = {
     "Champions League": "champions-league",
     "Europa League": "europa-league",
     "Conference League": "conference-league",
+    "Nations League": "nations-league",
 }
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
@@ -427,10 +500,18 @@ def _discover_feed_ids(
     whole point of putting it here.
 
     So blocks are ranked first by how much of their line-up matches a missing
-    competition's known roster (ROSTER_PARENTS), then by fixture count. The
-    Belgian block scores 5/6 on that measure and sorts to the front; the parent
-    lookup that follows still has the final say, so a roster near-miss on a
-    promoted club costs nothing and a false lead is simply rejected.
+    competition's known roster (ROSTER_PARENTS by team id, NATION_ROSTERS by
+    team name), then by fixture count. The Belgian block scores 5/6 on that
+    measure and sorts to the front; the parent lookup that follows still has the
+    final say, so a roster near-miss on a promoted club costs nothing and a
+    false lead is simply rejected.
+
+    One limit worth knowing: a competition drops out of `missing` — and so out
+    of the roster ranking — as soon as ANY of its ids is known. A competition
+    whose feed ids rotate as a SET therefore wants all of them found in the same
+    sweep, which for the Nations League means its 14 group ids. That holds
+    comfortably: at most nine of the fourteen groups play inside any one 48-hour
+    window, against a cap of twelve lookups.
 
     ONE shared sweep serves every tracked competition, and it has to be:
     _parent_league_cache records each leagueId exactly once, so a second,
@@ -454,10 +535,23 @@ def _discover_feed_ids(
         for teams in (_roster_team_ids(ROSTER_PARENTS[competition]),)
         if teams
     ]
+    name_rosters = [
+        NATION_ROSTERS[competition]
+        for competition in missing
+        if competition in NATION_ROSTERS
+    ]
 
     def _rank(item: tuple[int, list[dict]]) -> tuple[float, int]:
         """Best roster overlap first (as a fraction of the block's own teams),
-        then most fixtures. Both negated — sorted() is ascending."""
+        then most fixtures. Both negated — sorted() is ascending.
+
+        A block is scored against BOTH kinds of roster and keeps its better
+        score: team ids for club competitions, team names for national-team
+        ones (NATION_ROSTERS explains why the latter cannot use ids). The two
+        never compete for the same block — a club block scores 0.00 on names
+        and a national-team block scores 0.00 on ids — so taking the max is
+        simply "whichever roster recognised this block".
+        """
         _lid, matches = item
         overlap = 0.0
         if rosters:
@@ -469,6 +563,19 @@ def _discover_feed_ids(
             }
             if team_ids:
                 overlap = max(len(team_ids & r) / len(team_ids) for r in rosters)
+        if name_rosters:
+            names = {
+                name
+                for m in matches
+                for side in ("home", "away")
+                for name in ((m.get(side) or {}).get("longName"),)
+                if name
+            }
+            if names:
+                overlap = max(
+                    overlap,
+                    max(len(names & r) / len(names) for r in name_rosters),
+                )
         return (-overlap, -len(matches))
 
     candidates = sorted(by_league.items(), key=_rank)
@@ -508,8 +615,12 @@ def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
         if found:
             result[league_name] = [build_fixture_summary(m) for m in found]
 
-    # Every club-competition id we know, used below only as a World Cup
-    # disqualifier — a club fixture is never a national-team tournament match.
+    # Every tracked non-World-Cup id we know, used below only as a World Cup
+    # disqualifier — a fixture already accounted for by another competition is
+    # never a World Cup match. Since 22 Sep 2026 that includes the Nations
+    # League group ids, which are national-team fixtures rather than club ones;
+    # they belong here for the same reason, since a Nations League tie is not a
+    # World Cup tie either.
     club_ids: set[int] = set(domestic_ids)
     for feed_ids in FEED_LEAGUE_IDS.values():
         club_ids |= feed_ids
@@ -856,6 +967,28 @@ def enrich_with_context(fixtures_by_league: dict[str, list[dict]]) -> None:
 
 _TEAM_NOISE_RE = re.compile(r"\b(fc|cf|afc|sc|cd|ac|club)\b", re.IGNORECASE)
 
+# Whole-name aliases between the two APIs' spellings, applied after folding and
+# ONLY on an exact match of the complete normalised name.
+#
+# Nothing here is a heuristic — each entry is a pair that was measured to fail.
+# Matching the live Nations League fixtures of 24-26 Sep 2026 against The Odds
+# API's event list resolved 24 of 26; the one NAME failure was Czechia, which
+# that API still calls Czech Republic. The two share only a 0.48 character ratio
+# against a 0.72 floor, so no amount of scoring bridges it. The other spelling
+# divergences on that slate — Turkiye/Turkey, Ireland/Republic of Ireland,
+# Bosnia and Herzegovina/Bosnia & Herzegovina — already match on their own and
+# are deliberately NOT listed: an alias that is not needed is one more thing
+# that can go wrong.
+#
+# Whole-name and exact is what keeps this safe. It cannot cause the 23 Aug 2026
+# class of failure, where stripping a word INSIDE a name made "Club Brugge" a
+# substring of "Cercle Brugge KSV": a substitution keyed on the entire name
+# rewrites one specific name to one other specific name, and can never widen
+# what a partial name matches.
+_TEAM_ALIASES: dict[str, str] = {
+    "czechia": "czech republic",
+}
+
 
 def _normalize_team(name: str, *, strip_noise: bool = True) -> str:
     """
@@ -872,7 +1005,8 @@ def _normalize_team(name: str, *, strip_noise: bool = True) -> str:
     if strip_noise:
         name = _TEAM_NOISE_RE.sub("", name)
     name = re.sub(r"[^a-z0-9 ]", "", name)
-    return re.sub(r"\s+", " ", name).strip()
+    name = re.sub(r"\s+", " ", name).strip()
+    return _TEAM_ALIASES.get(name, name)
 
 
 def _team_match(a: str, b: str) -> bool:
@@ -1304,7 +1438,8 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
 # should reach both; edit a head only when it genuinely applies to one scope.
 _PROMPT_HEAD_GLOBAL = """You are a professional football betting analyst with deep expertise in the Premier League,
 Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Champions League, the UEFA
-Europa League, the UEFA Conference League, and international tournament football including the FIFA World Cup.
+Europa League, the UEFA Conference League, the UEFA Nations League, and international tournament football
+including the FIFA World Cup.
 You receive upcoming fixtures for the next 48 hours and must identify the best value bets across all
 competitions, ranked from best to worst — UP TO 10, in strict order of conviction.
 
@@ -1322,7 +1457,8 @@ RANKING — read this carefully:
 
 _PROMPT_HEAD_LEAGUE = """You are a professional football betting analyst with deep expertise in the Premier League,
 Belgian Jupiler Pro League, Bundesliga, La Liga, Serie A, Ligue 1, the UEFA Champions League, the UEFA
-Europa League, the UEFA Conference League, and international tournament football including the FIFA World Cup.
+Europa League, the UEFA Conference League, the UEFA Nations League, and international tournament football
+including the FIFA World Cup.
 You receive the next 48 hours of fixtures for ONE competition, named in the message, and must identify the
 best value bets in that competition, ranked from best to worst — UP TO 10, in strict order of conviction.
 
@@ -1368,6 +1504,21 @@ A form string may hold FEWER than 5 results, or be absent entirely — most ofte
 season, when a club genuinely has not played five competitive matches yet. Read it for what it is: two
 results are two results, not a five-match trend, and they deserve correspondingly less weight. A short
 or missing form string is a reason to lower conviction, never a reason to invent form you were not given.
+
+Nations League fixtures are NATIONAL teams, and for them the enriched context above is usually EMPTY.
+A national side plays about ten matches a year in short international windows, so the trailing window
+the form data is built from routinely contains none of them at all — on the 24-26 Sep 2026 matchday it
+contained nothing for all 52 teams involved. Expect no home_form, no away_form and no home_recent or
+away_recent on these fixtures, and treat that as the normal state rather than as a signal about the
+teams. h2h is the one field that often survives, because national sides meet repeatedly over many
+years, but those meetings may be seasons old and squads turn over completely between them — weight an
+old meeting as weak evidence about the fixture in front of you, not as recent form.
+
+That absence is a reason for LOWER conviction on Nations League fixtures, not higher: you are pricing
+them on squad quality and market knowledge alone, with none of the recent-form evidence you get in a
+domestic league. Return fewer picks here, and return none at all when nothing stands out. Bear in mind
+too that Nations League tiers are seeded by strength, so within a group the sides are usually far more
+evenly matched than their reputations suggest, and that these squads are assembled days before kickoff.
 
 Your knowledge of player rosters, retirements, transfers, injuries, and international squad selections
 may be outdated — squads (especially international ones) change up to matchday due to injuries, form,

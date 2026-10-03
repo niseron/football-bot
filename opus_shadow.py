@@ -2,8 +2,9 @@
 opus_shadow.py — Claude Opus 5 shadow experiment for the football pipeline.
 
 Runs the production Sonnet pipeline's OWN enriched fixture pool through
-`claude-opus-5`. Same fixtures, same form and H2H context, same SYSTEM_PROMPT,
-same 10-pick ranked format and Core/Extended tiers, same never-pad rule —
+`claude-opus-5`. Same fixtures, same form and H2H context, same SYSTEM_PROMPT
+(plus, since 4 Oct 2026, a shadow-only extra-markets addendum — see
+OPUS_EXTENDED_MARKETS), same 10-pick ranked format and Core/Extended tiers, same never-pad rule —
 nothing is re-fetched from RapidAPI, so the comparison is clean and the
 fixture-side API cost is exactly zero.
 
@@ -88,6 +89,37 @@ OPUS_CORE_PICKS_PER_RUN = 5
 # config change, on Railway and locally.
 OPUS_CHANNEL = "opus-shadow"
 
+# Extra markets, Opus shadow ONLY (4 Oct 2026): Draw No Bet, Over/Under 1.5 and
+# 3.5, team total goals and win to nil. One switch drives all three halves —
+# the prompt addendum below, the market tag + Core exclusion at generation, and
+# `extended_markets=True` at settlement, which is the only path that lets
+# auto_results.evaluate_pick settle DNB / team totals / win to nil. Production
+# never passes that flag and its prompt is untouched, so Sonnet is unchanged.
+#
+# These picks are tagged 'Extended market' on the tab and are never Core: Core
+# is the Opus-vs-Sonnet comparison, and Sonnet is not offered these markets.
+# They also skip market-odds enrichment — main._match_market_odds would read
+# 'Arsenal Over 1.5' as the MATCH 1.5 line and attach the wrong price.
+# Cost: the addendum is ~450 input tokens per run, ~$0.002 at Opus pricing.
+OPUS_EXTENDED_MARKETS = True
+OPUS_MARKET_TAG = "Extended market"
+
+_OPUS_EXTENDED_MARKETS_PROMPT = """
+
+ADDITIONAL MARKETS — you may also recommend these, using EXACTLY these formats:
+- Draw No Bet: bet_type "Draw No Bet", pick "<Team>" (e.g. "Arsenal"). Stake refunded on a draw.
+- Goals Over/Under on the 1.5 or 3.5 line: bet_type "Over/Under 1.5 Goals" or "Over/Under 3.5 Goals",
+  pick "Over 1.5 Goals" / "Under 3.5 Goals". The bet_type and the pick must state the SAME line.
+- Team total goals: bet_type "Team Total Goals", pick "<Team> Over 1.5 Goals" or "<Team> Under 0.5 Goals"
+  — the goals of that one team only, half-goal lines only.
+- Win to nil: bet_type "Win to Nil", pick "<Team> to Win to Nil" — the team wins AND concedes nothing.
+All of these settle on 90 minutes plus stoppage time only. On knockout fixtures you may append
+"(90 min)" to the pick, but NEVER "(Full-Time incl. ET/Pens)", and never put any other text in brackets.
+Never recommend corners, cards, shots, half-time or any other market not listed in this prompt — they
+cannot be settled.
+
+Return ONLY the JSON block, no other text."""
+
 
 def opus_enabled() -> bool:
     """True only when the opus-shadow channel key is configured."""
@@ -123,10 +155,16 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
     }
     payload = json.dumps(clean, indent=2, default=str)
 
+    # The shadow's own addendum is appended to a COPY here; main.SYSTEM_PROMPT —
+    # what production sends — is never modified.
+    system_prompt = SYSTEM_PROMPT + (
+        _OPUS_EXTENDED_MARKETS_PROMPT if OPUS_EXTENDED_MARKETS else ""
+    )
+
     message = claude.messages.create(
         model=OPUS_MODEL,
         max_tokens=OPUS_MAX_TOKENS,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         output_config={"effort": OPUS_EFFORT},
         messages=[{
             "role": "user",
@@ -195,12 +233,23 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
     # Rank and tier therefore decouple here exactly as they did in production on
     # 15 Aug 2026: a rank-3 pick can be Extended and a rank-7 pick Core. Never
     # re-derive the tier from the rank number.
+    #
+    # Extended-market picks (OPUS_EXTENDED_MARKETS) are barred from Core the same
+    # way: Core is the comparison with Sonnet, which is not offered those markets.
+    from auto_results import is_extended_market
     from main import EXTENDED_ONLY_COMPETITIONS
 
     n_core = 0
     for i, pick in enumerate(deduped, 1):
         pick["rank"] = i
-        eligible = pick.get("league") not in EXTENDED_ONLY_COMPETITIONS
+        pick["market_tag"] = (
+            OPUS_MARKET_TAG
+            if OPUS_EXTENDED_MARKETS and is_extended_market(
+                pick.get("bet_type") or "", pick.get("pick") or "")
+            else ""
+        )
+        eligible = (pick.get("league") not in EXTENDED_ONLY_COMPETITIONS
+                    and not pick["market_tag"])
         if eligible and n_core < OPUS_CORE_PICKS_PER_RUN:
             pick["pick_tier"] = PICK_TIER_CORE
             n_core += 1
@@ -228,6 +277,8 @@ def _opus_embed(pick: dict) -> dict:
     context = f"OPUS 5 SHADOW · {league} · {tier}"
     if rank:
         context += f" #{rank}"
+    if pick.get("market_tag"):
+        context += f" · {pick['market_tag'].upper()}"
 
     shown = dict(pick)
     stake_info = pick.get("stake_info") or {}
@@ -276,8 +327,12 @@ def run_opus_shadow(
     # Opus picks different fixtures than Sonnet, so it needs its own market
     # prices. Non-fatal: without them the picks stay Opus-odds-only, exactly as
     # Conference/Europa qualifying already are.
+    # Extended-market picks are left out: _match_market_odds knows only h2h,
+    # match totals and spreads, so it would price 'Arsenal Over 1.5' off the
+    # MATCH 1.5 line. No price is right; a wrong one is not. They stay on
+    # Opus's own odds.
     try:
-        enrich_picks_with_real_odds(picks)
+        enrich_picks_with_real_odds([p for p in picks if not p.get("market_tag")])
     except Exception as exc:
         log.warning("opus_shadow: odds enrichment failed — Opus odds only: %s", exc)
 
@@ -322,6 +377,7 @@ def run_opus_shadow(
                 market_odds=pick.get("market_odds"),
                 pick_tier=pick.get("pick_tier"),
                 stake=(pick.get("stake_info") or {}).get("stake"),
+                market_tag=pick.get("market_tag", ""),
             )
         except Exception as exc:
             log.warning("opus_shadow: failed to log %s: %s", pick.get("match"), exc)
@@ -376,6 +432,10 @@ def run_opus_auto_results(lookback_days: int = 2) -> tuple[dict, list[dict]]:
         row_writer=update_opus_row_result,
         finalizer=finalize_opus_sheet,
         alert_scope="opus-shadow",
+        # The ONLY caller that sets this — production's run_auto_results calls
+        # leave it False, so Draw No Bet, team totals and win to nil never settle
+        # on the football tab.
+        extended_markets=OPUS_EXTENDED_MARKETS,
     )
 
 

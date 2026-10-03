@@ -350,6 +350,13 @@ with no score at all, `football-get-match-score` gives only the final score, and
 -momentum / -goals / -period / -halftime / -summary / -info / -h2h /
 -player-stats / -odds / -live-matches / -list-events` **all 404**.
 `status.halfs` holds period START TIMESTAMPS, never period scores.
+**Correction 3 Oct 2026:** those exact names 404, but the host DOES serve match
+stats and lineups under other names — `football-get-match-event-all-stats`,
+`-firstHalf-stats`, `-secondhalf-stats` (corners, cards, shots, shots on target,
+xG per team, per half — still no goals per half), `football-get-hometeam-lineup` /
+`-awayteam-lineup` (XI, subs, `unavailable`; a non-null `lastMatch` means the XI is
+the previous match's placeholder, not the confirmed one) and
+`football-get-list-player` (squad with injury flags). Nothing uses them yet.
 
 - **The 90-minute MARGIN is derivable; the 90-minute SCORE is not.** Extra time
   in a two-legged tie means the aggregate was level at 90' of the second leg, so
@@ -363,7 +370,8 @@ with no score at all, `football-get-match-score` gives only the final score, and
   stranded because no branch dispatched on it. `evaluate_pick` now normalises
   the label into the Match Winner branch (`_is_draw_bet_type`), so there is one
   draw rule, not two copies. It matches the whole label, never a substring:
-  `Draw No Bet` is a different market and must stay unhandled.
+  `Draw No Bet` is a different market — PENDING for production, settled only
+  under the Opus shadow's `extended_markets` flag (see below).
 - **`_regulation_goal_difference()` returning None means PENDING, always.** It
   returns None when the aggregate is missing, unparseable, below this leg's
   score for either side, or implies a margin unreachable inside the final score.
@@ -401,6 +409,41 @@ with no score at all, `football-get-match-score` gives only the final score, and
 Details, the validation set and the audit history in PROJECT_SUMMARY.md,
 "Extra-time settlement" and "Fixture name matching".
 
+## Market recognition — never settle a market on the wrong figure (4 Oct 2026)
+
+`evaluate_pick` dispatches on substrings of the bet type, so until 4 Oct 2026 a
+market it had no rule for fell into one sharing a word: `Corners Over 9.5`,
+`Over 4.5 Cards` and `Shots on Target Over 8.5` settled on GOALS, `Team Total
+Goals / Arsenal Over 1.5` on the MATCH total, `Match Winner / Arsenal Win to Nil`
+as a plain win, and `Over/Under / Over 1.5 Goals` against a defaulted 2.5 line.
+An audit of all 734 settled rows (Picks both tiers + Opus tab) that day found
+none actually settled that way, so no row was corrected.
+
+- **`classify_market()` runs before any substring dispatch** and is shared by
+  `evaluate_pick`, `_pending_reason` and the shadow's Core filter. Stat and
+  half-time markets (`stat`, `half`) and totals naming something other than the
+  match or one side (`unknown_total`) are PENDING for every caller, with a
+  reason that names the market. Whole words only — `Cardiff` is not a cards bet.
+- **A goals line is never assumed.** `_total_line()` reads the pick AND the bet
+  type with team names cut out (so `Schalke 04` is not a line); no line, or two
+  different lines, is PENDING. Well-formed `Over 2.5 Goals` rows settle exactly
+  as before.
+- **`extended_markets=True` is passed ONLY by `opus_shadow.run_opus_auto_results`.**
+  It lets Draw No Bet, team totals and win to nil settle (90-minute markets; a
+  full-time scope is refused; after extra time they settle only on what the
+  derived margin and `_goal_range_90` make certain). Production's default is
+  False, so for Sonnet those stay PENDING — do not set it on the football path
+  without first offering the markets in the production prompt.
+- **Opus shadow extras** (`OPUS_EXTENDED_MARKETS`): an addendum appended to a COPY
+  of `main.SYSTEM_PROMPT` offers DNB, Over/Under 1.5 and 3.5, team totals and win
+  to nil. `is_extended_market()` tags those picks `Extended market` in the Opus
+  tab's last column (`Market Tag`) and the embed, bars them from Core (Core is the
+  Sonnet comparison, and Sonnet is not offered them) and skips their market-odds
+  enrichment, because `_match_market_odds` would price `Arsenal Over 1.5` off the
+  MATCH 1.5 line. Any Opus total on a line other than 2.5 counts as extended.
+- Pinned by `tests/test_markets.py`, including that production's prompts carry
+  no extra markets and the flag's default is False.
+
 ## Settlement regression tests (8 Sep 2026)
 
 `tests/test_settlement.py` pins `evaluate_pick` (a plain Match Winner pick in
@@ -412,7 +455,9 @@ the 5% and 15% caps, the market-odds basis, the club-only sample).
 `tests/test_leagues.py` pins how a competition is registered and, above all, the
 discovery RANKING that decides whether a small competition is ever found at all —
 each ordering test carries the negative control that fails without the mechanism.
-It also pins the Odds API name aliases. Pure — no
+It also pins the Odds API name aliases. `tests/test_markets.py` pins market
+recognition (line from the pick, stat markets PENDING) and the Opus-only extra
+markets with their extra-time rules. Pure — no
 network, no Sheets, no Discord. Run from `football-bot/`:
 
 ```

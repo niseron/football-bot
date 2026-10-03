@@ -222,6 +222,7 @@ def _pending_reason(
     margin_known: bool = False,
     home_name: str = "",
     away_name: str = "",
+    extended_markets: bool = False,
 ) -> str:
     """
     Why evaluate_pick() could not settle this pick, in one human sentence.
@@ -234,6 +235,20 @@ def _pending_reason(
     Match Winner, Double Chance or Asian Handicap — only of the markets that
     need the 90-minute TOTAL.
     """
+    # The market itself comes first: no score detail makes these settleable.
+    market = classify_market(bet_type, pick, home_name, away_name)
+    if market in ("stat", "half"):
+        return (f"'{bet_type}' is a {'stats' if market == 'stat' else 'half-time'} "
+                f"market — the feed's final score cannot settle it")
+    if market == "unknown_total":
+        return (f"'{bet_type}' / '{pick}' looks like a total but names something "
+                f"other than this fixture's match goals or one of its sides")
+    if market in EXTENDED_MARKETS and not extended_markets:
+        return (f"'{bet_type}' is a {market.replace('_', ' ')} market, which this "
+                f"pipeline does not settle")
+    if market == "total" and _total_line(bet_type, pick, home_name, away_name) is None:
+        return ("the goals line is missing, or the bet type and the pick state "
+                "different lines — a line is never assumed")
     if penalties and scope_ft:
         return ("decided on a penalty shootout — the API score is level, so the "
                 "winner cannot be read from it")
@@ -618,6 +633,291 @@ def _match_winner_sides(pk: str, hn: str, an: str) -> tuple[bool, bool, bool]:
     return home_pick, away_pick, False
 
 
+# ── Market recognition (4 Oct 2026) ──────────────────────────────────────────
+# evaluate_pick dispatches on substrings of the bet type, so a market it has no
+# rule for could fall into one that merely shares a word. Measured 3 Oct 2026:
+# 'Corners Over 9.5', 'Over 4.5 Cards' and 'Shots on Target Over 8.5' all entered
+# the goals Over/Under branch and settled on GOALS; 'Team Total Goals / Arsenal
+# Over 1.5' settled on the MATCH total; 'Match Winner / Arsenal Win to Nil' paid
+# as a plain win; and 'Over/Under / Over 1.5 Goals' settled against a defaulted
+# 2.5 line. All of them silently. The final score can settle none of the stat or
+# half-time markets, so they are recognised up front and return PENDING with a
+# reason — a pick nobody can settle automatically must reach a human, never a
+# goals verdict.
+
+# Stat and period markets: the final score carries no corners, cards, shots or
+# half-time score, so these can never settle here. Whole words only — 'Cardiff'
+# must not read as a cards market.
+_STAT_MARKET_RE = re.compile(
+    r"\b(?:corners?|cards?|bookings?|booking points|shots?|sot|fouls?|"
+    r"offsides?|throw[\s-]?ins?|tackles?|saves?|xg|possession|clean sheets?)\b"
+)
+_HALF_MARKET_RE = re.compile(
+    r"\b(?:1st|2nd|first|second)[\s-]*half\b|\bhalf[\s-]*time\b|\bht\b|\bh[12]\b"
+)
+_WIN_TO_NIL_RE   = re.compile(r"\bto\s+nil\b")
+_DRAW_NO_BET_RE  = re.compile(r"\bdraw\s+no\s+bet\b|\bdnb\b")
+_TEAM_TOTAL_RE   = re.compile(r"\bteam\s+(?:total|goals)\b")
+_LINE_RE         = re.compile(r"\d+(?:\.\d+)?")
+_OU_BET_LABELS   = ("over", "under", "total goals", "goals over", "o/u")
+
+# Words a match-total label may carry besides the line. Anything else left in an
+# Over/Under bet type or pick names something — a team (a team total) or a
+# market this branch does not know — and the match total must not settle it.
+_TOTAL_WORDS = frozenset({
+    "over", "under", "o", "u", "total", "totals", "goal", "goals", "match",
+    "line", "alt", "alternate", "full", "time", "ft", "and", "or", "to", "score",
+})
+
+
+def _strip_scope(text: str) -> str:
+    """Lower-cased text without a trailing '(…)' time-scope marker."""
+    return re.sub(r"\s*\([^)]*\)$", "", text.lower().strip()).strip()
+
+
+def _without_names(text: str, *names: str) -> str:
+    """`text` normalised, with each (normalised) team name cut out of it."""
+    out = _normalise_team(text)
+    for name in names:
+        n = _normalise_team(name)
+        if n:
+            out = out.replace(n, " ")
+    return out
+
+
+def _total_side_name(bt: str, pk: str, hn: str, an: str) -> tuple[str, str | None]:
+    """
+    Read an Over/Under-shaped label: ('match', None) for a plain match total,
+    ('team', 'home'|'away') when it names one side, ('unknown', None) when it
+    carries words that are neither a total nor a side of this fixture.
+    """
+    leftover: list[str] = []
+    for text in (_strip_scope(bt), _strip_scope(pk)):
+        words = re.findall(r"[^\W\d_]+", _normalise_team(text))
+        leftover += [w for w in words if w not in _TOTAL_WORDS and w != "team"]
+    if not leftover and not _TEAM_TOTAL_RE.search(bt + " " + pk):
+        return "match", None
+    rest = " ".join(leftover)
+    home_fit = _side_matches(rest, _normalise_team(hn)) if rest else False
+    away_fit = _side_matches(rest, _normalise_team(an)) if rest else False
+    if home_fit and not away_fit:
+        return "team", "home"
+    if away_fit and not home_fit:
+        return "team", "away"
+    # Fall back to the full name inside the text — 'leeds united over 0.5' leaves
+    # 'leeds united' but a pick may also add words the side does not carry.
+    pk_n = _normalise_team(_strip_scope(pk) + " " + _strip_scope(bt))
+    h_in = bool(_normalise_team(hn)) and _normalise_team(hn) in pk_n
+    a_in = bool(_normalise_team(an)) and _normalise_team(an) in pk_n
+    if h_in != a_in:
+        return "team", "home" if h_in else "away"
+    return "unknown", None
+
+
+def _total_line(bt: str, pk: str, hn: str, an: str) -> float | None:
+    """
+    The goals line a total pick is on, read from the pick AND the bet type.
+
+    None when no line is stated anywhere, or when the two state DIFFERENT lines.
+    Until 4 Oct 2026 the line came from the bet type alone and defaulted to 2.5,
+    so 'Over/Under / Over 1.5 Goals' settled against 2.5. A guessed line settles
+    a real bet on the wrong market, so there is no default any more. Team names
+    are cut out first so a club name with digits ('Schalke 04') is not read as a
+    line.
+    """
+    lines = {
+        float(n)
+        for text in (_strip_scope(bt), _strip_scope(pk))
+        for n in _LINE_RE.findall(_without_names(text, hn, an))
+    }
+    return lines.pop() if len(lines) == 1 else None
+
+
+def classify_market(bet_type: str, pick: str, home_name: str = "", away_name: str = "") -> str:
+    """
+    Which market a pick is on, from its own text:
+
+      'stat'        corners, cards, shots, … — never settleable from the score
+      'half'        a half-time / single-half market — same
+      'win_to_nil'  '<Team> to Win to Nil'
+      'draw_no_bet' Draw No Bet
+      'team_total'  an Over/Under naming one side of the fixture
+      'total'       a match goals Over/Under
+      'other'       everything evaluate_pick already dispatches on
+
+    `home_name` / `away_name` are optional: without them a team total is still
+    recognised by its words, and the Opus shadow uses that at generation time,
+    before any fixture has been matched. Shared by evaluate_pick, the PENDING
+    reason and the shadow's Core filter so they can never disagree.
+    """
+    bt = _strip_scope(bet_type)
+    pk = _strip_scope(pick)
+    both = f"{bt} {pk}"
+    if _STAT_MARKET_RE.search(both):
+        return "stat"
+    if _HALF_MARKET_RE.search(both):
+        return "half"
+    if _WIN_TO_NIL_RE.search(both):
+        return "win_to_nil"
+    if _DRAW_NO_BET_RE.search(both):
+        return "draw_no_bet"
+    if _TEAM_TOTAL_RE.search(both):
+        return "team_total"
+    if any(x in bt for x in _OU_BET_LABELS) and not any(
+        x in bt for x in ("both teams to score", "btts", "handicap")
+    ):
+        if home_name and away_name:
+            kind, _side = _total_side_name(bt, pk, home_name.lower(), away_name.lower())
+            return {"match": "total", "team": "team_total"}.get(kind, "unknown_total")
+        words = [w for w in re.findall(r"[^\W\d_]+", _normalise_team(both))
+                 if w not in _TOTAL_WORDS]
+        return "team_total" if words else "total"
+    return "other"
+
+
+# Markets the Opus shadow may offer on top of the production prompt's set, and
+# that evaluate_pick settles ONLY when the caller passes extended_markets=True.
+# Production never passes it, so for Sonnet these stay PENDING — exactly what
+# they were before 4 Oct 2026 for Draw No Bet, and a correction for the rest.
+EXTENDED_MARKETS = ("draw_no_bet", "team_total", "win_to_nil")
+
+
+def is_extended_market(bet_type: str, pick: str) -> bool:
+    """
+    True for a pick on a market outside the production prompt's set: Draw No
+    Bet, a team total, win to nil, or a goals total on any line other than 2.5.
+    The Opus shadow tags these and keeps them out of Core.
+    """
+    kind = classify_market(bet_type, pick)
+    if kind in EXTENDED_MARKETS:
+        return True
+    if kind == "total":
+        return _total_line(bet_type, pick, "", "") != 2.5
+    return False
+
+
+def _goal_range_90(home_score: int, away_score: int, reg_gd: int | None,
+                   past_90: bool, *, home: bool) -> tuple[int, int]:
+    """
+    The range one side's 90-minute goals can lie in.
+
+    Exact (g, g) when the published score is the 90-minute one. After extra time
+    with a trusted margin, a90 lies in [max(0, -gd), min(away, home - gd)] and
+    h90 = a90 + gd — the same bound the Over/Under branch uses. Without a
+    trusted margin all that is left is that goals accumulate: [0, final].
+    """
+    final = home_score if home else away_score
+    if not past_90:
+        return final, final
+    if reg_gd is None:
+        return 0, final
+    a_lo, a_hi = max(0, -reg_gd), min(away_score, home_score - reg_gd)
+    return (a_lo + reg_gd, a_hi + reg_gd) if home else (a_lo, a_hi)
+
+
+def _line_outcome(goals: int, line: float, over: bool) -> str:
+    if goals == line:
+        return "VOID"
+    return "WIN" if (goals > line) == over else "LOSS"
+
+
+# Words that carry the market, not the side, in a Draw No Bet / win-to-nil pick.
+_SIDE_NOISE_RE = re.compile(r"\b(?:draw\s+no\s+bet|dnb|to\s+win\s+to\s+nil|"
+                            r"wins?\s+to\s+nil|to\s+nil|to\s+win|wins?|nil)\b")
+
+
+def _extended_side(pk: str, hn: str, an: str) -> str | None:
+    """'home' / 'away' for the one side a DNB or win-to-nil pick names, else None."""
+    core = " ".join(_SIDE_NOISE_RE.sub(" ", pk).split())
+    if not core or core in ("draw", "x", "tie"):
+        return None
+    home, away, _draw = _match_winner_sides(core, hn, an)
+    if home == away:
+        return None
+    return "home" if home else "away"
+
+
+def _evaluate_extended_market(
+    market: str, bt: str, pk: str, hn: str, an: str,
+    home_score: int, away_score: int, *,
+    scope: str | None, past_90: bool, reg_gd: int | None, pick: str,
+) -> str:
+    """
+    Draw No Bet, team total goals and win to nil (4 Oct 2026, Opus shadow only).
+
+    All three are 90-minute markets at every bookmaker, so a '(Full-Time incl.
+    ET/Pens)' scope is refused. After extra time they settle only on what the
+    derived 90-minute margin and the goal bounds make certain, exactly like
+    the production branches — never on the published score.
+
+    * Draw No Bet pays on the margin: level → VOID. A single match that went to
+      extra time was level at 90', so it VOIDs; a two-legged tie uses the
+      derived margin; no trusted margin → PENDING.
+    * Team total compares one side's 90-minute goals with the line, settling
+      only when the whole possible range (_goal_range_90) lands on one side.
+    * Win to nil needs a 90-minute win AND a scoreless opponent. A single match
+      that went to extra time was level at 90', so it LOSES; otherwise the
+      opponent's goal range decides, PENDING while it straddles zero.
+    """
+    if scope == "ft":
+        log.warning("Pick '%s' is a 90-minute market with a full-time scope — "
+                    "settle manually via update_result.py", pick)
+        return "PENDING"
+
+    if market == "team_total":
+        kind, side = _total_side_name(bt, pk, hn, an)
+        line = _total_line(bt, pk, hn, an)
+        over_pick, under_pick = "over" in pk, "under" in pk
+        if kind != "team" or line is None or over_pick == under_pick:
+            log.warning("Team total pick '%s' (%s) does not name exactly one side, "
+                        "one line and one of Over/Under — settle manually", pick, bt)
+            return "PENDING"
+        if (line * 2) != int(line * 2):
+            log.warning("Team total pick '%s' is on a quarter line — settle manually",
+                        pick)
+            return "PENDING"
+        lo, hi = _goal_range_90(home_score, away_score, reg_gd, past_90,
+                                home=(side == "home"))
+        first, last = _line_outcome(lo, line, over_pick), _line_outcome(hi, line, over_pick)
+        if first == last:
+            return first
+        log.warning("Team total pick '%s' went past 90 minutes and the side's "
+                    "90-minute goals (%d-%d) straddle the line — settle manually",
+                    pick, lo, hi)
+        return "PENDING"
+
+    side = _extended_side(pk, hn, an)
+    if side is None:
+        log.warning("%s pick '%s' names neither or both sides of '%s vs %s' — "
+                    "settle manually via update_result.py", market, pick, hn, an)
+        return "PENDING"
+
+    if past_90 and reg_gd is None:
+        log.warning("Pick '%s' (%s) went past 90 minutes and the 90-minute margin "
+                    "could not be derived — settle manually", pick, market)
+        return "PENDING"
+    gd = reg_gd if past_90 else home_score - away_score
+    margin = gd if side == "home" else -gd
+
+    if market == "draw_no_bet":
+        if margin == 0:
+            return "VOID"
+        return "WIN" if margin > 0 else "LOSS"
+
+    # win_to_nil
+    if margin <= 0:
+        return "LOSS"
+    lo, hi = _goal_range_90(home_score, away_score, reg_gd, past_90,
+                            home=(side == "away"))   # the OPPONENT's goals
+    if hi == 0:
+        return "WIN"
+    if lo > 0:
+        return "LOSS"
+    log.warning("Win-to-nil pick '%s' went past 90 minutes and the opponent's "
+                "90-minute goals (%d-%d) are unknown — settle manually", pick, lo, hi)
+    return "PENDING"
+
+
 def evaluate_pick(
     bet_type: str,
     pick: str,
@@ -630,9 +930,16 @@ def evaluate_pick(
     penalties: bool = False,
     two_legged: bool = False,
     aggregate: str | None = None,
+    extended_markets: bool = False,
 ) -> str:
     """
     Return WIN, LOSS, VOID, or PENDING (unrecognised bet type / data missing).
+
+    `extended_markets` (4 Oct 2026) enables Draw No Bet, team totals and win to
+    nil. Only the Opus shadow passes it; production never does, so for Sonnet
+    those markets stay PENDING. Stat and half-time markets (corners, cards,
+    shots, …) are PENDING for every caller: the final score cannot settle them.
+    See classify_market.
 
     Handles both generic terms ('Home Win', 'Away or Draw') and team-name
     picks generated by the updated Claude prompt ('Sweden Win', 'Ivory Coast or Draw').
@@ -712,6 +1019,24 @@ def evaluate_pick(
     reg_known   = past_90 and reg_gd is not None
     reg_unknown = past_90 and reg_gd is None
 
+    # ── Market recognition — before any substring dispatch ───────────────────
+    market = classify_market(bet_type, pick, home_name, away_name)
+    if market in ("stat", "half", "unknown_total"):
+        log.warning("Pick '%s' (%s) is on a market the final score cannot settle "
+                    "(%s) — settle manually via update_result.py",
+                    pick, bet_type, market)
+        return "PENDING"
+    if market in EXTENDED_MARKETS:
+        if not extended_markets:
+            log.warning("Pick '%s' (%s) is a %s pick and this pipeline does not "
+                        "settle that market — settle manually via update_result.py",
+                        pick, bet_type, market)
+            return "PENDING"
+        return _evaluate_extended_market(
+            market, bt, pk, hn, an, home_score, away_score,
+            scope=scope, past_90=past_90, reg_gd=reg_gd, pick=pick,
+        )
+
     # ── Match Winner ─────────────────────────────────────────────────────────
     if _is_match_winner_bet(bt):
         home_pick, away_pick, draw_pick = _match_winner_sides(pk, hn, an)
@@ -776,9 +1101,20 @@ def evaluate_pick(
         if pk in ("no",  "false", "ng", "no (ng)"): return "WIN" if not both else "LOSS"
 
     # ── Over / Under goals ───────────────────────────────────────────────────
-    elif any(x in bt for x in ("over", "under", "total goals", "goals over", "o/u")):
-        nums      = re.findall(r'\d+\.?\d*', bt)
-        threshold = float(nums[0]) if nums else 2.5
+    elif any(x in bt for x in _OU_BET_LABELS):
+        # The line comes from the pick AND the bet type, and they must agree.
+        # Never a default: 'Over/Under / Over 1.5 Goals' settled against 2.5
+        # until 4 Oct 2026.
+        threshold = _total_line(bet_type, pick, home_name, away_name)
+        if threshold is None:
+            log.warning("Pick '%s' (%s) states no goals line, or two different "
+                        "ones — settle manually via update_result.py", pick, bet_type)
+            return "PENDING"
+        over_pick, under_pick = "over" in pk, "under" in pk
+        if over_pick == under_pick:
+            log.warning("Pick '%s' (%s) names neither or both of Over and Under — "
+                        "settle manually via update_result.py", pick, bet_type)
+            return "PENDING"
         if past_90:
             # Largest 90-minute total consistent with the derived margin. With
             # h90 - a90 = reg_gd and neither side above its final score, a90 tops
@@ -872,6 +1208,7 @@ def run_auto_results(
     row_writer=None,
     finalizer=None,
     alert_scope: str = "football",
+    extended_markets: bool = False,
 ) -> tuple[dict, list[dict]]:
     """
     Scan pending Google Sheets rows, fetch API scores, update the sheet.
@@ -886,6 +1223,9 @@ def run_auto_results(
     caller settling a tab other than the football one MUST pass its own scope,
     or its PENDING rows will consume football's alert slots — see the comment
     on _pending_alerted above.
+
+    `extended_markets` is passed straight to evaluate_pick: True only for the
+    Opus shadow (Draw No Bet, team totals, win to nil). Production never sets it.
 
     `row_writer` may return False to signal the write failed; that row is then
     not counted as updated and not reported as resolved. A writer returning
@@ -1016,7 +1356,8 @@ def run_auto_results(
 
         result = evaluate_pick(bet_type, pick, home_name, away_name, home_score, away_score,
                                extra_time=extra_time, penalties=penalties,
-                               two_legged=two_legged, aggregate=aggregate)
+                               two_legged=two_legged, aggregate=aggregate,
+                               extended_markets=extended_markets)
 
         if result == "PENDING":
             log.warning("Could not evaluate bet_type='%s' pick='%s'", bet_type, pick)
@@ -1070,6 +1411,7 @@ def run_auto_results(
                         extra_time=extra_time, penalties=penalties,
                         two_legged=two_legged,
                         scope_ft=_pick_scope(pick) == "ft",
+                        extended_markets=extended_markets,
                         margin_known=_regulation_goal_difference(
                             home_score, away_score, aggregate, two_legged=two_legged
                         ) is not None,

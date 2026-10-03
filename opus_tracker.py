@@ -59,6 +59,10 @@ OPUS_HEADERS = [
     "Claude Prob %", "Market Prob %",
     "League", "Kickoff UTC", "Closing Odds", "Market Odds", "Pick Tier",
     "Stake EUR (SIM)",
+    # 4 Oct 2026: 'Extended market' on a pick from opus_shadow's extra-market
+    # set (Draw No Bet, 1.5/3.5 totals, team totals, win to nil); blank for every
+    # market production also offers. Those picks are never Core.
+    "Market Tag",
 ]
 
 # Simulated money only. €1000 start, flat €100 on every pick (user's chosen
@@ -123,6 +127,7 @@ def log_opus_pick(
     market_odds: float | None = None,
     pick_tier: str = PICK_TIER_CORE,
     stake: float | None = None,
+    market_tag: str = "",
 ) -> None:
     """
     Append one Opus pick. Duplicate-guarded on (date, match, bet_type, pick)
@@ -182,6 +187,7 @@ def log_opus_pick(
         round(float(market_odds), 2) if market_odds is not None else "",
         pick_tier or PICK_TIER_CORE,
         round(float(stake), 2) if stake is not None else "",
+        market_tag or "",
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")

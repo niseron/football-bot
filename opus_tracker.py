@@ -29,6 +29,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 import gspread
+from gspread.utils import rowcol_to_a1
 
 from excel_tracker import (
     PICK_TIER_CORE,
@@ -74,6 +75,21 @@ OPUS_STARTING_BANKROLL = 1000.0   # EUR, start of the running bankroll column
 OPUS_FLAT_STAKE        = 100.0    # EUR on every pick, no sizing model
 
 _SETTLED_RESULTS = ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID")
+
+# Corners / cards / shots-on-target picks (4 Oct 2026). The Odds API feed the
+# bot uses carries no price for them, so their Odds cell is Opus's own estimate
+# and a P&L off it would be invented money. Until real prices exist they are
+# tagged ESTIMATED_ODDS_NOTE, settle to a Result with a BLANK Profit/Loss, and
+# are skipped by every Opus P&L total — the running total, the SIM bankroll and
+# both breakdowns. What they report is the hit rate per line, on their own tab.
+ESTIMATED_ODDS_NOTE = "Estimated odds"
+OPUS_STATS_SHEET_NAME = "Opus Stats Markets"
+
+
+def is_estimated_odds_pick(bet_type: str, pick: str) -> bool:
+    """A stats-market pick (corners, cards, shots, …) — priced on Opus's estimate only."""
+    from auto_results import classify_market
+    return classify_market(bet_type or "", pick or "") == "stat"
 
 
 # ── Connection ────────────────────────────────────────────────────────────────
@@ -277,7 +293,10 @@ def update_opus_row_result(sheet_row: int, result: str, pnl: float) -> bool:
     """
     try:
         ws = _opus_ws()
-        ws.update(values=[[result, round(float(pnl), 2)]],
+        # An estimated-odds row records the verdict only — see ESTIMATED_ODDS_NOTE.
+        bt_pk = ((ws.get(f"C{sheet_row}:D{sheet_row}") or [[]])[0] + ["", ""])[:2]
+        pnl_cell = "" if is_estimated_odds_pick(*bt_pk) else round(float(pnl), 2)
+        ws.update(values=[[result, pnl_cell]],
                   range_name=f"G{sheet_row}:H{sheet_row}",
                   value_input_option="USER_ENTERED")
         return True
@@ -296,6 +315,11 @@ def recalculate_opus_running_totals() -> None:
     Extended alike, moves the shadow's running total. The tier split exists
     here for comparability with the football tab, not to protect a baseline —
     the shadow has no baseline to protect.
+
+    Estimated-odds rows (stats markets) are the exception: they never move the
+    running total or the bankroll. This pass also repairs them idempotently —
+    a P&L already written on one (before 4 Oct 2026's change, or by hand) is
+    blanked and its Market Tag gains ESTIMATED_ODDS_NOTE.
     """
     try:
         ws = _opus_ws()
@@ -310,15 +334,28 @@ def recalculate_opus_running_totals() -> None:
     try:
         res_i, pnl_i = header.index("Result"), header.index("Profit/Loss")
         stake_i = header.index("Stake EUR (SIM)")
+        bt_i, pk_i = header.index("Bet Type"), header.index("Pick")
     except ValueError as exc:
         log.error("opus_tracker: header missing a required column: %s", exc)
         return
+    tag_i = header.index("Market Tag") if "Market Tag" in header else None
 
     running, bankroll = 0.0, OPUS_STARTING_BANKROLL
     updates = []
     for i, row in enumerate(rows[1:], start=2):
         result = row[res_i] if len(row) > res_i else ""
         pnl_str = row[pnl_i] if len(row) > pnl_i else ""
+        if row and row[0] and is_estimated_odds_pick(
+                row[bt_i] if len(row) > bt_i else "", row[pk_i] if len(row) > pk_i else ""):
+            if pnl_str:
+                updates.append({"range": rowcol_to_a1(i, pnl_i + 1), "values": [[""]]})
+            tag = (row[tag_i] if tag_i is not None and len(row) > tag_i else "").strip()
+            if tag_i is not None and ESTIMATED_ODDS_NOTE not in tag:
+                new_tag = f"{tag} · {ESTIMATED_ODDS_NOTE}" if tag else ESTIMATED_ODDS_NOTE
+                updates.append({"range": rowcol_to_a1(i, tag_i + 1), "values": [[new_tag]]})
+            updates.append({"range": f"I{i}", "values": [[""]]})
+            updates.append({"range": f"J{i}", "values": [[""]]})
+            continue
         if result in _SETTLED_RESULTS and pnl_str:
             try:
                 units = float(pnl_str)
@@ -466,10 +503,90 @@ def finalize_opus_sheet() -> None:
     Finalizer hook for run_auto_results — recalculate totals, then repaint.
 
     Order matters and mirrors excel_tracker's: the recalculation writes the
-    Result-driven columns, the repaint colours what is now there.
+    Result-driven columns, the repaint colours what is now there. The stats
+    hit-rate tab is rebuilt last, from the settled results.
     """
     recalculate_opus_running_totals()
     apply_opus_formatting()
+    write_opus_stats_market_summary()
+
+
+# ── Estimated-odds stats markets: hit rate per line, no P&L ──────────────────
+
+STATS_SUMMARY_HEADERS = ["Market", "Scope", "Side", "Line", "Picks", "Settled",
+                         "Hits", "Misses", "Voids", "Hit Rate %"]
+
+
+def stats_market_rows(rows: list[list[str]]) -> list[list]:
+    """
+    The 'Opus Stats Markets' table from the Opus tab's values: one line per
+    (stat, match/team, Over/Under, line) with pick count, settled, hits, misses,
+    voids and hit rate, then an overall line. Pure — no Sheets access.
+    Hit rate is hits / (hits + misses); a VOID is neither.
+    """
+    from auto_results import _STAT_WORDS, _total_line, _total_side_name, stat_market_kind
+
+    header = rows[0] if rows else []
+    try:
+        m_i, bt_i, pk_i, res_i = (header.index("Match"), header.index("Bet Type"),
+                                  header.index("Pick"), header.index("Result"))
+    except ValueError:
+        return []
+
+    def cell(row: list, i: int) -> str:
+        return (row[i] if len(row) > i else "").strip()
+
+    groups: dict[tuple, dict] = {}
+    for row in rows[1:]:
+        bt, pk, result = cell(row, bt_i), cell(row, pk_i), cell(row, res_i).upper()
+        if not row or not row[0] or not is_estimated_odds_pick(bt, pk):
+            continue
+        hn, _, an = cell(row, m_i).lower().partition(" vs ")
+        btl, pkl = bt.lower(), pk.lower()
+        kind = stat_market_kind(btl, pkl, hn, an)
+        shape, _side = _total_side_name(btl, pkl, hn, an, allowed=_STAT_WORDS)
+        line = _total_line(btl, pkl, hn, an)
+        market = (kind or "other stat").replace("_", " ").capitalize()
+        scope = {"match": "Match total", "team": "One team"}.get(shape, "Other")
+        direction = "Over" if "over" in pkl else ("Under" if "under" in pkl else "?")
+        g = groups.setdefault((market, scope, direction, line if line is not None else ""),
+                              {"picks": 0, "WIN": 0, "LOSS": 0, "VOID": 0})
+        g["picks"] += 1
+        if result in ("WIN", "LOSS", "VOID"):
+            g[result] += 1
+
+    def line_for(label: list, g: dict) -> list:
+        decided = g["WIN"] + g["LOSS"]
+        rate = round(g["WIN"] / decided * 100, 1) if decided else ""
+        return label + [g["picks"], decided + g["VOID"], g["WIN"], g["LOSS"], g["VOID"], rate]
+
+    out = [line_for(list(k), g)
+           for k, g in sorted(groups.items(), key=lambda kv: tuple(map(str, kv[0])))]
+    total = {"picks": 0, "WIN": 0, "LOSS": 0, "VOID": 0}
+    for g in groups.values():
+        for k in total:
+            total[k] += g[k]
+    out.append(line_for(["All stats markets", "", "", ""], total))
+    return out
+
+
+def write_opus_stats_market_summary() -> None:
+    """Rebuild the 'Opus Stats Markets' tab from the Opus tab. Non-fatal throughout."""
+    try:
+        table = stats_market_rows(_opus_ws().get_all_values())
+        ss = _get_spreadsheet()
+        try:
+            ws = ss.worksheet(OPUS_STATS_SHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = ss.add_worksheet(OPUS_STATS_SHEET_NAME, rows=200, cols=len(STATS_SUMMARY_HEADERS))
+        note = [f"{ESTIMATED_ODDS_NOTE}: no bookmaker price exists for these markets on the "
+                f"bot's odds feed, so they carry no P&L and are excluded from every Opus P&L "
+                f"total. Hit rate = hits / (hits + misses)."]
+        ws.clear()
+        ws.update(values=[note, [], STATS_SUMMARY_HEADERS] + table,
+                  range_name="A1", value_input_option="RAW")
+    except Exception as exc:
+        log.warning("opus_tracker: stats-market summary not written (non-fatal): %s", exc)
 
 
 # ── Reporting ────────────────────────────────────────────────────────────────
@@ -503,6 +620,8 @@ def get_opus_bet_type_breakdown() -> list[dict]:
             pnl = float(row[pnl_i]) if len(row) > pnl_i and row[pnl_i] else 0.0
         except ValueError:
             pnl = 0.0
+        if is_estimated_odds_pick(bet_type, row[3] if len(row) > 3 else ""):
+            pnl = 0.0   # verdict only — never counted in a P&L total
         g = groups.setdefault(bet_type, {"wins": 0, "losses": 0, "pnl": 0.0})
         if result == "WIN":
             g["wins"] += 1
@@ -564,7 +683,9 @@ def get_opus_tier_breakdown() -> dict:
             "picks": len(subset), "settled": len(settled),
             "wins": len(wins), "losses": len(losses),
             "win_rate": round(len(wins) / decided * 100, 1) if decided else 0.0,
-            "pnl": round(sum(_pnl(r) for r in settled), 2),
+            "pnl": round(sum(_pnl(r) for r in settled
+                             if not is_estimated_odds_pick(r[2] if len(r) > 2 else "",
+                                                           r[3] if len(r) > 3 else "")), 2),
         }
     return out
 

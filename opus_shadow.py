@@ -111,6 +111,31 @@ OPUS_CHANNEL = "opus-shadow"
 OPUS_EXTENDED_MARKETS = True
 OPUS_MARKET_TAG = "Extended market"
 
+# Corners / cards / shots on target carry no bookmaker price on the bot's Odds
+# API feed (4 Oct 2026), so the odds on those rows are Opus's own estimate. They
+# are tagged so on the tab and the embed, and opus_tracker keeps them out of
+# every Opus P&L total — they report hit rate and the line picked only. Lift
+# this only once a real price is attached to them.
+OPUS_ESTIMATED_ODDS_TAG = f"{OPUS_MARKET_TAG} · Estimated odds"
+
+# Pre-match stat averages (opus_stats, 4 Oct 2026): each side's last 10 matches,
+# corners / cards / shots on target for and against, 90-minute figures only, fed
+# to Opus on every fixture. Shadow only — the production payload and prompt are
+# untouched. Measured cost on the 19 Sep slate: ~+9,800 input tokens per run
+# (~$0.05) at 5 matches per team; see opus_stats for the RapidAPI side.
+OPUS_STAT_AVERAGES = True
+
+_OPUS_STAT_AVERAGES_PROMPT = """
+
+TEAM STAT AVERAGES: every fixture carries "home_stats_last10" and "away_stats_last10" — that team's
+per-match averages over its last 10 finished matches (all competitions, home and away), 90 minutes only
+(extra time excluded), counting only matches whose corners, cards and shots on target are all known.
+"_for" is the team's own figure, "_against" its opponents'. Cards count each yellow 1 and each red 1, a
+second-yellow dismissal 2 — the same rule as the cards market. "matches_averaged" says how many matches
+the average rests on. When the value is a sentence starting INSUFFICIENT DATA or UNAVAILABLE there is no
+reliable average for that team: do not invent one, and treat a corners, cards or shots-on-target pick
+involving that team with extra caution."""
+
 _OPUS_EXTENDED_MARKETS_PROMPT = """
 
 ADDITIONAL MARKETS — you may also recommend these, using EXACTLY these formats:
@@ -145,7 +170,10 @@ def opus_enabled() -> bool:
 
 # ── Analysis ─────────────────────────────────────────────────────────────────
 
-def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
+def analyse_with_opus(
+    fixtures_by_league: dict[str, list[dict]],
+    stat_context: dict | None = None,
+) -> list[dict]:
     """
     The production payload and SYSTEM_PROMPT, model swapped to Opus 5.
 
@@ -153,6 +181,10 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
     main.analyse_with_claude does it: dedup and the cap operate on position, so
     a model-returned rank number could tier a pick differently from where it
     actually sits. Never pads — a short list is the correct outcome.
+
+    `stat_context` (opus_stats.build_stat_averages' shape, keyed by match_id)
+    is merged into the payload's COPIES of the fixtures; the production pool
+    itself is never mutated.
     """
     # Imported inside the function: main.py imports this module lazily from
     # daily_picks_job, so a module-level back-import would be circular.
@@ -169,12 +201,18 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
         league: [{k: v for k, v in f.items() if k not in _STRIP} for f in fixtures]
         for league, fixtures in fixtures_by_league.items()
     }
+    if stat_context:
+        for fixtures in clean.values():
+            for f in fixtures:
+                f.update(stat_context.get(f.get("match_id")) or {})
     payload = json.dumps(clean, indent=2, default=str)
 
     # The shadow's own addendum is appended to a COPY here; main.SYSTEM_PROMPT —
     # what production sends — is never modified.
-    system_prompt = SYSTEM_PROMPT + (
-        _OPUS_EXTENDED_MARKETS_PROMPT if OPUS_EXTENDED_MARKETS else ""
+    system_prompt = (
+        SYSTEM_PROMPT
+        + (_OPUS_STAT_AVERAGES_PROMPT if stat_context else "")
+        + (_OPUS_EXTENDED_MARKETS_PROMPT if OPUS_EXTENDED_MARKETS else "")
     )
 
     message = claude.messages.create(
@@ -252,18 +290,19 @@ def analyse_with_opus(fixtures_by_league: dict[str, list[dict]]) -> list[dict]:
     #
     # Extended-market picks (OPUS_EXTENDED_MARKETS) are barred from Core the same
     # way: Core is the comparison with Sonnet, which is not offered those markets.
-    from auto_results import is_extended_market
+    from auto_results import classify_market, is_extended_market
     from main import EXTENDED_ONLY_COMPETITIONS
 
     n_core = 0
     for i, pick in enumerate(deduped, 1):
         pick["rank"] = i
-        pick["market_tag"] = (
-            OPUS_MARKET_TAG
-            if OPUS_EXTENDED_MARKETS and is_extended_market(
-                pick.get("bet_type") or "", pick.get("pick") or "")
-            else ""
-        )
+        bt, pk = pick.get("bet_type") or "", pick.get("pick") or ""
+        if OPUS_EXTENDED_MARKETS and classify_market(bt, pk) == "stat":
+            pick["market_tag"] = OPUS_ESTIMATED_ODDS_TAG
+        elif OPUS_EXTENDED_MARKETS and is_extended_market(bt, pk):
+            pick["market_tag"] = OPUS_MARKET_TAG
+        else:
+            pick["market_tag"] = ""
         eligible = (pick.get("league") not in EXTENDED_ONLY_COMPETITIONS
                     and not pick["market_tag"])
         if eligible and n_core < OPUS_CORE_PICKS_PER_RUN:
@@ -335,7 +374,18 @@ def run_opus_shadow(
         log_opus_pick,
     )
 
-    picks = analyse_with_opus(fixtures_by_league)
+    stat_context = None
+    if OPUS_STAT_AVERAGES:
+        from opus_stats import build_stat_averages, unavailable_for_all
+        try:
+            stat_context = build_stat_averages(fixtures_by_league)
+        except Exception as exc:
+            # Opus is still told, fixture by fixture, that there is no average —
+            # silence would read as "no stats exist" rather than "fetch failed".
+            log.warning("opus_shadow: stat averages failed — marking all unavailable: %s", exc)
+            stat_context = unavailable_for_all(fixtures_by_league, "the stats fetch failed this run")
+
+    picks = analyse_with_opus(fixtures_by_league, stat_context)
     if not picks:
         log.info("opus_shadow: Opus returned no picks — nothing to log")
         return []

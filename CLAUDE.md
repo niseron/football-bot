@@ -356,7 +356,10 @@ stats and lineups under other names — `football-get-match-event-all-stats`,
 xG per team, per half — still no goals per half), `football-get-hometeam-lineup` /
 `-awayteam-lineup` (XI, subs, `unavailable`; a non-null `lastMatch` means the XI is
 the previous match's placeholder, not the confirmed one) and
-`football-get-list-player` (squad with injury flags). Nothing uses them yet.
+`football-get-list-player` (squad with injury flags). Only the Opus shadow
+uses them (stats-market settlement and `opus_stats`), never production.
+`football-get-match-referee?eventid=` gives the referee NAME (no id) for
+upcoming and finished matches; there is no referee-history endpoint (4 Oct 2026).
 
 - **The 90-minute MARGIN is derivable; the 90-minute SCORE is not.** Extra time
   in a two-legged tie means the aggregate was level at 90' of the second leg, so
@@ -459,7 +462,29 @@ none actually settled that way, so no row was corrected.
     red, the rule the Opus prompt states. A red card with unreadable lineups, or a
     second yellow when a dismissal came in extra time, is PENDING.
   * **Partial data is PENDING** with a reason naming the missing figure.
-  No Odds API market exists for them, so they run on Opus's estimated odds.
+  No price is attached to them, so they run on Opus's estimated odds. Verified
+  4 Oct 2026 on the event-odds endpoint (all regions): corners totals exist on
+  2-6 books per big-league fixture, almost all US/AU (betrivers, ballybet,
+  unibet, tabtouch, betparx; leovegas is the only EU one, on 2 of 10); NO cards
+  market and NO team shots-on-target market at any book (player SOT props only).
+  The bot's own call (`eu`, h2h/totals/spreads) sees none of it. Not built on.
+- **"Estimated odds" rows carry no P&L** (Opus only, 4 Oct 2026). Every stats
+  pick (`opus_tracker.is_estimated_odds_pick` = `classify_market == "stat"`) is
+  tagged `Extended market · Estimated odds`, settles to a Result with a BLANK
+  Profit/Loss, and is skipped by the running total, the SIM bankroll and both
+  breakdowns; `recalculate_opus_running_totals` re-blanks/re-tags any that slip
+  through. Hit rate per (stat, scope, side, line) lives on its own tab,
+  `Opus Stats Markets`, rebuilt by `finalize_opus_sheet`. Lift this only when a
+  real price is attached.
+- **Pre-match stat averages, Opus only** (`opus_stats.py`, `OPUS_STAT_AVERAGES`,
+  4 Oct 2026): per side, last 10 finished matches, corners / cards / shots on
+  target for and against, 90-minute figures read through the SAME
+  `fetch_match_stats` + `extra_time_played` rules settlement uses, merged into
+  the shadow's payload copies as `home_stats_last10` / `away_stats_last10` with
+  an addendum to the shadow's prompt copy. Fewer than 5 complete matches → a
+  sentence saying so, never an average. Cached by match id in memory and in the
+  gitignored `opus_stats_cache.json`; a cold run is ~600-800 paced RapidAPI
+  calls (~20-30 min, after production has delivered). `main.py` is untouched.
 - Pinned by `tests/test_markets.py`, including that production's prompts carry
   no extra markets and the flag's default is False.
 
@@ -476,7 +501,9 @@ discovery RANKING that decides whether a small competition is ever found at all 
 each ordering test carries the negative control that fails without the mechanism.
 It also pins the Odds API name aliases. `tests/test_markets.py` pins market
 recognition (line from the pick, stat markets PENDING) and the Opus-only extra
-markets with their extra-time rules. Pure — no
+markets with their extra-time rules. `tests/test_opus_stats.py` pins the
+shadow's stat averages (90-minute figures, the 5-match floor, the match-id
+cache, production prompts untouched) and the estimated-odds P&L exclusion. Pure — no
 network, no Sheets, no Discord. Run from `football-bot/`:
 
 ```

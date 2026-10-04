@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 *.pyo
 cards/
+opus_stats_cache.json

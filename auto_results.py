@@ -1042,6 +1042,40 @@ def _rapid_get(endpoint: str, params: dict) -> dict | None:
         return None
 
 
+def _finished_on_penalties(status: dict) -> bool:
+    """The feed's status.reason says the match ended in a shootout."""
+    reason = status.get("reason") or {}
+    fin_txt = f"{reason.get('short', '')} {reason.get('long', '')}".lower()
+    return fin_txt.startswith("pen") or "penalt" in fin_txt
+
+
+def extra_time_played(status: dict) -> bool:
+    """
+    Was extra time actually PLAYED in this finished match (a by-date feed
+    match's `status`)? Shared by settlement and the Opus shadow's pre-match
+    stat averages, so a 90-minute figure means the same thing in both.
+
+    A shootout straight after 90 minutes (CONMEBOL, many domestic cups) leaves
+    the published score equal to the 90-minute score, so every market settles
+    exactly — but until 1 Sep 2026 'penalties' alone was read as 'went past 90'
+    and those all went to manual settlement for nothing. status.halfs carries a
+    start timestamp per period, so an extra-time half appears there iff one was
+    played.
+    """
+    reason = status.get("reason") or {}
+    fin_txt = f"{reason.get('short', '')} {reason.get('long', '')}".lower()
+    if "aet" in fin_txt or "extra time" in fin_txt:
+        return True
+    halfs = status.get("halfs") or {}
+    if not halfs:
+        # No period data at all: cannot rule extra time out, so assume the
+        # cautious side for a tie that needed separating. Wrongly assuming
+        # extra time costs a manual settlement; wrongly assuming none settles a
+        # bet off a score that is not the 90-minute one.
+        return _finished_on_penalties(status)
+    return bool(halfs.get("firstExtraHalfStarted"))
+
+
 def fetch_match_stats(match_id: int, *, halves: bool, dismissals: bool) -> dict:
     """
     What a stats pick settles on: {'full', 'h1', 'h2', 'second_yellows'}.
@@ -1571,29 +1605,8 @@ def run_auto_results(
         # Knockout finishes: the API's status.reason says how the match ended
         # (FT / AET / Pen) while the score always includes extra time.
         status     = api_match.get("status") or {}
-        reason     = status.get("reason") or {}
-        fin_txt    = f"{reason.get('short', '')} {reason.get('long', '')}".lower()
-        penalties  = fin_txt.startswith("pen") or "penalt" in fin_txt
-        aet_reason = "aet" in fin_txt or "extra time" in fin_txt
-
-        # Did extra time actually get PLAYED? A shootout straight after 90
-        # minutes (CONMEBOL, many domestic cups) leaves the published score
-        # equal to the 90-minute score, so every market settles exactly — but
-        # until 1 Sep 2026 'penalties' alone was read as 'went past 90' and
-        # those all went to manual settlement for nothing. status.halfs carries
-        # a start timestamp per period, so an extra-time half appears there iff
-        # one was played.
-        halfs = status.get("halfs") or {}
-        if aet_reason:
-            extra_time = True
-        elif not halfs:
-            # No period data at all: cannot rule extra time out, so assume the
-            # cautious side for a tie that needed separating. Wrongly assuming
-            # extra time costs a manual settlement; wrongly assuming none
-            # settles a bet off a score that is not the 90-minute one.
-            extra_time = bool(penalties)
-        else:
-            extra_time = bool(halfs.get("firstExtraHalfStarted"))
+        penalties  = _finished_on_penalties(status)
+        extra_time = extra_time_played(status)
 
         # A two-legged tie carries an aggregate score, and that aggregate is
         # what pins the 90-minute margin — see _regulation_goal_difference().

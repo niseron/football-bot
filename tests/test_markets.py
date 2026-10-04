@@ -342,5 +342,195 @@ class ShadowGeneration(unittest.TestCase):
         self.assertEqual(by_pick["Over 2.5 Goals"]["pick_tier"], PICK_TIER_CORE)
 
 
+# ── Stats markets: corners, cards, shots on target (4 Oct 2026) ──────────────
+
+# Marseille vs PSG, 20 Sep 2026, as the feed reported it: Weah, sent off for a
+# second yellow, shows ONLY as a red — yellow_cards [2, 1] is the plain bookings.
+MARSEILLE_PSG = {
+    "full": {"corners": [3, 7], "yellow_cards": [2, 1], "red_cards": [1, 0],
+             "ShotsOnTarget": [4, 10]},
+    "h1": None, "h2": None, "second_yellows": [1, 0],
+}
+MH, MA = "Marseille", "Paris Saint-Germain"
+
+
+def stat(bt, pk, ms, *, home=MH, away=MA, **kw):
+    return ar.evaluate_pick(bt, pk, home, away, 1, 2, extended_markets=True,
+                            match_stats=ms, **kw)
+
+
+def stat_reason(bt, pk, ms, *, extra_time=False, extended=True):
+    return ar._pending_reason(bt, pk, home_name=MH, away_name=MA, extra_time=extra_time,
+                              penalties=False, two_legged=False, scope_ft=False,
+                              extended_markets=extended, match_stats=ms)
+
+
+class StatsMarkets(unittest.TestCase):
+
+    def test_corners_match_and_team(self):
+        self.assertEqual(stat("Total Corners", "Over 9.5 Corners", MARSEILLE_PSG), "WIN")    # 10
+        self.assertEqual(stat("Total Corners", "Under 9.5 Corners", MARSEILLE_PSG), "LOSS")
+        self.assertEqual(stat("Team Corners", "Paris Saint-Germain Over 6.5 Corners",
+                              MARSEILLE_PSG), "WIN")                                      # 7
+        self.assertEqual(stat("Team Corners", "Marseille Over 3.5 Corners", MARSEILLE_PSG), "LOSS")
+        self.assertEqual(stat("Total Corners", "Over 10 Corners", MARSEILLE_PSG), "VOID")
+        self.assertEqual(stat("Total Corners", "Over 9.25 Corners", MARSEILLE_PSG), "PENDING")
+
+    def test_second_yellow_counts_as_one_yellow_plus_one_red(self):
+        # 2 + 1 yellows, 1 red, +1 for Weah's first yellow the feed leaves out = 5.
+        self.assertEqual(stat("Total Cards", "Over 4.5 Cards", MARSEILLE_PSG), "WIN")
+        self.assertEqual(stat("Total Cards", "Over 5.5 Cards", MARSEILLE_PSG), "LOSS")
+        self.assertEqual(stat("Team Cards", "Marseille Over 3.5 Cards", MARSEILLE_PSG), "WIN")  # 4
+        self.assertEqual(stat("Team Cards", "Paris Saint-Germain Under 1.5 Cards",
+                              MARSEILLE_PSG), "WIN")                                       # 1
+
+    def test_straight_red_counts_once(self):
+        straight = dict(MARSEILLE_PSG, second_yellows=[0, 0])
+        self.assertEqual(stat("Total Cards", "Over 4.5 Cards", straight), "LOSS")   # 4
+
+    def test_red_card_without_readable_lineups_is_pending(self):
+        unknown = dict(MARSEILLE_PSG, second_yellows=None)
+        self.assertEqual(stat("Total Cards", "Over 4.5 Cards", unknown), "PENDING")
+        self.assertIn("second yellow", stat_reason("Total Cards", "Over 4.5 Cards", unknown))
+        # Corners do not need the lineups at all.
+        self.assertEqual(stat("Total Corners", "Over 9.5 Corners", unknown), "WIN")
+
+    def test_shots_on_target(self):
+        self.assertEqual(stat("Total Shots on Target", "Over 13.5 Shots on Target",
+                              MARSEILLE_PSG), "WIN")                                       # 14
+        self.assertEqual(stat("Team Shots on Target", "Marseille Under 4.5 Shots on Target",
+                              MARSEILLE_PSG), "WIN")                                       # 4
+
+    def test_partial_stats_are_pending_with_a_reason_never_settled(self):
+        # The 6-of-316 case: the stats block exists but a needed figure is missing.
+        partial = {"full": {"corners": [7, 8], "ShotsOnTarget": [6, 3]},
+                   "h1": None, "h2": None, "second_yellows": [0, 0]}
+        self.assertEqual(stat("Total Cards", "Over 3.5 Cards", partial), "PENDING")
+        reason = stat_reason("Total Cards", "Over 3.5 Cards", partial)
+        self.assertIn("yellow_cards", reason)
+        self.assertIn("never settled on partial data", reason)
+        self.assertEqual(stat("Total Corners", "Over 9.5 Corners", partial), "WIN")
+        # Nothing readable at all.
+        self.assertEqual(stat("Total Corners", "Over 9.5 Corners", None), "PENDING")
+        self.assertEqual(stat("Total Corners", "Over 9.5 Corners",
+                              {"full": {}, "h1": None, "h2": None, "second_yellows": [0, 0]}),
+                         "PENDING")
+
+    def test_extra_time_uses_the_half_split(self):
+        # Saudi Arabia vs Qatar, 3 Oct 2026 (0-0, pens): corners full [12, 2],
+        # halves [6, 1] + [3, 1] — the 90-minute total is 11, not 14.
+        saudi = {"full": {"corners": [12, 2], "yellow_cards": [2, 0], "red_cards": [0, 0],
+                          "ShotsOnTarget": [7, 0]},
+                 "h1": {"corners": [6, 1], "yellow_cards": [1, 0], "red_cards": [0, 0],
+                        "ShotsOnTarget": [4, 0]},
+                 "h2": {"corners": [3, 1], "yellow_cards": [0, 0], "red_cards": [0, 0],
+                        "ShotsOnTarget": [1, 0]},
+                 "second_yellows": [0, 0]}
+        args = dict(home="Saudi Arabia", away="Qatar", extra_time=True, penalties=True)
+        self.assertEqual(stat("Total Corners", "Over 11.5 Corners", saudi, **args), "LOSS")
+        self.assertEqual(stat("Total Corners", "Over 10.5 Corners", saudi, **args), "WIN")
+        self.assertEqual(stat("Total Cards", "Under 1.5 Cards", saudi, **args), "WIN")   # 1
+
+    def test_extra_time_without_a_half_split_is_pending(self):
+        # Kilmarnock vs Aberdeen, 12 Sep 2026: full-match figures only.
+        kilmarnock = {"full": {"corners": [7, 8], "ShotsOnTarget": [6, 3]},
+                      "h1": {}, "h2": {}, "second_yellows": [0, 0]}
+        self.assertEqual(stat("Total Corners", "Over 9.5 Corners", kilmarnock,
+                              extra_time=True), "PENDING")
+        self.assertIn("half split", stat_reason("Total Corners", "Over 9.5 Corners",
+                                                kilmarnock, extra_time=True))
+
+    def test_extra_time_dismissal_with_a_second_yellow_is_pending(self):
+        ms = {"full": {"corners": [5, 5], "yellow_cards": [3, 2], "red_cards": [1, 0],
+                       "ShotsOnTarget": [4, 4]},
+              "h1": {"corners": [2, 2], "yellow_cards": [1, 1], "red_cards": [0, 0],
+                     "ShotsOnTarget": [2, 2]},
+              "h2": {"corners": [2, 2], "yellow_cards": [1, 1], "red_cards": [0, 0],
+                     "ShotsOnTarget": [1, 1]},
+              "second_yellows": [1, 0]}
+        self.assertEqual(stat("Total Cards", "Over 3.5 Cards", ms, extra_time=True), "PENDING")
+
+    def test_full_time_scope_and_unsupported_stats_are_pending(self):
+        for bt, pk in (("Total Corners", "Over 9.5 Corners (Full-Time incl. ET/Pens)"),
+                       ("Total Shots", "Over 25.5 Shots"),
+                       ("Total Bookings", "Over 40.5 Booking Points"),
+                       ("Total Yellow Cards", "Over 3.5 Yellow Cards"),
+                       ("1st Half Corners", "Over 4.5 Corners"),
+                       ("Corner Handicap", "Marseille -1.5 Corners"),
+                       ("Most Corners", "Paris Saint-Germain")):
+            with self.subTest(bt=bt):
+                self.assertEqual(stat(bt, pk, MARSEILLE_PSG), "PENDING")
+
+    def test_a_club_named_red_is_not_a_red_card_market(self):
+        self.assertEqual(ar.stat_market_kind("Team Corners", "Red Bull Salzburg Over 4.5 Corners",
+                                             "Red Bull Salzburg", "Sturm Graz"), "corners")
+
+    def test_production_never_settles_stats_even_when_handed_them(self):
+        self.assertEqual(ar.evaluate_pick("Total Corners", "Over 9.5 Corners", MH, MA, 1, 2,
+                                          match_stats=MARSEILLE_PSG), "PENDING")
+        self.assertIn("stats market", stat_reason("Total Corners", "Over 9.5 Corners",
+                                                   MARSEILLE_PSG, extended=False))
+
+    def test_stats_markets_are_tagged_extended(self):
+        for bt, pk in (("Total Corners", "Over 9.5 Corners"),
+                       ("Team Cards", "Arsenal Over 1.5 Cards"),
+                       ("Total Shots on Target", "Over 8.5 Shots on Target"),
+                       ("Total Bookings", "Over 40.5 Booking Points")):
+            with self.subTest(bt=bt):
+                self.assertTrue(ar.is_extended_market(bt, pk))
+
+
+class StatsSettlementLoop(unittest.TestCase):
+    """The wait after kickoff, the fetch, and that production never fetches."""
+
+    ROW = {"sheet_row": 11, "date": date(2026, 9, 20), "match": "Marseille vs Paris Saint-Germain",
+           "bet_type": "Total Corners", "pick": "Over 9.5 Corners", "odds": 1.9,
+           "est_odds": 1.9, "market_odds": None}
+
+    def _run(self, scope, minutes_after_kickoff, **kw):
+        from datetime import datetime, timedelta, timezone
+        ko = datetime.now(timezone.utc) - timedelta(minutes=minutes_after_kickoff)
+        game = _fx(5802945, MH, MA, hs=1, as_=2, finished=True,
+                   utc=ko.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+        writes = []
+        with mock.patch.object(ar, "init_excel"), \
+             mock.patch.object(ar, "_fetch_matches_cached",
+                               side_effect=lambda d: [game] if d == date(2026, 9, 20) else []), \
+             mock.patch.object(ar, "fetch_match_stats", return_value=MARSEILLE_PSG) as fetch:
+            stats, _ = ar.run_auto_results(
+                7, pending_source=lambda _d: [dict(self.ROW)],
+                row_writer=lambda row, res, pnl: writes.append((row, res, pnl)),
+                finalizer=lambda: None, alert_scope=scope, **kw)
+        return stats, writes, fetch
+
+    def test_before_the_settle_delay_it_waits_without_fetching_or_alerting(self):
+        stats, writes, fetch = self._run("test-stats-early",
+                                         ar.STATS_SETTLE_AFTER_KICKOFF_MIN - 10,
+                                         extended_markets=True)
+        fetch.assert_not_called()
+        self.assertEqual(writes, [])
+        self.assertEqual(stats["not_finished"], 1)
+        self.assertEqual(stats["pending_alerts"], [])
+
+    def test_after_the_delay_the_shadow_fetches_once_and_settles(self):
+        stats, writes, fetch = self._run("test-stats-ready",
+                                         ar.STATS_SETTLE_AFTER_KICKOFF_MIN + 10,
+                                         extended_markets=True)
+        fetch.assert_called_once_with(5802945, halves=False, dismissals=False)
+        self.assertEqual(writes, [(11, "WIN", ar.pnl_for_result("WIN", 1.9))])
+
+    def test_production_never_fetches_stats(self):
+        stats, writes, fetch = self._run("test-stats-prod",
+                                         ar.STATS_SETTLE_AFTER_KICKOFF_MIN + 10)
+        fetch.assert_not_called()
+        self.assertEqual(writes, [])
+        self.assertEqual(stats["pending"], 1)
+
+    def test_shadow_prompt_states_the_card_counting_rule(self):
+        import opus_shadow as O
+        self.assertIn("second yellow counts 2", O._OPUS_EXTENDED_MARKETS_PROMPT)
+        self.assertIn("Total Corners", O._OPUS_EXTENDED_MARKETS_PROMPT)
+
+
 if __name__ == "__main__":
     unittest.main()

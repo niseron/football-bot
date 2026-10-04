@@ -223,6 +223,7 @@ def _pending_reason(
     home_name: str = "",
     away_name: str = "",
     extended_markets: bool = False,
+    match_stats: dict | None = None,
 ) -> str:
     """
     Why evaluate_pick() could not settle this pick, in one human sentence.
@@ -237,6 +238,12 @@ def _pending_reason(
     """
     # The market itself comes first: no score detail makes these settleable.
     market = classify_market(bet_type, pick, home_name, away_name)
+    if market == "stat" and extended_markets:
+        return _stat_market_verdict(
+            bet_type.lower(), _strip_scope(pick), home_name.lower(), away_name.lower(),
+            match_stats, past_90=extra_time and not scope_ft,
+            scope="ft" if scope_ft else None,
+        )[1]
     if market in ("stat", "half"):
         return (f"'{bet_type}' is a {'stats' if market == 'stat' else 'half-time'} "
                 f"market — the feed's final score cannot settle it")
@@ -685,17 +692,21 @@ def _without_names(text: str, *names: str) -> str:
     return out
 
 
-def _total_side_name(bt: str, pk: str, hn: str, an: str) -> tuple[str, str | None]:
+def _total_side_name(bt: str, pk: str, hn: str, an: str,
+                     allowed: frozenset[str] = _TOTAL_WORDS) -> tuple[str, str | None]:
     """
     Read an Over/Under-shaped label: ('match', None) for a plain match total,
     ('team', 'home'|'away') when it names one side, ('unknown', None) when it
     carries words that are neither a total nor a side of this fixture.
+    `allowed` is the vocabulary that may sit beside the line — goals words by
+    default, goals words plus the stat's own words for a stats total.
     """
     leftover: list[str] = []
     for text in (_strip_scope(bt), _strip_scope(pk)):
         words = re.findall(r"[^\W\d_]+", _normalise_team(text))
-        leftover += [w for w in words if w not in _TOTAL_WORDS and w != "team"]
-    if not leftover and not _TEAM_TOTAL_RE.search(bt + " " + pk):
+        leftover += [w for w in words if w not in allowed and w != "team"]
+    team_label = _TEAM_TOTAL_RE.search(bt + " " + pk) or re.search(r"\bteam\b", bt + " " + pk)
+    if not leftover and not team_label:
         return "match", None
     rest = " ".join(leftover)
     home_fit = _side_matches(rest, _normalise_team(hn)) if rest else False
@@ -784,16 +795,18 @@ EXTENDED_MARKETS = ("draw_no_bet", "team_total", "win_to_nil")
 
 def is_extended_market(bet_type: str, pick: str) -> bool:
     """
-    True for a pick on a market outside the production prompt's set: Draw No
-    Bet, a team total, win to nil, or a goals total on any line other than 2.5.
-    The Opus shadow tags these and keeps them out of Core.
+    True for a pick on any market outside the production prompt's set: Draw No
+    Bet, a team total, win to nil, a goals total on any line other than 2.5,
+    and every stats or half-time market (corners, cards, shots on target, and
+    the unsupported ones too — an unsettleable pick must never hold a Core
+    slot). The Opus shadow tags these and keeps them out of Core.
     """
     kind = classify_market(bet_type, pick)
-    if kind in EXTENDED_MARKETS:
-        return True
+    if kind == "other":
+        return False
     if kind == "total":
         return _total_line(bet_type, pick, "", "") != 2.5
-    return False
+    return True
 
 
 def _goal_range_90(home_score: int, away_score: int, reg_gd: int | None,
@@ -918,6 +931,222 @@ def _evaluate_extended_market(
     return "PENDING"
 
 
+# ── Stats markets: corners, cards, shots on target (4 Oct 2026, Opus only) ───
+# Settled from the feed's match-stats endpoints, never from the score, and only
+# under extended_markets — production leaves every stats market PENDING.
+#
+# Verified on finished matches 3 Oct 2026 before this was written:
+#   * Extra time: in all 7 extra-time matches that carry half splits, first-half
+#     plus second-half stats fell SHORT of the full-match figures (corners,
+#     shots, yellows), so the halves are the 90-minute numbers and the full
+#     figures include extra time. Many extra-time ties carry no half split at
+#     all (Kilmarnock vs Aberdeen: full only) — those stay PENDING.
+#   * Second yellow: the feed books a second-yellow dismissal as ONE red and
+#     ZERO yellows — the player's first yellow is not in yellow_cards
+#     (Marseille vs PSG 20 Sep: Weah's lineup event is only 'secondYellow',
+#     yellow_cards counts just the two plain bookings, red_cards = 1). The
+#     prompt's card rule — and the common bookmaker convention — counts that
+#     player as one yellow PLUS one red, so each 'secondYellow' lineup event
+#     adds the missing yellow back: cards = yellow_cards + red_cards +
+#     second yellows. A straight red stays one card.
+#   * Stats are live during the match, so a finished match always has SOME
+#     figures; STATS_SETTLE_AFTER_KICKOFF_MIN is how long after kickoff they
+#     are treated as final (see its comment for the measurement).
+#
+# Partial data is never settled: a match whose stats lack a needed key (6 of
+# 316 recent top-league matches on 19 Sep 2026) is PENDING with a reason that
+# names the missing figure.
+
+# Measured 3-4 Oct 2026 by polling four live matches every 2 min from before
+# full time to 25-59 min after it: the feed marked them finished 116-121 min
+# after kickoff, and their figures KEPT CHANGING after that — Sint Maarten vs
+# St Vincent added shots on target at +2 and +6 min and a corner at +20 min,
+# Tolima vs Chicó a shot on target at +4 min, Loudoun vs Indy changed at the
+# final whistle; none changed after +20 min (stable for the remaining 38-59
+# min). Corrections run both ways (Tolima's SOT went 6 → 5 at 91'). So:
+# latest full time seen (~120 min) + more than double the longest correction
+# window (45 min) = 165 min after kickoff. The 30-minute settlement poller then
+# settles 165-195 min after kickoff. Four matches is a small sample, all
+# outside our leagues; re-measure if a settled stats pick ever disagrees with
+# the figure shown later.
+STATS_SETTLE_AFTER_KICKOFF_MIN = 165
+STATS_SETTLE_EXTRA_TIME_MIN    = 35   # extra time + its break, on top of the above
+
+_STAT_KEYS = ("corners", "yellow_cards", "red_cards", "ShotsOnTarget")
+_STAT_KINDS: dict[str, tuple[re.Pattern, tuple[str, ...]]] = {
+    "corners":         (re.compile(r"\bcorners?\b"), ("corners",)),
+    "cards":           (re.compile(r"\bcards?\b"), ("yellow_cards", "red_cards")),
+    "shots_on_target": (re.compile(r"\bshots?\s+on\s+target\b|\bsot\b"), ("ShotsOnTarget",)),
+}
+# Stats markets with a different counting rule or shape than a plain full-match
+# over/under — never settled here. Checked with team names cut out, so 'Red
+# Bull Salzburg Over 4.5 Corners' is not read as a red-card market.
+_STAT_UNSUPPORTED_RE = re.compile(
+    r"\b(?:yellow|red|booking|bookings|points|fouls?|offsides?|throw|tackles?|"
+    r"saves?|xg|possession|clean|handicap|most|1x2|race|first|last|next|"
+    r"player|anytime)\b"
+)
+_STAT_WORDS = _TOTAL_WORDS | {
+    "corner", "corners", "card", "cards", "shot", "shots", "on", "target", "sot",
+}
+
+
+def stat_market_kind(bet_type: str, pick: str, home_name: str = "",
+                     away_name: str = "") -> str | None:
+    """
+    'corners' | 'cards' | 'shots_on_target' for a full-match over/under on one
+    of those stats (match total or one side's), else None — total shots, fouls,
+    booking points, half-time or handicap stats markets are all None.
+    """
+    text = _without_names(f"{_strip_scope(bet_type)} {_strip_scope(pick)}",
+                          home_name, away_name)
+    if _HALF_MARKET_RE.search(text) or _STAT_UNSUPPORTED_RE.search(text):
+        return None
+    kinds = [k for k, (rx, _keys) in _STAT_KINDS.items() if rx.search(text)]
+    return kinds[0] if len(kinds) == 1 else None
+
+
+def _parse_stats(payload: dict | None) -> dict[str, list[int]]:
+    """The four settlement keys as [home, away] ints; a key that is absent or unreadable is left out."""
+    out: dict[str, list[int]] = {}
+    for grp in (((payload or {}).get("response") or {}).get("stats") or []):
+        for s in grp.get("stats") or []:
+            key = s.get("key")
+            if key not in _STAT_KEYS or key in out:
+                continue
+            try:
+                out[key] = [int(s["stats"][0]), int(s["stats"][1])]
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+    return out
+
+
+def _rapid_get(endpoint: str, params: dict) -> dict | None:
+    """One paced GET on the football host; None on any failure (logged)."""
+    global _last_api_call
+    elapsed = time.time() - _last_api_call
+    if elapsed < 2.0:
+        time.sleep(2.0 - elapsed)
+    try:
+        r = requests.get(
+            f"https://{HOST}/{endpoint}",
+            headers={"x-rapidapi-host": HOST, "x-rapidapi-key": os.environ.get("RAPIDAPI_KEY")},
+            params=params, timeout=15,
+        )
+        _last_api_call = time.time()
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        _last_api_call = time.time()
+        log.warning("stats: %s %s failed: %s", endpoint, params, exc)
+        return None
+
+
+def fetch_match_stats(match_id: int, *, halves: bool, dismissals: bool) -> dict:
+    """
+    What a stats pick settles on: {'full', 'h1', 'h2', 'second_yellows'}.
+
+    'h1'/'h2' are fetched only when extra time was played (`halves`), since
+    their sum is the 90-minute figure. 'second_yellows' ([home, away]) is read
+    from the two lineup endpoints only for a cards pick whose match had a red
+    card — otherwise it is [0, 0] without a call. Any of them is None when the
+    feed could not be read. 1-5 RapidAPI calls per settled stats pick.
+    """
+    full_raw = _rapid_get("football-get-match-event-all-stats", {"eventid": match_id})
+    out: dict = {"full": _parse_stats(full_raw) if full_raw is not None else None,
+                 "h1": None, "h2": None, "second_yellows": [0, 0]}
+    if halves:
+        h1 = _rapid_get("football-get-match-firstHalf-stats", {"eventid": match_id})
+        h2 = _rapid_get("football-get-match-secondhalf-stats", {"eventid": match_id})
+        out["h1"] = _parse_stats(h1) if h1 is not None else None
+        out["h2"] = _parse_stats(h2) if h2 is not None else None
+    reds = (out["full"] or {}).get("red_cards")
+    if dismissals and (reds is None or sum(reds) > 0):
+        counts = []
+        for side in ("home", "away"):
+            raw = _rapid_get(f"football-get-{side}team-lineup", {"eventid": match_id})
+            lineup = ((raw or {}).get("response") or {}).get("lineup")
+            if not lineup:
+                counts = None
+                break
+            players = (lineup.get("starters") or []) + (lineup.get("subs") or [])
+            counts.append(sum(
+                1 for p in players
+                for e in ((p.get("performance") or {}).get("events") or [])
+                if e.get("type") == "secondYellow"
+            ))
+        out["second_yellows"] = counts
+    return out
+
+
+def _stat_market_verdict(
+    bt: str, pk: str, hn: str, an: str, match_stats: dict | None, *,
+    past_90: bool, scope: str | None,
+) -> tuple[str, str]:
+    """
+    (result, reason) for a corners / cards / shots-on-target over/under. The
+    reason is the one sentence a PENDING alert carries; for a settled pick it
+    records the figure it settled on.
+    """
+    kind = stat_market_kind(bt, pk, hn, an)
+    if kind is None:
+        return "PENDING", ("a stats market this pipeline does not settle — only a "
+                           "full-match over/under on corners, cards or shots on target")
+    if scope == "ft":
+        return "PENDING", "a 90-minute stats market carrying a full-time scope"
+    shape, side = _total_side_name(bt, pk, hn, an, allowed=_STAT_WORDS)
+    if shape == "unknown":
+        return "PENDING", "the pick names something other than the match or one of its sides"
+    line = _total_line(bt, pk, hn, an)
+    over_pick, under_pick = "over" in pk, "under" in pk
+    if line is None or over_pick == under_pick:
+        return "PENDING", "the pick needs exactly one line and one of Over/Under"
+    if line * 2 != int(line * 2):
+        return "PENDING", "quarter lines are not settled"
+    if not match_stats or match_stats.get("full") is None:
+        return "PENDING", "the feed's match stats could not be read"
+
+    keys = _STAT_KINDS[kind][1]
+    full = match_stats["full"] or {}
+    if past_90:
+        h1, h2 = match_stats.get("h1") or {}, match_stats.get("h2") or {}
+        missing = [k for k in keys if k not in h1 or k not in h2]
+        if missing:
+            return "PENDING", (f"extra time was played and the feed has no first/second-"
+                               f"half split for {', '.join(missing)}, so the 90-minute "
+                               f"figure cannot be derived — never settled on the "
+                               f"full-match figure, which includes extra time")
+        vals = {k: [h1[k][0] + h2[k][0], h1[k][1] + h2[k][1]] for k in keys}
+    else:
+        missing = [k for k in keys if k not in full]
+        if missing:
+            return "PENDING", (f"the feed's stats for this match have no "
+                               f"{', '.join(missing)} — never settled on partial data")
+        vals = {k: full[k] for k in keys}
+
+    if kind == "cards":
+        reds = vals["red_cards"]
+        full_reds = full.get("red_cards")
+        second = match_stats.get("second_yellows")
+        if (sum(reds) > 0 or sum(full_reds or [0])) and second is None:
+            return "PENDING", ("a player was sent off and the lineups needed to tell "
+                               "a second yellow from a straight red could not be read")
+        second = second or [0, 0]
+        # Lineup events carry no minute. When a dismissal came in extra time a
+        # second yellow cannot be placed inside or outside the 90 minutes.
+        if past_90 and full_reds != reds and sum(second) > 0:
+            return "PENDING", ("a player was sent off in extra time and the lineups do "
+                               "not say whether a second yellow fell inside 90 minutes")
+        per_side = [vals["yellow_cards"][i] + reds[i] + second[i] for i in (0, 1)]
+    else:
+        per_side = vals[keys[0]]
+
+    figure = per_side[0] + per_side[1] if shape == "match" else per_side[0 if side == "home" else 1]
+    who = "match" if shape == "match" else (hn if side == "home" else an)
+    return (_line_outcome(figure, line, over_pick),
+            f"{kind.replace('_', ' ')} ({who}{', 90 min' if past_90 else ''}) = {figure}")
+
+
 def evaluate_pick(
     bet_type: str,
     pick: str,
@@ -931,9 +1160,13 @@ def evaluate_pick(
     two_legged: bool = False,
     aggregate: str | None = None,
     extended_markets: bool = False,
+    match_stats: dict | None = None,
 ) -> str:
     """
     Return WIN, LOSS, VOID, or PENDING (unrecognised bet type / data missing).
+
+    `match_stats` (fetch_match_stats' shape) is what a corners / cards / shots
+    on target pick settles on, and only under `extended_markets`.
 
     `extended_markets` (4 Oct 2026) enables Draw No Bet, team totals and win to
     nil. Only the Opus shadow passes it; production never does, so for Sonnet
@@ -1021,6 +1254,16 @@ def evaluate_pick(
 
     # ── Market recognition — before any substring dispatch ───────────────────
     market = classify_market(bet_type, pick, home_name, away_name)
+    if market == "stat" and extended_markets:
+        result, why = _stat_market_verdict(bet_type.lower(), pk, hn, an, match_stats,
+                                           past_90=extra_time and scope != "ft",
+                                           scope=scope)
+        if result == "PENDING":
+            log.warning("Stats pick '%s' (%s) not settled: %s — settle manually via "
+                        "update_result.py", pick, bet_type, why)
+        else:
+            log.info("Stats pick '%s' (%s) settled %s on %s", pick, bet_type, result, why)
+        return result
     if market in ("stat", "half", "unknown_total"):
         log.warning("Pick '%s' (%s) is on a market the final score cannot settle "
                     "(%s) — settle manually via update_result.py",
@@ -1271,6 +1514,9 @@ def run_auto_results(
 
     # ── 3. Evaluate each pick and write results ───────────────────────────────
     changed = False
+    # Match stats for corners / cards / shots-on-target picks (extended_markets
+    # only), keyed by (match id, needs lineups) so one run never re-fetches.
+    stats_cache: dict[tuple[int, bool], dict] = {}
     for p in pending:
         stats["checked"] += 1
         sheet_row = p["sheet_row"]
@@ -1354,10 +1600,36 @@ def run_auto_results(
         aggregate  = status.get("aggregatedStr")
         two_legged = bool(aggregate)
 
+        # Stats markets (Opus shadow only): the feed's stats are live during the
+        # match, so 'finished' alone does not make them final. Wait until
+        # STATS_SETTLE_AFTER_KICKOFF_MIN (+ extra time) has passed — counted as
+        # not finished, so no PENDING alert fires while the figures settle.
+        match_stats = None
+        stat_kind = (stat_market_kind(bet_type, pick, home_name, away_name)
+                     if extended_markets else None)
+        if stat_kind:
+            wait = STATS_SETTLE_AFTER_KICKOFF_MIN + (STATS_SETTLE_EXTRA_TIME_MIN if extra_time else 0)
+            try:
+                ko_dt = datetime.fromisoformat((status.get("utcTime") or "").replace("Z", "+00:00"))
+                ready = datetime.now(timezone.utc) >= ko_dt + timedelta(minutes=wait)
+            except ValueError:
+                ready = False
+            if not ready:
+                log.info("'%s' — %s stats treated as final only %d min after kickoff; waiting",
+                         match, stat_kind, wait)
+                stats["not_finished"] += 1
+                continue
+            cache_key = (api_match["id"], stat_kind == "cards")
+            if cache_key not in stats_cache:
+                stats_cache[cache_key] = fetch_match_stats(
+                    api_match["id"], halves=extra_time, dismissals=stat_kind == "cards")
+            match_stats = stats_cache[cache_key]
+
         result = evaluate_pick(bet_type, pick, home_name, away_name, home_score, away_score,
                                extra_time=extra_time, penalties=penalties,
                                two_legged=two_legged, aggregate=aggregate,
-                               extended_markets=extended_markets)
+                               extended_markets=extended_markets,
+                               match_stats=match_stats)
 
         if result == "PENDING":
             log.warning("Could not evaluate bet_type='%s' pick='%s'", bet_type, pick)
@@ -1412,6 +1684,7 @@ def run_auto_results(
                         two_legged=two_legged,
                         scope_ft=_pick_scope(pick) == "ft",
                         extended_markets=extended_markets,
+                        match_stats=match_stats,
                         margin_known=_regulation_goal_difference(
                             home_score, away_score, aggregate, two_legged=two_legged
                         ) is not None,

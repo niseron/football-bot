@@ -441,6 +441,25 @@ none actually settled that way, so no row was corrected.
   Sonnet comparison, and Sonnet is not offered them) and skips their market-odds
   enrichment, because `_match_market_odds` would price `Arsenal Over 1.5` off the
   MATCH 1.5 line. Any Opus total on a line other than 2.5 counts as extended.
+- **Corners, cards and shots on target (Opus only, 4 Oct 2026)** settle from the
+  match-stats endpoints via `fetch_match_stats` / `_stat_market_verdict` — never
+  from the score — and only under `extended_markets`. Production still returns
+  PENDING without fetching anything. Only full-match over/unders (match or one
+  side) on those three stats; total shots, booking points, yellow-only, half,
+  handicap and "most" markets are PENDING. Rules verified on real matches:
+  * **Settle only `STATS_SETTLE_AFTER_KICKOFF_MIN` = 165 min after kickoff**
+    (+35 if extra time). Stats are live and kept changing up to +20 min after
+    full time in a 4-match poll; before the delay the row counts as not finished,
+    so no PENDING alert fires.
+  * **Extra time:** first-half + second-half stats exclude it (7 of 7 matches),
+    so the halves are the 90-minute figure. No half split → PENDING, never the
+    full figure.
+  * **Second yellow:** the feed books it as ONE red, ZERO yellows. Cards are
+    therefore `yellow + red + secondYellow lineup events` — one yellow plus one
+    red, the rule the Opus prompt states. A red card with unreadable lineups, or a
+    second yellow when a dismissal came in extra time, is PENDING.
+  * **Partial data is PENDING** with a reason naming the missing figure.
+  No Odds API market exists for them, so they run on Opus's estimated odds.
 - Pinned by `tests/test_markets.py`, including that production's prompts carry
   no extra markets and the flag's default is False.
 

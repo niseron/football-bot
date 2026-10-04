@@ -90,7 +90,8 @@ OPUS_CORE_PICKS_PER_RUN = 5
 OPUS_CHANNEL = "opus-shadow"
 
 # Extra markets, Opus shadow ONLY (4 Oct 2026): Draw No Bet, Over/Under 1.5 and
-# 3.5, team total goals and win to nil. One switch drives all three halves —
+# 3.5, team total goals, win to nil, and corners / cards / shots on target
+# over/unders. One switch drives all three halves —
 # the prompt addendum below, the market tag + Core exclusion at generation, and
 # `extended_markets=True` at settlement, which is the only path that lets
 # auto_results.evaluate_pick settle DNB / team totals / win to nil. Production
@@ -100,7 +101,13 @@ OPUS_CHANNEL = "opus-shadow"
 # is the Opus-vs-Sonnet comparison, and Sonnet is not offered these markets.
 # They also skip market-odds enrichment — main._match_market_odds would read
 # 'Arsenal Over 1.5' as the MATCH 1.5 line and attach the wrong price.
-# Cost: the addendum is ~450 input tokens per run, ~$0.002 at Opus pricing.
+#
+# Corners, cards and shots on target joined the set the same day: settled from
+# the feed's match-stats endpoints (auto_results.fetch_match_stats), never from
+# the score, and only once STATS_SETTLE_AFTER_KICKOFF_MIN has passed. No
+# bookmaker price exists for them on The Odds API, so they run on Opus's odds.
+# Cost: the addendum measured 804 input tokens (count_tokens, 4 Oct 2026),
+# ~$0.004 per run. Settlement adds 1-5 RapidAPI calls per settled stats pick.
 OPUS_EXTENDED_MARKETS = True
 OPUS_MARKET_TAG = "Extended market"
 
@@ -113,10 +120,19 @@ ADDITIONAL MARKETS — you may also recommend these, using EXACTLY these formats
 - Team total goals: bet_type "Team Total Goals", pick "<Team> Over 1.5 Goals" or "<Team> Under 0.5 Goals"
   — the goals of that one team only, half-goal lines only.
 - Win to nil: bet_type "Win to Nil", pick "<Team> to Win to Nil" — the team wins AND concedes nothing.
+- Corners: bet_type "Total Corners", pick "Over 9.5 Corners"; or one team's: bet_type "Team Corners",
+  pick "<Team> Over 4.5 Corners".
+- Cards: bet_type "Total Cards", pick "Over 3.5 Cards"; or one team's: bet_type "Team Cards",
+  pick "<Team> Under 1.5 Cards". Counting rule: every yellow card counts 1 and every red card counts 1;
+  a player sent off for a second yellow counts 2 (one yellow plus one red). No booking points.
+- Shots on target: bet_type "Total Shots on Target", pick "Over 8.5 Shots on Target"; or one team's:
+  bet_type "Team Shots on Target", pick "<Team> Over 4.5 Shots on Target".
+For corners, cards and shots on target no live market prices are provided, so estimate the odds the way
+you would for any market. Use half lines (x.5) only.
 All of these settle on 90 minutes plus stoppage time only. On knockout fixtures you may append
 "(90 min)" to the pick, but NEVER "(Full-Time incl. ET/Pens)", and never put any other text in brackets.
-Never recommend corners, cards, shots, half-time or any other market not listed in this prompt — they
-cannot be settled.
+Never recommend total shots, fouls, offsides, booking points, half-time, handicap or "most corners/cards"
+markets, or any market not listed in this prompt — they cannot be settled.
 
 Return ONLY the JSON block, no other text."""
 

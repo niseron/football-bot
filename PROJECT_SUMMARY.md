@@ -1902,6 +1902,27 @@ at 90'), two-legged ties use the derived margin, team totals settle only when th
 whole possible 90-minute goal range clears the line. Prompt cost ~450 input tokens per
 run (~$0.002). Pinned by `tests/test_markets.py`. See also "Market recognition" below.
 
+**Corners, cards and shots on target, shadow only (4 Oct 2026).** Added to the same addendum
+and the same flag; settled from `football-get-match-event-all-stats` (plus the half-stats
+endpoints after extra time, and the two lineup endpoints for a cards pick whose match had a
+red card), never from the score. Verified first on real finished matches: (1) first-half +
+second-half stats exclude extra time — 7 of 7 extra-time matches with half splits came in
+short of the full figures — so the halves are the 90-minute numbers, and a tie with no half
+split stays PENDING; (2) the feed books a second-yellow dismissal as one red and zero yellows
+(Marseille vs PSG and Antwerp vs Union, 20 Sep), so cards = yellow + red + each `secondYellow`
+lineup event, i.e. one yellow plus one red, the rule the prompt states; (3) stats are live
+and kept changing up to +20 min after full time in a 4-match poll (full time 116-121 min
+after kickoff), so stats picks settle only 165 min after kickoff (+35 after extra time).
+Partial stats (6 of 316 recent top-league matches on 19 Sep) are PENDING with a reason.
+The addendum now measures 804 input tokens (~$0.004/run).
+
+**Measured, not built: feeding Opus each team's recent stats averages.** Replaying the real
+19 Sep club slate (52 fixtures, 104 teams) through main's own pool and form code: 316 stats
+calls cold (one per distinct recent match; 310 had full stats), +9,776 Opus input tokens per
+run (32,040 → 41,816, ~$0.049). With a cache keyed by match id the next four days needed 1
+new call in total, because the 48-hour window reuses the same teams — ~1,000-1,500 RapidAPI
+calls/month mostly from cold restarts, ~$0.85-1.50/month of Opus input.
+
 **Market recognition, both models (4 Oct 2026).** `auto_results.classify_market()` runs
 before evaluate_pick's substring dispatch: corners/cards/shots/half-time markets are
 PENDING with a named reason instead of settling on goals, team totals and win to nil no

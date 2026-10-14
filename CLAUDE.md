@@ -520,7 +520,15 @@ none actually settled that way, so no row was corrected.
     keying on every stored club would resolve the home league of every UEFA
     qualifier entrant at ~1 call each.
   * `run_all` loads both tabs at startup (`_load_referee_table`, shadow-gated,
-    non-fatal), so a broken tab shows in the deploy log, not at 12:00.
+    non-fatal), so a broken tab shows in the deploy log, not at 12:00. It runs
+    on a daemon thread AFTER `scheduler.start()` — never awaited before it:
+    gspread sets no request timeout, so an awaited load that hung would stop
+    every production job from starting. `tests/test_run_all_startup.py` pins
+    both the raising and the hung case (the hung one fails on the awaited form).
+  * `_note_quota` must never raise: it sits inside `_rapid_get`'s try, so a
+    raise would not crash anything — it would turn a good stats response into
+    `None` and leave the row unsettled. `test_markets.QuotaHeadersNeverBreakSettlement`
+    runs settlement with missing / empty / garbage headers through the real helper.
 - Pinned by `tests/test_markets.py`, including that production's prompts carry
   no extra markets and the flag's default is False.
 

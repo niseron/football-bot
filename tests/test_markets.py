@@ -532,5 +532,95 @@ class StatsSettlementLoop(unittest.TestCase):
         self.assertIn("Total Corners", O._OPUS_EXTENDED_MARKETS_PROMPT)
 
 
+class QuotaHeadersNeverBreakSettlement(unittest.TestCase):
+    """
+    _rapid_get records the plan's X-RateLimit headers for opus_referees' quota
+    guard (14 Oct 2026). Missing, empty or garbage headers must leave settlement
+    exactly as it was: only requests.get is faked, so the real _rapid_get,
+    _note_quota, fetch_match_stats and run_auto_results all run.
+    """
+
+    RAW_STATS = {"status": "success", "response": {"stats": [{"stats": [
+        {"key": "corners", "stats": [3, 7]}, {"key": "yellow_cards", "stats": [2, 1]},
+        {"key": "red_cards", "stats": [0, 0]}, {"key": "ShotsOnTarget", "stats": [4, 10]}]}]}}
+    BAD_HEADERS = {
+        "missing": {},
+        "empty": {"X-RateLimit-Requests-Limit": "", "X-RateLimit-Requests-Remaining": ""},
+        "garbage": {"X-RateLimit-Requests-Limit": "lots", "X-RateLimit-Requests-Remaining": "n/a"},
+        "decimal": {"X-RateLimit-Requests-Limit": "20000.0", "X-RateLimit-Requests-Remaining": "6e3"},
+        "limit only": {"X-RateLimit-Requests-Limit": "20000"},
+        "remaining only": {"X-RateLimit-Requests-Remaining": "6003"},
+        "none values": {"X-RateLimit-Requests-Limit": None, "X-RateLimit-Requests-Remaining": None},
+    }
+
+    def setUp(self):
+        self._saved = ar._rapid_quota
+        ar._rapid_quota = None
+        ar._matches_cache.clear()
+
+    def tearDown(self):
+        ar._rapid_quota = self._saved
+        ar._matches_cache.clear()
+
+    def _response(self, headers, payload):
+        from requests.structures import CaseInsensitiveDict
+        return mock.Mock(headers=CaseInsensitiveDict(headers),
+                         raise_for_status=mock.Mock(), json=mock.Mock(return_value=payload))
+
+    def _settle(self, headers, row, scope, **kw):
+        from datetime import datetime, timedelta, timezone
+        ko = datetime.now(timezone.utc) - timedelta(minutes=ar.STATS_SETTLE_AFTER_KICKOFF_MIN + 10)
+        game = _fx(5802945, MH, MA, hs=1, as_=2, finished=True,
+                   utc=ko.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+
+        def fake_get(url, headers=None, params=None, timeout=None):
+            if url.endswith("football-get-matches-by-date"):
+                body = {"response": {"matches": [game] if params["date"] == "20260920" else []}}
+            else:
+                body = self.RAW_STATS
+            return self._response(hdrs, body)
+
+        hdrs = headers
+        writes = []
+        with mock.patch.object(ar, "init_excel"), \
+                mock.patch.object(ar.requests, "get", side_effect=fake_get) as get, \
+                mock.patch.object(ar.time, "sleep"):
+            stats, _ = ar.run_auto_results(
+                7, pending_source=lambda _d: [dict(row)],
+                row_writer=lambda r, res, pnl: writes.append((r, res, pnl)),
+                finalizer=lambda: None, alert_scope=scope, **kw)
+        return stats, writes, get
+
+    def test_the_stats_path_settles_whatever_the_headers_say(self):
+        row = dict(StatsSettlementLoop.ROW)                     # Over 9.5 corners; 3 + 7 = 10
+        for name, headers in self.BAD_HEADERS.items():
+            with self.subTest(headers=name):
+                ar._rapid_quota = None
+                stats, writes, get = self._settle(headers, row, f"test-quota-{name}",
+                                                  extended_markets=True)
+                urls = [c.args[0] for c in get.call_args_list]
+                self.assertTrue(any(u.endswith("football-get-match-event-all-stats") for u in urls))
+                self.assertEqual(writes, [(11, "WIN", ar.pnl_for_result("WIN", 1.9))])
+                self.assertEqual(stats["errors"], 0)
+                self.assertIsNone(ar.rapid_quota())             # nothing recorded, nothing raised
+
+    def test_production_settlement_is_unaffected(self):
+        row = {"sheet_row": 12, "date": date(2026, 9, 20), "match": f"{MH} vs {MA}",
+               "bet_type": "Match Winner", "pick": f"{MA} Win", "odds": 1.9,
+               "est_odds": 1.9, "market_odds": None}
+        for name, headers in self.BAD_HEADERS.items():
+            with self.subTest(headers=name):
+                stats, writes, _ = self._settle(headers, row, f"test-quota-prod-{name}")
+                self.assertEqual(writes, [(12, "WIN", ar.pnl_for_result("WIN", 1.9))])
+
+    def test_valid_headers_are_recorded(self):
+        """Control: the code under test really runs — good headers ARE read."""
+        good = {"X-RateLimit-Requests-Limit": "20000", "X-RateLimit-Requests-Remaining": "6003"}
+        _, writes, _ = self._settle(good, dict(StatsSettlementLoop.ROW), "test-quota-good",
+                                    extended_markets=True)
+        self.assertEqual(writes, [(11, "WIN", ar.pnl_for_result("WIN", 1.9))])
+        self.assertEqual(ar.rapid_quota()[:2], (20000, 6003))
+
+
 if __name__ == "__main__":
     unittest.main()

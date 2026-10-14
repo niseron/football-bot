@@ -14,6 +14,7 @@ football jobs.
 """
 import asyncio
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 
 from env_loader import load_env
@@ -190,7 +191,6 @@ def _load_referee_table() -> None:
 
 async def main() -> None:
     init_db()
-    await asyncio.to_thread(_load_referee_table)
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -259,6 +259,10 @@ async def main() -> None:
         hour=23, minute=15, timezone="UTC",
     )
     scheduler.start()
+    # After start() and on a daemon thread, never awaited before it: gspread
+    # sets no request timeout, so a hung Sheets read awaited here would keep
+    # the scheduler — Core picks, settlement, every job — from ever starting.
+    threading.Thread(target=_load_referee_table, name="referee-table-load", daemon=True).start()
 
     log.info(
         "Scheduler running — football: daily picks 12:00, "

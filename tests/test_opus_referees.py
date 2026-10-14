@@ -353,6 +353,23 @@ class Load(unittest.TestCase):
         self.assertEqual(set(R._rows), {2})
         self.assertEqual(R._scanned_days, {"20250802"})
 
+    def test_malformed_rows_are_skipped_never_raised(self):
+        ref = [R.REF_HEADERS,
+               [],                                                   # empty row
+               ["abc", "20250801", "Premier League"],                # non-numeric id, short
+               ["7", "20250801", "Premier League"] + ["x"] * 30,     # far too many columns
+               ["", "", ""],
+               ["8"]]
+        meta = [R.META_HEADERS, [], ["day"], ["league", "not-an-id", "X"],
+                ["???", "20250801", ""], ["league", "42"]]
+        with self._sheet({R.REF_SHEET: ref, R.META_SHEET: meta}):
+            R.load(force=True)
+        self.assertEqual(set(R._rows), {7, 8})
+        self.assertEqual(R._rows[8]["Cards Total"], "")
+        self.assertEqual(R._league_competition, {42: ""})
+        self.assertEqual(R._scanned_days, {""})                      # a bare 'day' row: inert key
+        self.assertEqual(R.referee_index(), {})                      # nothing usable reaches Opus
+
     def test_a_failed_reload_keeps_what_was_loaded(self):
         R._rows[1] = {"Match ID": "1"}; R._loaded = True
         with mock.patch.object(R, "_ws", side_effect=RuntimeError("429")):

@@ -136,6 +136,20 @@ the average rests on. When the value is a sentence starting INSUFFICIENT DATA or
 reliable average for that team: do not invent one, and treat a corners, cards or shots-on-target pick
 involving that team with extra caution."""
 
+# Referee cards (opus_referees, 4 Oct 2026): the fixture's referee and his
+# 90-minute cards per match across the tracked competitions since July 2025
+# (2025-26: the six domestic leagues only, added 14 Oct 2026), or 'referee
+# unknown' (blank, under 5 matches, or a name collision). Shadow only.
+OPUS_REFEREE_CARDS = True
+
+_OPUS_REFEREE_PROMPT = """
+
+REFEREE: every fixture carries "referee" — either his average total cards per match (both teams,
+90 minutes, the cards-market counting rule) over the matches he refereed since July 2025 — this season
+in every tracked competition, the 2025-26 season in the six domestic leagues only — with the number of
+matches it rests on, or the text "referee unknown". When it is unknown, make no assumption about the
+referee in either direction."""
+
 _OPUS_EXTENDED_MARKETS_PROMPT = """
 
 ADDITIONAL MARKETS — you may also recommend these, using EXACTLY these formats:
@@ -173,6 +187,7 @@ def opus_enabled() -> bool:
 def analyse_with_opus(
     fixtures_by_league: dict[str, list[dict]],
     stat_context: dict | None = None,
+    referee_context: dict | None = None,
 ) -> list[dict]:
     """
     The production payload and SYSTEM_PROMPT, model swapped to Opus 5.
@@ -201,10 +216,11 @@ def analyse_with_opus(
         league: [{k: v for k, v in f.items() if k not in _STRIP} for f in fixtures]
         for league, fixtures in fixtures_by_league.items()
     }
-    if stat_context:
-        for fixtures in clean.values():
-            for f in fixtures:
-                f.update(stat_context.get(f.get("match_id")) or {})
+    for context in (stat_context, referee_context):
+        if context:
+            for fixtures in clean.values():
+                for f in fixtures:
+                    f.update(context.get(f.get("match_id")) or {})
     payload = json.dumps(clean, indent=2, default=str)
 
     # The shadow's own addendum is appended to a COPY here; main.SYSTEM_PROMPT —
@@ -212,6 +228,7 @@ def analyse_with_opus(
     system_prompt = (
         SYSTEM_PROMPT
         + (_OPUS_STAT_AVERAGES_PROMPT if stat_context else "")
+        + (_OPUS_REFEREE_PROMPT if referee_context else "")
         + (_OPUS_EXTENDED_MARKETS_PROMPT if OPUS_EXTENDED_MARKETS else "")
     )
 
@@ -385,7 +402,16 @@ def run_opus_shadow(
             log.warning("opus_shadow: stat averages failed — marking all unavailable: %s", exc)
             stat_context = unavailable_for_all(fixtures_by_league, "the stats fetch failed this run")
 
-    picks = analyse_with_opus(fixtures_by_league, stat_context)
+    referee_context = None
+    if OPUS_REFEREE_CARDS:
+        from opus_referees import build_referee_context, unknown_for_all
+        try:
+            referee_context = build_referee_context(fixtures_by_league)
+        except Exception as exc:
+            log.warning("opus_shadow: referee context failed — all 'referee unknown': %s", exc)
+            referee_context = unknown_for_all(fixtures_by_league)
+
+    picks = analyse_with_opus(fixtures_by_league, stat_context, referee_context)
     if not picks:
         log.info("opus_shadow: Opus returned no picks — nothing to log")
         return []

@@ -102,6 +102,7 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
   - Daily tennis picks — cron, 12:30 Europe/Brussels (30 min after football's daily picks)
   - Tennis live result checks — interval, every 30 minutes
   - _(A tennis closing-odds job ran every 15 min until 6 Aug 2026; removed when The Odds API was switched off for tennis — see section 7.)_
+  - Opus referee table nightly batch (shadow only) — cron, 23:15 UTC, ≤ 600 RapidAPI calls, never below 30% of the monthly quota; idle once the table is complete (added 14 Oct 2026)
 
 **To deploy a change:**
 1. Edit code locally
@@ -352,6 +353,8 @@ Verified 9 Jul 2026: all 6 channels received the test message and image.
 | Tennis Picks | **Tennis system only** — Date, Match, Bet Type, Pick, Odds, Confidence, Result, P&L, Claude Prob %, Market Prob %, Kickoff/Start Time, Closing Odds, Rank Tier ('Top 150' / 'Lower Ranked', for future per-tier calibration), Stake € (SIM), Running P&L (u), Bankroll € (SIM), Player IDs. Written exclusively by `tennis_excel_tracker.py`; no football code ever touches this tab and no tennis code ever touches Picks/Summary. |
 | Tennis Summary | **Tennis system only** — mirror of football's Summary tab, rebuilt by `_refresh_tennis_summary()` whenever a tennis result settles (`finalize_tennis_workbook()`, called from auto-results and the manual override): overall record, win rate, units P&L, simulated bankroll + ROI, best bet type / confidence level, Bet Type Breakdown (win-rate-desc), plus a tennis-only Rank Tier Breakdown (Top 150 vs Lower Ranked; pre-10-Jul rows show as '(untracked)'). Header labels the staking as SIMULATED. |
 | Opus Shadow Picks | **Opus 5 shadow experiment only** (13 Aug 2026) — mirrors the football Picks columns including `Pick Tier`, plus two SIMULATED staking columns appended at the end: `Stake EUR (SIM)` and `Bankroll EUR (SIM)` (€100 start, half-Kelly capped at 5%, same logic as the tennis tab). Written exclusively by `opus_tracker.py`; **no football code reads it and it reads no football tab**, which is what keeps Opus out of calibration/edge/CLV and the football Summary. Running Total P&L here is tier-BLIND (both tiers move it) — the shadow has no baseline to protect. `Closing Odds` stays empty: the shadow does no closing-odds polling, so it cannot eat football's CLV budget. Last column `Market Tag` (4 Oct 2026): `Extended market` on a pick from the shadow-only extra markets (Draw No Bet, Over/Under on lines other than 2.5, team totals, win to nil) — never Core; blank otherwise. Corners / cards / shots-on-target picks read `Extended market · Estimated odds`: Result only, blank Profit/Loss, out of the running total and SIM bankroll. |
+| Opus Referee Cards | **Opus shadow only** (4 Oct 2026; 2025-26 domestic leagues added 14 Oct 2026) — one row per finished tracked match since 1 Jul 2026, plus the six domestic leagues' 2025-26 season: Match ID, Date, Competition, Home, Away, team ids, Referee, Country, Country Code, Cards Home/Away/Total (90 min, second yellow = 2), Note (why cards are blank). Written by `opus_referees.update_table()`; the durable cache behind the referee average. |
+| Opus Referee Meta | **Opus shadow only** (4 Oct 2026) — `day` rows (past dates fully scanned; a date before 1 Jul 2026 means scanned for the six domestic leagues only) and `league` rows (feed leagueId → tracked competition, blank when not tracked). |
 | Opus Stats Markets | **Opus shadow only** (4 Oct 2026) — hit rate per (stat, match/team, Over/Under, line) for the estimated-odds stats picks, rebuilt from the Opus tab by `opus_tracker.write_opus_stats_market_summary()` on every settlement. No P&L column by design. |
 | Fable Picks | **HISTORICAL — discontinued experiment data, kept for reference.** Rows logged by the Fable 5 shadow experiment (12-18 Jul 2026) with the football Picks structure minus staking/bankroll columns (units P&L only). Nothing reads or writes this tab anymore — the Fable pipeline was removed on 19 Jul 2026 (see the discontinued-experiment note in section on the Fable 5 shadow pipeline). |
 
@@ -2022,6 +2025,54 @@ addendum; `main.py` and the production prompts are untouched. Cache keyed by mat
 mirrored to the gitignored `opus_stats_cache.json`. **Estimated odds:** stats picks are tagged
 `Extended market · Estimated odds`, settle with a blank P&L, and are excluded from every Opus P&L
 total; their hit rate per line is on the `Opus Stats Markets` tab.
+
+**Referee cards table, shadow only (4 Oct 2026, `opus_referees.py`).** Every finished match this
+season (from 1 Jul 2026) in the five domestic leagues, Jupiler, the three UEFA club competitions
+and the Nations League: referee name + country from `football-get-match-referee`, joined to the
+90-minute card total (settlement's second-yellow rule, via `opus_stats`). Persisted in two Sheet
+tabs (`Opus Referee Cards`, `Opus Referee Meta`) so a deploy does not re-walk the season; each
+shadow run appends the new days. Rotating UEFA / Belgian leagueIds are resolved to their parent
+only when the block shares a team with a tracked competition. At pick time each fixture's referee
+is fetched; Opus gets cards per match + match count only for an exact (name, country) key with 5+
+complete matches and no same-name same-country referee in `football-players-search` — otherwise
+`referee unknown`.
+
+**Extended to the 2025-26 domestic season, under a 30% quota floor (14 Oct 2026).** A second,
+history window — 1 Jul 2025 to 30 Jun 2026 (`HISTORY_START` → `SEASON_START`) — covers the Premier
+League, Bundesliga, La Liga, Serie A, Ligue 1 and Jupiler Pro League only, with the same match-id
+cache and second-yellow rule. Opus's prompt says the average spans both seasons. History is filled
+only by a nightly batch (`run_all.referee_backfill_job`, 23:15 UTC, ≤ 600 calls) and never by a shadow
+run. Every fetch passes `QuotaGuard`, which keeps 30% of the monthly football RapidAPI plan untouched
+for picks and settlement, reading the plan's own `X-RateLimit-Requests-*` headers (recorded passively
+by `auto_results._rapid_get`) and failing closed. A batch that reaches the floor stops, saves, and
+leaves the rest for the following nights. Cost measured before starting: 20,000/month plan, 10,998
+left (≈2 days to reset), floor 6,000; backfill estimated at ~5,800 calls (~2.35 per match: referee +
+all-stats + both lineups after a red card, ~17% of matches; plus one by-date call per day). Steady
+state once live: ~90 calls/day for the shadow's referee lookups.
+
+*First run, 14 Oct 2026 (local, 177 min):* current season 24 Sep–13 Oct finished (20 days, 162
+matches, 0 failed); 2025-26 scanned 1 Jul 2025 → 18 Apr 2026 (292 days, 1,762 matches, 0 failed),
+then **stopped by the guard at 6,003 left against a 6,000 floor**, after 4,984 calls (measured
+~2.4 per match). Left for the nightly batch: 73 days, 19 Apr → 30 Jun 2026 (the last rounds and the
+Belgian play-offs, ~400 matches, ~1,000 calls), from the night the quota resets (16 Oct 2026). Until
+then the guard keeps the shadow's referee lookups off and every fixture reads `referee unknown`.
+Table after the run (2,701 matches):
+
+| Competition | Season | Matches | With card stats | Referees | Referees 5+ (this comp.) |
+|---|---|---|---|---|---|
+| Premier League | 2025-26 / 2026-27 | 328 / 60 | 328 / 60 | 23 / 19 | 19 / 1 (20 combined) |
+| Bundesliga | 2025-26 / 2026-27 | 270 / 45 | 270 / 45 | 26 / 22 | 24 / 0 (24 combined) |
+| La Liga | 2025-26 / 2026-27 | 310 / 78 | 310 / 78 | 39 / 23 | 20 / 4 (20 combined) |
+| Serie A | 2025-26 / 2026-27 | 327 / 60 | 327 / 60 | 37 / 31 | 28 / 0 (28 combined) |
+| Ligue 1 | 2025-26 / 2026-27 | 267 / 54 | 267 / 54 | 23 / 19 | 20 / 1 (20 combined) |
+| Jupiler Pro League | 2025-26 / 2026-27 | 260 / 72 | 260 / 72 | 16 / 21 | 16 / 5 (16 combined) |
+| Champions League | 2026-27 | 110 | 52 | 91 | 0 |
+| Europa League | 2026-27 | 98 | 61 | 81 | 0 |
+| Conference League | 2026-27 | 258 | 82 | 207 | 0 |
+| Nations League | 2026-27 | 104 | 103 | 98 | 0 |
+
+Referees Opus can actually be given (5+ complete matches across all competitions, exact
+name + country): **131 of 317**, up from 14 before the history window.
 
 **Odds API reality check (4 Oct 2026, event-odds + event-markets endpoints, regions us/us2/uk/eu/au,
 one fixture per league):** corners totals (`alternate_totals_corners`) on 4-6 books in PL / Bundesliga

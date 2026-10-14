@@ -485,6 +485,42 @@ none actually settled that way, so no row was corrected.
   sentence saying so, never an average. Cached by match id in memory and in the
   gitignored `opus_stats_cache.json`; a cold run is ~600-800 paced RapidAPI
   calls (~20-30 min, after production has delivered). `main.py` is untouched.
+- **Referee cards table, Opus only** (`opus_referees.py`, `OPUS_REFEREE_CARDS`,
+  4 Oct 2026): every finished match since `SEASON_START` (1 Jul 2026) in the
+  tracked competitions, with its referee (`football-get-match-referee`: name +
+  country, no id) joined to the 90-minute card total from `opus_stats` (same
+  second-yellow rule as settlement). **Stored in the Sheet, not on disk** —
+  `Opus Referee Cards` (one row per match, incl. blank referee / incomplete
+  stats so nothing is refetched) and `Opus Referee Meta` (scanned days, resolved
+  rotating leagueIds) — because Railway's disk is wiped each deploy and a re-walk
+  costs ~2,000 RapidAPI calls. Each shadow run adds the new days, then fetches
+  each fixture's referee. Opus gets his cards/match + match count only when he
+  is named, has a country, has 5+ complete matches under the EXACT
+  (name, country) key, and `football-players-search` shows no second referee
+  with that name + country code; anything else, including a failed search, is
+  `referee unknown`. Pinned by `tests/test_opus_referees.py`.
+  * **Two windows (14 Oct 2026).** Current season (`SEASON_START`, every tracked
+    competition) is updated by each shadow run. History — `HISTORY_START`
+    (1 Jul 2025) to `SEASON_START`, `HISTORY_COMPETITIONS` only (the five
+    leagues + Jupiler, never UEFA or Nations League) — is filled ONLY by
+    `run_all.referee_backfill_job` (23:15 UTC, `nightly_backfill`, at most
+    `NIGHTLY_CALL_CAP` = 600 calls a night). A shadow run must never walk
+    history: that would spend last season's quota on a picks day.
+  * **30% quota floor, fail closed.** Every fetch in the module asks
+    `QuotaGuard`, which reads remaining quota from the plan's own
+    `X-RateLimit-Requests-*` headers (recorded passively by
+    `auto_results._rapid_get` → `rapid_quota()`; a reading older than 120 s is
+    re-read live, 1 call) and refuses any fetch that could take the football
+    plan under 30% of its monthly limit. No reading = no fetching. A stop
+    flushes what it has and leaves the day open for the next night; under the
+    floor the shadow's fixtures read `referee unknown` without a lookup. The
+    30% is the user's rule (14 Oct 2026) — do not lower it.
+  * **In history only Jupiler needs a leagueId lookup** (the big five are in
+    `LEAGUES`), so only blocks sharing a stored Jupiler club are resolved;
+    keying on every stored club would resolve the home league of every UEFA
+    qualifier entrant at ~1 call each.
+  * `run_all` loads both tabs at startup (`_load_referee_table`, shadow-gated,
+    non-fatal), so a broken tab shows in the deploy log, not at 12:00.
 - Pinned by `tests/test_markets.py`, including that production's prompts carry
   no extra markets and the flag's default is False.
 

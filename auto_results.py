@@ -45,6 +45,9 @@ LOOKBACK_DAYS = 7
 _matches_cache: dict[date, tuple[datetime, list[dict]]] = {}
 _CACHE_TTL = timedelta(minutes=30)
 _last_api_call: float = 0.0
+# Latest football quota headers seen by _rapid_get — read by opus_referees'
+# 30% quota guard (14 Oct 2026). Recording them changes nothing here.
+_rapid_quota: tuple[int, int, float] | None = None
 
 # PENDING picks need a human (evaluate_pick could not derive the outcome). Before
 # 12 Aug 2026 they were counted under stats['errors'] and nothing else happened,
@@ -1021,6 +1024,23 @@ def _parse_stats(payload: dict | None) -> dict[str, list[int]]:
     return out
 
 
+def rapid_quota() -> tuple[int, int, float] | None:
+    """(limit, remaining, monotonic time) from the latest _rapid_get response, or None."""
+    return _rapid_quota
+
+
+def _note_quota(headers) -> None:
+    """Passive: remember the plan's X-RateLimit-Requests-* headers. Never acted on here."""
+    global _rapid_quota
+    try:
+        limit = int(headers.get("X-RateLimit-Requests-Limit") or 0)
+        remaining = int(headers.get("X-RateLimit-Requests-Remaining"))
+    except (TypeError, ValueError):
+        return
+    if limit:
+        _rapid_quota = (limit, remaining, time.monotonic())
+
+
 def _rapid_get(endpoint: str, params: dict) -> dict | None:
     """One paced GET on the football host; None on any failure (logged)."""
     global _last_api_call
@@ -1034,6 +1054,7 @@ def _rapid_get(endpoint: str, params: dict) -> dict | None:
             params=params, timeout=15,
         )
         _last_api_call = time.time()
+        _note_quota(r.headers)
         r.raise_for_status()
         return r.json()
     except Exception as exc:

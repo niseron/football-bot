@@ -149,8 +149,48 @@ async def opus_shadow_results_check() -> None:
         log.warning("Opus shadow results check failed (non-fatal): %s", exc)
 
 
+async def referee_backfill_job() -> None:
+    """
+    Opus shadow ONLY (14 Oct 2026): one small nightly batch of the referee
+    cards table — the current season first, then 2025-26 domestic history —
+    capped at opus_referees.NIGHTLY_CALL_CAP calls and never taking the
+    football RapidAPI plan under 30% of its monthly limit. Spends nothing once
+    both windows are scanned, and nothing while the shadow is off.
+    """
+    try:
+        from opus_shadow import opus_enabled
+        if not opus_enabled():
+            return
+        from opus_referees import nightly_backfill
+        out = await asyncio.to_thread(nightly_backfill)
+        history = out.get("history") or {}
+        log.info(
+            "Referee table nightly batch: season +%s match(es), history +%s match(es), "
+            "%s history day(s) still open, quota left %s%s",
+            out["season"].get("matches"), history.get("matches", 0),
+            history.get("open_days", "?"), out.get("quota_left"),
+            f" — stopped: {out['season'].get('stopped') or history.get('stopped')}"
+            if out["season"].get("stopped") or history.get("stopped") else "",
+        )
+    except Exception as exc:
+        log.warning("Referee table nightly batch failed (non-fatal): %s", exc)
+
+
+def _load_referee_table() -> None:
+    """Read the Opus referee tabs once at startup, so a broken tab shows in the
+    deploy log rather than first at the 12:00 shadow run. Never fatal."""
+    try:
+        from opus_shadow import opus_enabled
+        if opus_enabled():
+            from opus_referees import load
+            load()
+    except Exception as exc:
+        log.warning("Opus referee table did not load at startup (non-fatal): %s", exc)
+
+
 async def main() -> None:
     init_db()
+    await asyncio.to_thread(_load_referee_table)
 
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -212,6 +252,12 @@ async def main() -> None:
         usage_summary_job, "cron",
         hour=23, minute=50, timezone="Europe/Brussels",
     )
+    # Opus referee table backfill — after 23:00 UTC, clear of the 12:00 picks
+    # run, the 23:50 Brussels usage report (21:50 UTC) and the evening fixtures.
+    scheduler.add_job(
+        referee_backfill_job, "cron",
+        hour=23, minute=15, timezone="UTC",
+    )
     scheduler.start()
 
     log.info(
@@ -219,7 +265,7 @@ async def main() -> None:
         "weekly summary Mon 09:05, live results every 30 min, "
         "closing odds every 15 min | tennis: picks 12:30, "
         "live results every 30 min, NO closing odds (Odds API off for "
-        "tennis) (Europe/Brussels)"
+        "tennis) (Europe/Brussels) | Opus referee batch 23:15 UTC"
     )
 
     try:

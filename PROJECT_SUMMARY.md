@@ -108,6 +108,101 @@ All of these must be set in Railway's Variables tab (and in `.env` for local use
 2. `git add . && git commit -m "message" && git push origin main`
 3. Railway auto-redeploys within ~2 minutes
 
+### Pre-calibration restore point (14 Oct 2026)
+
+Recorded **before any calibration-driven change**, so the version that was live
+before the calibration verdict can be put back exactly.
+
+| | |
+|---|---|
+| **Git tag** | `pre-calibration-2026-10-14` (annotated, tag object `ac6b31e`, pushed to GitHub) |
+| **Commit** | `029474bdc7abc2e49771326eb782d2c7cb166d60` ("Feed Opus last-10 stat averages; mark stats picks as estimated odds") |
+| **Railway deployment** | `823f2d4b-6da3-4b04-b964-41aa6cd05124`: status SUCCESS, built 2026-10-04 03:08:29 UTC, branch `main`, image `sha256:13233e203f921eb501c6ea779011e8d00f35f9c532fb8aad9c06b4c7477343ac` |
+| **Railway target** | project `exquisite-celebration` / environment `production` / service `FootballPickaAI` |
+
+How the live commit was confirmed: `railway deployment list --json` showed the
+active (SUCCESS) deployment's `commitHash` as `029474b`, and `railway status`
+showed the same deployment ID. That commit was also the tip of both local `main`
+and `origin/main`, so nothing pushed was waiting to deploy.
+
+**Staking and Core values at this commit.** These are hard-coded constants and
+no Railway variable overrides them, so the commit pins them:
+
+| Setting | Constant | Value |
+|---|---|---|
+| Real bankroll | `excel_tracker.REAL_BANKROLL` | **3500.0** (€) |
+| Kelly fraction | `KELLY_FRACTION` | **0.5** (half-Kelly) |
+| Per-pick cap | `KELLY_MAX_FRACTION` | **0.05** (5% → €175) |
+| Daily cap | `DAILY_STAKE_CAP_FRACTION` | **0.15** (15% per run → €525) |
+| Shrinkage | `KELLY_SHRINK_K` | **50**, i.e. bucket weight n/(n+50) |
+| Flat-fallback threshold | `KELLY_MIN_CLUB_SAMPLE` | 50 club Core picks |
+| Core picks per run | `main.CORE_PICKS_PER_RUN` | **5** |
+| Per-league ceiling | `main.MAX_PICKS_PER_LEAGUE` | 10 |
+
+**Bankroll note, 14 Oct 2026.** The real total balance across all bookmakers is
+**€4,600**. `REAL_BANKROLL` was **deliberately left at 3500** until the
+calibration verdict is in. The €1,100 gap is a decision, not drift: do not
+"correct" it as part of an unrelated change. If the calibration change raises
+the constant, both caps scale with it (5% of €4,600 = €230 per pick, 15% =
+€690 per run).
+
+**To restore this version.** The *durable* path is git. The Railway rollback is
+a fast stopgap, and any later push to `main` replaces it. Use both if speed
+matters: roll back on Railway first, then do the git restore.
+
+*A. Git (durable).* This puts the code back to the tag with a new commit on
+`main`: no force-push, no history rewrite. It keeps `PROJECT_SUMMARY.md` and
+`CLAUDE.md` so this record and later notes survive. Run from `football-bot/`:
+
+```
+git fetch origin --tags
+git checkout main
+git pull --ff-only
+git restore --source=pre-calibration-2026-10-14 --staged --worktree -- . ':(exclude)PROJECT_SUMMARY.md' ':(exclude)CLAUDE.md'
+git diff --cached --stat                     # review: only the post-tag code changes, reversed
+python -m unittest discover -s tests -t . -v # must be green
+git commit -m "Restore code to pre-calibration-2026-10-14 (029474b)"
+git diff --stat pre-calibration-2026-10-14 HEAD -- . ':(exclude)PROJECT_SUMMARY.md' ':(exclude)CLAUDE.md'   # must print NOTHING
+git push origin main                         # Railway auto-deploys the restored code (~2 min)
+```
+
+`git restore --source` with `--staged --worktree` runs in no-overlay mode. It
+reverts modified files, re-adds files deleted since the tag, and removes tracked
+files added since the tag. Untracked local files are left alone. This was
+checked on 14 Oct 2026 in a throwaway worktree: a simulated change editing
+`REAL_BANKROLL`, adding a file and deleting a test restored to an empty code
+diff against the tag. Then add a dated note here saying the restore was done
+and why.
+
+*B. Railway (fast).* railway.com → project `exquisite-celebration` → service
+`FootballPickaAI` → **Deployments** → find deployment `823f2d4b-6da3-…` (commit
+`029474b`, 4 Oct 2026) → **⋮** → **Rollback** → confirm. Railway restores
+that deployment's Docker image **and its custom variables**. Caveats:
+
+- The Railway CLI (v5.26) has **no rollback-to-ID command**. `railway redeploy`
+  only redeploys the *latest* deployment, and `railway down` only removes the
+  latest one. Neither is a rollback.
+- Deployments older than the plan's retention window lose the Rollback option.
+  If it is missing, use path A.
+- It does not touch git. The next push to `main` deploys whatever `main` holds,
+  calibration changes included, so follow it with path A.
+
+*Verify either path:*
+
+```
+railway deployment list --json   # newest SUCCESS entry: commitHash = the restore commit (A) or 029474b (B)
+railway status                   # FootballPickaAI ● Online, deployment ID matches
+railway logs --since 10m         # scheduler started; no tracebacks
+```
+
+Then confirm on the next 12:00 Brussels slate that the Core embeds' `Stake`
+fields are sized on €3,500 (per-pick cap €175, run cap €525).
+
+**What a restore does NOT undo:** rows already written to the Google Sheet under
+calibration-era code, and any Railway variable changed by hand. Path B restores
+variables and path A does not, so record any variable's old value here before
+changing it.
+
 ---
 
 ## 5. Telegram — REMOVED (18 Aug 2026)

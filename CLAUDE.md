@@ -547,7 +547,12 @@ It also pins the Odds API name aliases. `tests/test_markets.py` pins market
 recognition (line from the pick, stat markets PENDING) and the Opus-only extra
 markets with their extra-time rules. `tests/test_opus_stats.py` pins the
 shadow's stat averages (90-minute figures, the 5-match floor, the match-id
-cache, production prompts untouched) and the estimated-odds P&L exclusion. Pure — no
+cache, production prompts untouched) and the estimated-odds P&L exclusion.
+`tests/test_calibration.py` pins CLV: it is measured from the PRICE PAID
+(`Market Odds`, else the `Market Prob %`-derived price, else the estimate —
+never the estimate when a market price exists; until 22 Oct 2026 it used the
+estimate on every row, +1.35% vs +0.27% on the same sheet), reported All Core
+beside Club only, with the below-300 warning kept. Pure — no
 network, no Sheets, no Discord. Run from `football-bot/`:
 
 ```

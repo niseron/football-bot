@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from excel_tracker import _core_rows, _picks_ws, PICKS_HEADERS
+from excel_tracker import _core_rows, _picks_ws, is_club_football, market_odds_from_row, PICKS_HEADERS
 
 log = logging.getLogger(__name__)
 
@@ -180,68 +180,24 @@ def edge_report(ws_getter=_picks_ws) -> dict | None:
     }
 
 
-_EMPTY_CLV_REPORT: dict = {
-    "avg_clv": None, "pct_positive": None, "sample_size": 0, "meaningful": False,
-    "positive_clv_roi": {"picks": 0, "pnl": 0.0, "roi": None},
-    "negative_clv_roi": {"picks": 0, "pnl": 0.0, "roi": None},
-}
+def _empty_clv_scope() -> dict:
+    return {
+        "avg_clv": None, "pct_positive": None, "sample_size": 0, "meaningful": False,
+        "market_priced": 0,
+        "positive_clv_roi": {"picks": 0, "pnl": 0.0, "roi": None},
+        "negative_clv_roi": {"picks": 0, "pnl": 0.0, "roi": None},
+    }
 
 
-def clv_report(ws_getter=_picks_ws) -> dict | None:
-    """
-    Closing Line Value (CLV) — the gold-standard measure of genuine edge,
-    independent of whether a pick actually won. For every settled pick with
-    both an original 'Odds' value and a logged 'Closing Odds' value:
+def _empty_clv_report() -> dict:
+    return {**_empty_clv_scope(), "club": _empty_clv_scope()}
 
-        CLV % = (original_odds / closing_odds − 1) × 100
 
-    Positive CLV means the price shortened after the pick was made (the
-    market moved toward our side) — a real signal of edge that a single
-    win/loss can't fake. Requires closing_odds.py to have run near kickoff;
-    picks with no Closing Odds value yet are skipped, not counted as zero.
-
-    Returns {"avg_clv", "pct_positive", "sample_size", "meaningful",
-             "positive_clv_roi", "negative_clv_roi"} or None on read failure.
-    An empty/pre-migration sheet returns the zeroed report above, not None,
-    so callers can distinguish "nothing to report yet" from "read failed".
-    """
-    try:
-        rows = ws_getter().get_all_values()
-    except Exception as exc:
-        log.warning("clv_report: Sheets read failed: %s", exc)
-        return None
-    if not rows:
-        return dict(_EMPTY_CLV_REPORT)
-
-    header = rows[0]
-    try:
-        result_col  = header.index("Result")
-        odds_col    = header.index("Odds")
-        pnl_col     = header.index("Profit/Loss")
-        closing_col = header.index("Closing Odds")
-    except ValueError:
-        # Sheet pre-dates the Closing Odds column — nothing to evaluate yet
-        return dict(_EMPTY_CLV_REPORT)
-
-    # CORE ONLY — closing odds ARE collected for Extended picks (so a tier-vs-tier
-    # CLV comparison stays possible later), but they must never enter this report.
-    scored = []
-    for row in _core_rows(rows[1:], header):
-        result = row[result_col].strip().upper() if len(row) > result_col else ""
-        if result not in ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"):
-            continue
-        odds    = _safe_float(row[odds_col])    if len(row) > odds_col    else None
-        closing = _safe_float(row[closing_col]) if len(row) > closing_col else None
-        if odds is None or closing is None or closing == 0:
-            continue
-        scored.append({
-            "clv": (odds / closing - 1) * 100,
-            "pnl": _safe_float(row[pnl_col]) if len(row) > pnl_col else None,
-        })
-
+def _clv_scope(scored: list[dict]) -> dict:
+    """The CLV figures for one set of scored picks (all Core, or club only)."""
     n = len(scored)
     if n == 0:
-        return dict(_EMPTY_CLV_REPORT)
+        return _empty_clv_scope()
 
     def _roi_group(group: list[dict]) -> dict:
         staked = [r for r in group if r["pnl"] is not None]
@@ -260,9 +216,133 @@ def clv_report(ws_getter=_picks_ws) -> dict | None:
         "pct_positive":     round(len(positive) / n * 100, 1),
         "sample_size":      n,
         "meaningful":       n >= MIN_MEANINGFUL_SAMPLE,
+        "market_priced":    sum(1 for r in scored if r["market_priced"]),
         "positive_clv_roi": _roi_group(positive),
         "negative_clv_roi": _roi_group(negative),
     }
+
+
+def clv_report(ws_getter=_picks_ws) -> dict | None:
+    """
+    Closing Line Value (CLV) — the gold-standard measure of genuine edge,
+    independent of whether a pick actually won. For every settled pick with
+    a price paid and a logged 'Closing Odds' value:
+
+        CLV % = (price_paid / closing_odds − 1) × 100
+
+    Positive CLV means the price shortened after the pick was made (the
+    market moved toward our side) — a real signal of edge that a single
+    win/loss can't fake. Requires closing_odds.py to have run near kickoff;
+    picks with no Closing Odds value yet are skipped, not counted as zero.
+
+    The PRICE PAID is the matched market price when there is one, else the
+    'Odds' estimate — the same resolution as settlement_odds_from_row, so CLV
+    is measured from the price the P&L beside it was booked at. Until 22 Oct
+    2026 this measured from the 'Odds' estimate on every row, which compared
+    the model's own price with the market's close rather than the price a
+    follower got: on the 22 Oct sheet that read +1.35% average CLV where the
+    price paid gave +0.27%, over the same 130 picks. A pick with no market
+    price and an unreadable estimate is skipped rather than measured at
+    settlement's 1.0 fallback.
+
+    Returns the ALL-CORE figures at the top level — {"avg_clv",
+    "pct_positive", "sample_size", "meaningful", "market_priced",
+    "positive_clv_roi", "negative_clv_roi"} — plus the same keys for
+    club football only (excel_tracker.is_club_football: no World Cup,
+    friendlies or other international labels) under "club". "market_priced"
+    counts the picks measured from a matched market price; the rest were
+    measured from the estimate because no market line was matched. None on
+    read failure. An empty/pre-migration sheet returns a zeroed report, not
+    None, so callers can distinguish "nothing to report yet" from "read failed".
+    """
+    try:
+        rows = ws_getter().get_all_values()
+    except Exception as exc:
+        log.warning("clv_report: Sheets read failed: %s", exc)
+        return None
+    if not rows:
+        return _empty_clv_report()
+
+    header = rows[0]
+    try:
+        result_col  = header.index("Result")
+        odds_col    = header.index("Odds")
+        pnl_col     = header.index("Profit/Loss")
+        closing_col = header.index("Closing Odds")
+    except ValueError:
+        # Sheet pre-dates the Closing Odds column — nothing to evaluate yet
+        return _empty_clv_report()
+    league_col = header.index("League") if "League" in header else None
+
+    # CORE ONLY — closing odds ARE collected for Extended picks (so a tier-vs-tier
+    # CLV comparison stays possible later), but they must never enter this report.
+    scored = []
+    for row in _core_rows(rows[1:], header):
+        result = row[result_col].strip().upper() if len(row) > result_col else ""
+        if result not in ("WIN", "HALF WIN", "HALF LOSS", "LOSS", "VOID"):
+            continue
+        market  = market_odds_from_row(row, header)
+        paid    = market if market is not None else (
+            _safe_float(row[odds_col]) if len(row) > odds_col else None)
+        closing = _safe_float(row[closing_col]) if len(row) > closing_col else None
+        if paid is None or closing is None or closing == 0:
+            continue
+        league = row[league_col] if league_col is not None and len(row) > league_col else ""
+        scored.append({
+            "clv":           (paid / closing - 1) * 100,
+            "pnl":           _safe_float(row[pnl_col]) if len(row) > pnl_col else None,
+            "market_priced": market is not None,
+            "club":          is_club_football(league),
+        })
+
+    return {**_clv_scope(scored), "club": _clv_scope([r for r in scored if r["club"]])}
+
+
+def clv_table_lines(clv: dict) -> list[str]:
+    """
+    The CLV report's all-Core and club-only figures side by side, as fixed-width
+    plain-text rows. Shared by the monthly Discord report (which wraps each row
+    in a code span) and `python calibration.py`, so the two cannot disagree.
+    """
+    core, club = clv, clv.get("club") or _empty_clv_scope()
+
+    def _pct(v, signed=False):
+        if v is None:
+            return "n/a"
+        return f"{v:+.2f}%" if signed else f"{v:.1f}%"
+
+    def _roi(group):
+        return f"{group['roi']:+.1f}%" if group["roi"] is not None else "n/a"
+
+    rows = [
+        # Labelled header: a code-span row that opens with spaces can render trimmed
+        ("Scope",         "All Core",                            "Club only"),
+        ("Picks",         str(core["sample_size"]),              str(club["sample_size"])),
+        ("Market-priced", str(core["market_priced"]),            str(club["market_priced"])),
+        ("Avg CLV",       _pct(core["avg_clv"], signed=True),    _pct(club["avg_clv"], signed=True)),
+        ("Positive CLV",  _pct(core["pct_positive"]),            _pct(club["pct_positive"])),
+        ("+CLV picks",    str(core["positive_clv_roi"]["picks"]), str(club["positive_clv_roi"]["picks"])),
+        ("ROI on +CLV",   _roi(core["positive_clv_roi"]),        _roi(club["positive_clv_roi"])),
+        ("-CLV picks",    str(core["negative_clv_roi"]["picks"]), str(club["negative_clv_roi"]["picks"])),
+        ("ROI on -CLV",   _roi(core["negative_clv_roi"]),        _roi(club["negative_clv_roi"])),
+    ]
+    return [f"{label:<14} {a:>9}  {b:>9}" for label, a, b in rows]
+
+
+def clv_sample_warning(clv: dict) -> str | None:
+    """
+    The sample-size warning for the CLV report, or None once both columns are
+    meaningful. Club picks are a subset of Core, so the all-Core warning covers
+    both columns; past 300 Core picks the club column can still be short.
+    """
+    club = clv.get("club") or _empty_clv_scope()
+    if not clv["meaningful"]:
+        return (f"CLV results are not statistically meaningful below {MIN_MEANINGFUL_SAMPLE} "
+                f"settled picks. Treat these numbers as directional only.")
+    if not club["meaningful"]:
+        return (f"Club-only CLV ({club['sample_size']} picks) is not statistically meaningful "
+                f"below {MIN_MEANINGFUL_SAMPLE} settled picks. Treat it as directional only.")
+    return None
 
 
 if __name__ == "__main__":
@@ -276,5 +356,12 @@ if __name__ == "__main__":
     print(_json.dumps(calibration_report(), indent=2))
     print("\nEdge report:")
     print(_json.dumps(edge_report(), indent=2))
-    print("\nCLV report:")
-    print(_json.dumps(clv_report(), indent=2))
+    print("\nCLV report (measured from the price paid):")
+    clv = clv_report()
+    print(_json.dumps(clv, indent=2))
+    if clv:
+        print()
+        print("\n".join(clv_table_lines(clv)))
+        warning = clv_sample_warning(clv)
+        if warning:
+            print(f"WARNING: {warning}")

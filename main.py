@@ -25,6 +25,7 @@ from excel_tracker import (
 )
 from card_generator import generate_picks_card, generate_picks_card_ig
 from discord_bot import DISCORD_CHANNELS, build_pick_embed, send_to_discord
+from feed_names import match_names, named_matches, team_name
 
 load_env()
 
@@ -416,11 +417,20 @@ def fetch_upcoming_matches() -> list[dict]:
 
 
 def build_fixture_summary(match: dict) -> dict:
+    """
+    One fixture as Claude sees it. Names go through feed_names.match_names —
+    the feed dropped `longName` on 3 Nov 2026 and this line's KeyError killed
+    the whole 4 Nov slate. partition_fixtures drops nameless matches before
+    they get here; the ValueError is a backstop, never the normal path.
+    """
+    names = match_names(match)
+    if names is None:
+        raise ValueError(f"match {match.get('id')} has no team name")
     status = match.get("status", {})
     return {
         "match_id":    match["id"],
-        "home":        match["home"]["longName"],
-        "away":        match["away"]["longName"],
+        "home":        names[0],
+        "away":        names[1],
         "kickoff_utc": status.get("utcTime", match.get("time", "")),
         "home_id":     match["home"].get("id"),
         "away_id":     match["away"].get("id"),
@@ -456,9 +466,10 @@ def _is_wc_match(match: dict, club_ids: set[int]) -> bool:
     """
     if match.get("leagueId") in club_ids:
         return False
-    home = match["home"]["longName"]
-    away = match["away"]["longName"]
-    return _is_wc_participant(home) and _is_wc_participant(away)
+    names = match_names(match)
+    if names is None:
+        return False
+    return _is_wc_participant(names[0]) and _is_wc_participant(names[1])
 
 
 def _resolve_parent_league(match: dict) -> int | None:
@@ -595,11 +606,15 @@ def _discover_feed_ids(
             if team_ids:
                 overlap = max(len(team_ids & r) / len(team_ids) for r in rosters)
         if name_rosters:
+            # team_name, not .get("longName"): that read went silently None
+            # when the feed dropped longName on 3 Nov 2026, which scores every
+            # national-team block 0.00 and sinks the Nations League back to
+            # #90-#112 of the discovery queue without a single error.
             names = {
                 name
                 for m in matches
                 for side in ("home", "away")
-                for name in ((m.get(side) or {}).get("longName"),)
+                for name in (team_name(m.get(side)),)
                 if name
             }
             if names:
@@ -634,8 +649,15 @@ def _discover_feed_ids(
 
 
 def partition_fixtures(all_matches: list[dict]) -> dict[str, list[dict]]:
-    """Split today's upcoming matches into per-league buckets."""
-    upcoming = [m for m in all_matches if _is_upcoming(m)]
+    """Split today's upcoming matches into per-league buckets.
+
+    A match with no usable team name is skipped and logged here, ONCE, so no
+    path below can trip over it — one bad match costs that match, never the
+    slate (the 4 Nov 2026 run died on the first nameless fixture).
+    """
+    upcoming = named_matches(
+        [m for m in all_matches if _is_upcoming(m)], "partition_fixtures",
+    )
 
     result: dict[str, list[dict]] = {}
 
@@ -896,9 +918,14 @@ def _form_string(matches: list[dict], team_id: int) -> str:
 
 
 def _summarize_match(match: dict, team_id: int | None = None) -> dict:
+    # The bare except below hid the 3 Nov 2026 longName removal: every form row
+    # would have come back {} with no log line. A nameless match is still {},
+    # but via match_names, and nothing else here can raise KeyError on a name.
+    names = match_names(match)
+    if names is None:
+        return {}
     try:
-        h   = match["home"]["longName"]
-        a   = match["away"]["longName"]
+        h, a = names
         h_s = match["home"].get("score", "?")
         a_s = match["away"].get("score", "?")
         s: dict = {"match": f"{h} vs {a}", "score": f"{h_s}-{a_s}"}
@@ -2302,7 +2329,45 @@ def _kickoff_lookup(fixtures_by_league: dict[str, list[dict]]) -> dict[str, str]
     return lookup
 
 
+def _alert_picks_job_failure(exc: Exception, *, delivered: bool) -> None:
+    """
+    Make a lost slate LOUD on both surfaces: verbatim in the ops 'usage' channel,
+    and — only when nothing had been delivered yet — the scrubbed picks-failed
+    alert in 'picks-cards', so subscribers are not left reading silence.
+
+    On 4 Nov 2026 the run died on a KeyError before analysis and neither alert
+    existed for that path: 'picks-cards' and 'usage' both stayed silent and the
+    only trace was a traceback in the Railway logs. Never raises.
+    """
+    try:
+        from usage_tracker import alert_job_failure
+        alert_job_failure("football-picks", exc)
+    except Exception as inner:
+        log.error("Could not raise the picks job-failure alert: %s", inner)
+    if not delivered:
+        try:
+            _notify_picks_failed(
+                "the daily run stopped before any picks were made",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        except Exception as inner:
+            log.error("Could not deliver the picks-failed alert: %s", inner)
+
+
 async def daily_picks_job():
+    """
+    Scheduler entry point. Anything escaping the run is logged with its
+    traceback and alerted, never left for APScheduler to print and forget.
+    """
+    progress = {"delivering": False}
+    try:
+        await _run_daily_picks(progress)
+    except Exception as exc:
+        log.exception("Daily picks job crashed: %s", exc)
+        _alert_picks_job_failure(exc, delivered=progress["delivering"])
+
+
+async def _run_daily_picks(progress: dict):
     log.info("Starting morning picks job")
 
     if picks_exist_for_session("morning"):
@@ -2314,6 +2379,7 @@ async def daily_picks_job():
         log.info("Fetched %d total matches for next 48 hours", len(all_matches))
     except Exception as exc:
         log.error("Failed to fetch today's matches: %s", exc)
+        _alert_picks_job_failure(exc, delivered=False)
         return
 
     fixtures_by_league = partition_fixtures(all_matches)
@@ -2448,6 +2514,8 @@ async def daily_picks_job():
     # per channel, and since 15 Aug 2026 a single competition can send 10 embeds
     # back to back. send_to_discord retries a 429 exactly once, so an unpaced
     # burst would spend that retry immediately and then start dropping picks.
+    # From here on a crash must not post "Picks failed" — some may be out.
+    progress["delivering"] = True
     try:
         if card is not None:
             send_to_discord("picks-cards", image_path=card)

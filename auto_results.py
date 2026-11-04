@@ -34,6 +34,7 @@ from excel_tracker import (
     settlement_pnl_mismatch,
     update_row_result,
 )
+from feed_names import match_names, report_nameless
 
 load_env()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -478,8 +479,15 @@ def _find_api_match(
     best_score = 0
     tied_with: dict | None = None
     for m in matches:
-        h = _normalise_team(m["home"]["longName"])
-        a = _normalise_team(m["away"]["longName"])
+        # Names via feed_names, never m["home"]["longName"]: the feed dropped
+        # that field on 3 Nov 2026 and this line's KeyError failed EVERY
+        # settlement poll — football and the Opus shadow — until 4 Nov. A
+        # nameless candidate is skipped (logged once), never fatal.
+        names = match_names(m)
+        if names is None:
+            report_nameless(m, "settlement")
+            continue
+        h, a = _normalise_team(names[0]), _normalise_team(names[1])
         if reversed_sides:
             h, a = a, h
         hs, as_ = _side_score(hq, h), _side_score(aq, a)
@@ -494,9 +502,7 @@ def _find_api_match(
         log.warning(
             "'%s vs %s' matches two different fixtures equally well — '%s vs %s' "
             "and '%s vs %s' — so neither is used; settle manually via update_result.py",
-            home_q, away_q,
-            best["home"]["longName"], best["away"]["longName"],
-            tied_with["home"]["longName"], tied_with["away"]["longName"],
+            home_q, away_q, *match_names(best), *match_names(tied_with),
         )
         return None
     return best
@@ -1605,7 +1611,7 @@ def run_auto_results(
                 log.warning(
                     "'%s' matched with home/away REVERSED — the API lists it as "
                     "'%s vs %s'. Settling on the API's orientation.",
-                    match, api_match["home"]["longName"], api_match["away"]["longName"],
+                    match, *match_names(api_match),
                 )
 
         if api_match is None:
@@ -1620,8 +1626,8 @@ def run_auto_results(
 
         home_score = int(api_match["home"].get("score") or 0)
         away_score = int(api_match["away"].get("score") or 0)
-        home_name  = api_match["home"]["longName"]
-        away_name  = api_match["away"]["longName"]
+        # _find_api_match only returns a fully named fixture, so this cannot be None.
+        home_name, away_name = match_names(api_match)
 
         # Knockout finishes: the API's status.reason says how the match ended
         # (FT / AET / Pen) while the score always includes extra time.

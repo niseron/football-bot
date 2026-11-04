@@ -51,7 +51,15 @@ async def live_results_check() -> None:
     try:
         stats, resolved = await asyncio.to_thread(run_auto_results, 2)
     except Exception as exc:
+        # Alerted since 4 Nov 2026: this ERROR line was the ONLY trace of the
+        # 3-4 Nov feed change, which failed every poll for ~21 hours. Deduped
+        # per day inside alert_job_failure, so 48 failed polls post one alert.
         log.error("Live results check failed: %s", exc)
+        try:
+            from usage_tracker import alert_job_failure
+            await asyncio.to_thread(alert_job_failure, "football-results", exc)
+        except Exception as inner:
+            log.error("Could not raise the results job-failure alert: %s", inner)
         return
     # One dedup set for both tiers, keyed the same way as before: a fixture
     # carries at most one open bet, so the key is unique across tiers and a

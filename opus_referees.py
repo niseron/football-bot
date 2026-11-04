@@ -49,6 +49,8 @@ import time
 import unicodedata
 from datetime import date, timedelta
 
+from feed_names import team_name
+
 log = logging.getLogger(__name__)
 
 SEASON_START = date(2026, 7, 1)      # 2026-27: UEFA qualifying starts in July
@@ -321,7 +323,9 @@ def update_table(today: date | None = None, *, history: bool = False,
             if lid in tracked or lid in _league_competition or lid is None:
                 continue
             ids = {(m.get(s) or {}).get("id") for m in ms for s in ("home", "away")}
-            nations = not history and all((m.get(s) or {}).get("longName") in UEFA_NATIONS
+            # team_name, not .get("longName") — that read went silently None
+            # when the feed dropped longName on 3 Nov 2026 (feed_names.py).
+            nations = not history and all(team_name(m.get(s)) in UEFA_NATIONS
                                           for m in ms for s in ("home", "away"))
             if not (ids & teams or nations):
                 continue
@@ -366,7 +370,7 @@ def update_table(today: date | None = None, *, history: bool = False,
                 continue
             complete = "incomplete" not in fig
             row = {"Match ID": str(mid), "Date": key, "Competition": comp,
-                   "Home": h.get("longName", ""), "Away": a.get("longName", ""),
+                   "Home": team_name(h) or "", "Away": team_name(a) or "",
                    "Home ID": str(h.get("id") or ""), "Away ID": str(a.get("id") or ""),
                    "Referee": ref["name"], "Country": ref["country"], "Country Code": ref["code"],
                    "Cards Home": str(fig["cards"][0]) if complete else "",

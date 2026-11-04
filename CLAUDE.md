@@ -532,6 +532,32 @@ none actually settled that way, so no row was corrected.
 - Pinned by `tests/test_markets.py`, including that production's prompts carry
   no extra markets and the flag's default is False.
 
+## Feed team names — read through `feed_names.py`, never `["longName"]` (4 Nov 2026)
+
+Between 13:06 and 13:45 UTC on 3 Nov 2026 `football-get-matches-by-date` dropped
+`home.longName` / `away.longName` from EVERY match; the same string now sits in
+`name` (118/118 sides verified against the referee tab's stored longNames), with
+an optional shorter `shortName`. Direct `["longName"]` reads killed every
+settlement poll for ~21 h and the whole 4 Nov slate, and nothing alerted.
+
+- **Read names only via `feed_names.team_name` / `match_names`** (`longName` →
+  `name` → `shortName`). Never subscript a name field, and never `.get("longName")`
+  either — that degraded silently (empty form rows, Nations League discovery
+  ranking scored 0.00) where the subscript at least crashed.
+- **A nameless match costs that match, never the run.** `partition_fixtures` drops
+  it via `named_matches` and `_find_api_match` skips it, each logged once per
+  match id. A feed where ALL matches are nameless logs at ERROR — it must never
+  read as a quiet "no fixtures today".
+- **Do not put `shortName` ahead of `name`.** It is a different, shorter string;
+  every exact-name table and every match string already in the Sheet was built
+  from the full name.
+- **A crashed job alerts `usage`** via `usage_tracker.alert_job_failure` (deduped
+  per day per job): the picks job (any escaping exception, or a fixtures-fetch
+  failure) and `live_results_check`. A picks-job crash BEFORE delivery starts also
+  sends the scrubbed picks-failed alert to `picks-cards`; after
+  `progress["delivering"]` it must not, because some picks may already be out.
+- Pinned by `tests/test_feed_names.py`, built on the verbatim new feed shape.
+
 ## Settlement regression tests (8 Sep 2026)
 
 `tests/test_settlement.py` pins `evaluate_pick` (a plain Match Winner pick in

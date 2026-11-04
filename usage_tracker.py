@@ -318,6 +318,47 @@ def alert_sheet_write_failure(
     return True
 
 
+def alert_job_failure(job: str, exc: Exception | str) -> bool:
+    """
+    Alert the ops 'usage' channel that a production job crashed or could not run.
+
+    Added 4 Nov 2026. Until then 'usage' only heard about an exhausted Anthropic
+    balance, a Sheet write gap or a data-integrity breach — so when the feed
+    dropped `longName` on 3 Nov, every settlement poll failed for ~21 hours and
+    the 4 Nov picks run died before analysis, and NOTHING was posted anywhere:
+    the only trace was an ERROR line in the Railway logs.
+
+    Deduped per (day, job): live_results_check runs every 30 minutes and a
+    broken feed fails all of them, and an alert channel that cries wolf gets
+    muted. Unscrubbed, like every 'usage' alert — the reader is the operator.
+    """
+    from discord_bot import send_to_discord
+
+    key = (date.today().isoformat(), f"job:{job}")
+    if key in _alerted_failures:
+        log.info("usage_tracker: job-failure alert for %s already sent today", job)
+        return False
+    _alerted_failures.add(key)
+
+    now = datetime.now(timezone.utc)
+    detail = " ".join(
+        (f"{type(exc).__name__}: {exc}" if isinstance(exc, Exception) else str(exc)).split()
+    )
+    text = (
+        "🛑 **PRODUCTION JOB FAILED**\n"
+        f"Job: `{job}`\n"
+        f"Time: {now:%d %b %Y %H:%M} UTC\n\n"
+        f"```{detail[:1200]}```\n"
+        "Check the Railway logs around this timestamp for the traceback. "
+        "Repeat alerts for this job are suppressed for the rest of today."
+    )
+    if not send_to_discord("usage", message=text):
+        log.error("usage_tracker: could not deliver job-failure alert for %s to Discord "
+                  "('usage') — %s", job, detail)
+        return False
+    return True
+
+
 def alert_data_integrity(kind: str, detail: str, rows: list[str] | None = None) -> bool:
     """
     Alert the ops 'usage' channel that a number in the sheet cannot be right.

@@ -578,8 +578,11 @@ cache, production prompts untouched) and the estimated-odds P&L exclusion.
 (`Market Odds`, else the `Market Prob %`-derived price, else the estimate —
 never the estimate when a market price exists; until 22 Oct 2026 it used the
 estimate on every row, +1.35% vs +0.27% on the same sheet), reported All Core
-beside Club only, with the below-300 warning kept. Pure — no
-network, no Sheets, no Discord. Run from `football-bot/`:
+beside Club only, with the below-300 warning kept.
+`tests/test_odds_api_alerts.py` pins the Odds API failure handling: account-level
+codes alert once a day, self-healing failures never alert, and no log line or
+alert carries the key. Its base class fails any HTTP call a test did not stub.
+Pure — no network, no Sheets, no Discord. Run from `football-bot/`:
 
 ```
 python -m unittest discover -s tests -t . -v
@@ -695,6 +698,21 @@ subscriber-facing picks-failed alert:
   ledger. Every reader of that ledger counts rows as calls and sums the cost
   column; a zero-cost failure row would inflate the call count and dilute the
   per-job figures.
+- **The Odds API alerts too (16 Nov 2026).** `usage_tracker.note_odds_api_failure(job,
+  resp=|exc=)` is the ONE handler for a failed Odds API call. It is wired into
+  `main._fetch_odds_events` (jobs `football-picks`, `closing-odds`, `opus-shadow`)
+  and `fetch_odds_quota` (`odds-quota-check`: the daily summary and the hard stop).
+  It alerts `usage` once a day on an account-level `error_code`: `MISSING_KEY`,
+  `INVALID_KEY`, `DEACTIVATED_KEY`, `OUT_OF_USAGE_CREDITS`, or a 401 whose body
+  cannot be read. It never alerts on a 429 `EXCEEDED_FREQ_LIMIT`, a 5xx or a
+  timeout, because those self-heal. The daily summary names the code (`🛑 KEY
+  REJECTED`) instead of `_quota unavailable_`, which now means a network failure
+  only. Why: the key was DEACTIVATED from ~10 to 16 Nov 2026 and every pick fell
+  back to its estimate, with no closing odds, for five days. The fallback is
+  silent by design, so the alert is the only thing that can say it happened.
+  **Odds API failures never go to the API Failures tab**: `anthropic_status()`
+  reads every row there as an Anthropic failure. Pinned by
+  `tests/test_odds_api_alerts.py`.
 
 **Credit balance is not retrievable programmatically — do not add it.** Checked
 against the live docs 18 Aug 2026: the Admin API has no balance endpoint, and
@@ -720,9 +738,16 @@ there is worse than no number, because it would be trusted.
   stream — `python-telegram-bot` did exactly that with its bot token (5 plaintext
   copies before 18 Aug 2026). `httpx`/`httpcore` are pinned to WARNING in both
   `main.py` and `tennis_main.py` (the standalone entry point that never imports
-  `main`). The Anthropic SDK is httpx-backed but sends its key as a header, and
-  RapidAPI/Odds API go through `requests`, which never logs URLs — so no key
-  leaks today. Re-check this whenever an httpx-backed SDK is added.
+  `main`). The Anthropic SDK is httpx-backed but sends its key as a header.
+  **`requests` is not URL-safe either** (corrected 16 Nov 2026). The Odds API
+  key travels as `?apiKey=` in the URL. Every `requests` HTTPError and
+  ConnectionError message embeds that URL, and urllib3 logs the request line at
+  DEBUG. A failed quota check put 34 plaintext copies of the key into Railway's
+  logs. Never log `str(exc)` or `resp.url` for an Odds API call: go through
+  `usage_tracker.describe_odds_api_failure` / `note_odds_api_failure` (status +
+  error_code, or the exception type). `urllib3` is pinned to WARNING beside
+  httpx. Re-check this whenever an SDK, or an API that takes its key in the URL,
+  is added.
 
 - Always commit and push after completing any code change — never leave changes uncommitted at the end of a task.
 - When a shipped change affects a Roadmap area in `PROJECT_SUMMARY.md`, update that area's completion percentage in the same commit.

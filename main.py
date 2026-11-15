@@ -40,13 +40,21 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 # the URL PATH, so five plaintext credentials went into the Railway logs before
 # 18 Aug 2026. Telegram is gone now and the leak with it; this stays as
 # defence-in-depth, because the next httpx-backed SDK added here should not be
-# able to reintroduce it. RapidAPI and The Odds API are unaffected either way:
-# both go through `requests`, which never logs URLs.
+# able to reintroduce it.
 # anthropic 1.x swapped httpx for the httpx2 fork, which logs under its own
 # name — silencing only "httpx" would quietly stop working on that upgrade.
+#
+# `requests` is NOT URL-safe either (corrected 16 Nov 2026). The Odds API takes
+# its key as `?apiKey=` in the URL. Every requests HTTPError and ConnectionError
+# message embeds that full URL, and urllib3 logs the request line, query
+# included, at DEBUG. A failed quota check put 34 plaintext copies of the key
+# into the Railway logs (10-16 Nov 2026). Odds API failures are therefore logged
+# only through usage_tracker.describe_odds_api_failure (status + error_code, or
+# the exception type), and urllib3 is pinned here.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpx2").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 # Single-ID domestic leagues.
 #
@@ -1176,7 +1184,9 @@ def _best_team_match(query: str, candidates: list[str]) -> str | None:
     return scored[0][1]
 
 
-def _fetch_odds_events(sport_key: str | tuple[str, ...] | None) -> list[dict] | None:
+def _fetch_odds_events(
+    sport_key: str | tuple[str, ...] | None, *, job: str = "odds-enrichment",
+) -> list[dict] | None:
     """
     Raw fetch of every event + bookmaker odds for one Odds API sport_key.
     None if the sport_key/API key is missing or the request fails. Split out
@@ -1190,7 +1200,16 @@ def _fetch_odds_events(sport_key: str | tuple[str, ...] | None) -> list[dict] | 
     answers HTTP 200 with an empty list and is NOT billed against the quota,
     so the extra key costs nothing — only a key that actually returns fixtures
     is charged, and that ends the loop.
+
+    A failed call goes through usage_tracker.note_odds_api_failure. It is logged
+    at WARNING as status + error_code only, because the URL carries the key. A
+    rejected key or exhausted credits also alerts 'usage' once a day. Until
+    16 Nov 2026 this logged at DEBUG, and a deactivated key went unnoticed for
+    five days while every pick fell back to its estimate. `job` names the
+    caller in that alert.
     """
+    from usage_tracker import note_odds_api_failure
+
     api_key = os.environ.get("ODDS_API_KEY")
     if not sport_key or not api_key:
         return None
@@ -1213,10 +1232,18 @@ def _fetch_odds_events(sport_key: str | tuple[str, ...] | None) -> list[dict] | 
                 },
                 timeout=10,
             )
-            resp.raise_for_status()
-            events = resp.json()
         except Exception as exc:
-            log.debug("_fetch_odds_events(%s) failed: %s", key, exc)
+            # Never log str(exc): a requests ConnectionError/Timeout message
+            # embeds the full URL, apiKey included. Only the type is logged.
+            note_odds_api_failure(job, exc=exc)
+            continue
+        if not resp.ok:
+            note_odds_api_failure(job, resp=resp)
+            continue
+        try:
+            events = resp.json()
+        except ValueError as exc:
+            note_odds_api_failure(job, exc=exc)
             continue
         if events:
             return events
@@ -1424,7 +1451,7 @@ def _flag_suspicious_market_odds(pick: dict, market_odds: float) -> bool:
     return True
 
 
-def enrich_picks_with_real_odds(picks: list[dict]) -> None:
+def enrich_picks_with_real_odds(picks: list[dict], *, job: str = "football-picks") -> None:
     """
     Mutates each pick in-place with 'market_odds' and 'value' (bool) fields by
     comparing Claude's implied probability against real market odds from The
@@ -1452,7 +1479,7 @@ def enrich_picks_with_real_odds(picks: list[dict]) -> None:
             league = pick.get("league", "")
 
             if league not in events_cache:
-                events_cache[league] = _fetch_odds_events(ODDS_API_SPORT_KEYS.get(league))
+                events_cache[league] = _fetch_odds_events(ODDS_API_SPORT_KEYS.get(league), job=job)
             events = events_cache[league]
             if not events:
                 continue

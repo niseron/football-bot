@@ -158,7 +158,7 @@ def run_closing_odds_check(
             break
 
         try:
-            events = _fetch_odds_events(sport_key)
+            events = _fetch_odds_events(sport_key, job="closing-odds")
         except Exception as exc:
             log.warning("closing_odds: odds fetch failed for '%s' (non-fatal): %s", league, exc)
             continue

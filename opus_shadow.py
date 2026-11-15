@@ -424,7 +424,7 @@ def run_opus_shadow(
     # MATCH 1.5 line. No price is right; a wrong one is not. They stay on
     # Opus's own odds.
     try:
-        enrich_picks_with_real_odds([p for p in picks if not p.get("market_tag")])
+        enrich_picks_with_real_odds([p for p in picks if not p.get("market_tag")], job="opus-shadow")
     except Exception as exc:
         log.warning("opus_shadow: odds enrichment failed — Opus odds only: %s", exc)
 

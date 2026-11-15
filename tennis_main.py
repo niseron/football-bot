@@ -49,14 +49,16 @@ from tennis_excel_tracker import (
 load_env()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-# httpx logs the full request URL at INFO. No key leaks through it here (the
-# Anthropic SDK sends its key as a header, RapidAPI/Odds go via `requests`), but
-# tennis_main is a standalone entry point that never imports main.py, so it has
-# to silence httpx itself rather than inherit main's setting. "httpx2" is the
-# fork anthropic 1.x moved to; it logs under that name instead.
+# httpx logs the full request URL at INFO. The Anthropic SDK sends its key as a
+# header, but tennis_main is a standalone entry point that never imports
+# main.py, so it has to silence httpx itself rather than inherit main's setting.
+# "httpx2" is the fork anthropic 1.x moved to; it logs under that name instead.
+# urllib3 (under `requests`) logs the request line, `?apiKey=` included, at
+# DEBUG. See main.py, corrected 16 Nov 2026.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpx2").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 log = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -460,7 +462,10 @@ def fetch_active_tennis_sport_keys() -> list[str]:
             if s.get("group") == "Tennis" and s.get("active") and s.get("key")
         ]
     except Exception as exc:
-        log.debug("fetch_active_tennis_sport_keys failed: %s", exc)
+        # Never str(exc): requests embeds the URL, apiKey included (16 Nov 2026).
+        from usage_tracker import describe_odds_api_failure
+        log.debug("fetch_active_tennis_sport_keys failed: %s",
+                  describe_odds_api_failure(getattr(exc, "response", None), exc))
         return []
 
 
@@ -487,7 +492,10 @@ def fetch_tennis_odds_events(sport_key: str) -> list[dict] | None:
         resp.raise_for_status()
         return resp.json()
     except Exception as exc:
-        log.debug("fetch_tennis_odds_events(%s) failed: %s", sport_key, exc)
+        # Never str(exc): requests embeds the URL, apiKey included (16 Nov 2026).
+        from usage_tracker import describe_odds_api_failure
+        log.debug("fetch_tennis_odds_events(%s) failed: %s", sport_key,
+                  describe_odds_api_failure(getattr(exc, "response", None), exc))
         return None
 
 

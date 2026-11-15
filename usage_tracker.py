@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 
 import requests
@@ -512,10 +513,147 @@ def anthropic_status() -> dict:
     return {"last_success": last_ok, "last_failure": last_fail, "healthy": healthy}
 
 
+# ── The Odds API: failures (16 Nov 2026) ─────────────────────────────────────
+# From ~10 Nov to 16 Nov 2026 the key was DEACTIVATED after the subscription
+# lapsed. For five days every pick posted and settled at the model's ESTIMATED
+# odds, with no closing odds, and nothing said so. main._fetch_odds_events
+# swallowed each 401 at DEBUG, and the daily summary printed a neutral "quota
+# unavailable", the same text a network blip produces. The one WARNING line
+# that did fire leaked the key: `requests` puts the full URL, `?apiKey=...`
+# included, into every HTTPError and ConnectionError message, so 34 plaintext
+# copies reached the Railway logs.
+#
+# Two rules follow. A failed Odds API call is logged ONLY as status +
+# error_code, or the exception TYPE, never str(exc) and never resp.url. And an
+# account-level error alerts 'usage', at most once a day. "Account-level" is
+# read from the body's error_code, never from the HTTP status alone: these four
+# do not recover until a human acts. A 429 EXCEEDED_FREQ_LIMIT, a 5xx, a timeout
+# or an empty list self-heals, so it is logged and not alerted. Odds API
+# failures are deliberately NOT written to the API Failures tab:
+# anthropic_status() reads every row there as an Anthropic failure.
+ODDS_API_KEY_ERROR_CODES = frozenset({"MISSING_KEY", "INVALID_KEY", "DEACTIVATED_KEY"})
+ODDS_API_CREDIT_ERROR_CODES = frozenset({"OUT_OF_USAGE_CREDITS"})
+ODDS_API_ALERT_CODES = ODDS_API_KEY_ERROR_CODES | ODDS_API_CREDIT_ERROR_CODES
+
+_ODDS_KEY_PARAM_RE = re.compile(r"(apiKey=)[^&\s'\"]+", re.IGNORECASE)
+
+
+def redact_odds_key(text: str) -> str:
+    """`text` with any apiKey query value, and the configured key itself, removed."""
+    text = _ODDS_KEY_PARAM_RE.sub(r"\1<redacted>", str(text))
+    key = os.environ.get("ODDS_API_KEY")
+    if key:
+        text = text.replace(key, "<redacted>")
+    return text
+
+
+def odds_api_error_code(resp) -> str | None:
+    """The `error_code` of an Odds API error body, or None when there is none."""
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    code = body.get("error_code") if isinstance(body, dict) else None
+    return str(code) if code else None
+
+
+def describe_odds_api_failure(resp=None, exc=None) -> str:
+    """
+    One loggable line for a failed Odds API call. It is built ONLY from the HTTP
+    status, the body's error_code and the exception TYPE, because every other
+    field (resp.url, str(exc)) can carry the key.
+    """
+    if resp is not None:
+        code = odds_api_error_code(resp)
+        return f"HTTP {resp.status_code}" + (f" {code}" if code else "")
+    if exc is not None:
+        return type(exc).__name__
+    return "unknown failure"
+
+
+def _odds_alert_code(resp) -> str | None:
+    """The code to alert on, or None when this failure must not alert."""
+    if resp is None:
+        return None                       # network error/timeout: self-heals
+    code = odds_api_error_code(resp)
+    if code in ODDS_API_ALERT_CODES:
+        return code
+    # Fallback: a 401 whose body could not be read is still an auth failure.
+    if code is None and resp.status_code == 401:
+        return "HTTP 401"
+    return None
+
+
+def note_odds_api_failure(job: str, *, resp=None, exc=None) -> bool:
+    """
+    Log one failed Odds API call without the URL or key. For a key or credit
+    error, also alert the 'usage' channel (once per day).
+
+    Returns True only when an alert was actually sent. Never raises: it runs
+    inside the odds fetch, and failure handling must not become a second
+    failure.
+    """
+    try:
+        log.warning("Odds API call failed (%s): %s", job, describe_odds_api_failure(resp, exc))
+        code = _odds_alert_code(resp)
+        if code is None:
+            return False
+        return _alert_odds_api_failure(job, code, resp)
+    except Exception as inner:
+        log.error("usage_tracker: Odds API failure handling failed for %s: %s",
+                  job, type(inner).__name__)
+        return False
+
+
+def _alert_odds_api_failure(job: str, code: str, resp) -> bool:
+    """Post the key/credit alert to 'usage'. Deduped per day like every ops alert."""
+    from discord_bot import send_to_discord
+
+    dedup = (date.today().isoformat(), "odds-api-key")
+    if dedup in _alerted_failures:
+        log.info("usage_tracker: Odds API key alert already sent today — not repeating")
+        return False
+    _alerted_failures.add(dedup)
+
+    try:
+        body = resp.json()
+        api_message = body.get("message", "") if isinstance(body, dict) else ""
+    except Exception:
+        api_message = ""
+    api_message = " ".join(redact_odds_key(api_message).split())[:300]
+
+    credits = code in ODDS_API_CREDIT_ERROR_CODES
+    heading = ("🛑 **ODDS API OUT OF USAGE CREDITS**" if credits
+               else "🛑 **ODDS API REJECTED THE KEY**")
+    action = ("Raise the plan or wait for the monthly reset." if credits
+              else "Set a working `ODDS_API_KEY` on Railway (and in local `.env`), "
+                   "then check it with the free `/v4/sports` call.")
+    now = datetime.now(timezone.utc)
+    text = (
+        f"{heading}\n"
+        f"Error: `{code}` (HTTP {resp.status_code})\n"
+        f"Job: `{job}`\n"
+        f"Time: {now:%d %b %Y %H:%M} UTC\n\n"
+        + (f"```{api_message}```\n" if api_message else "")
+        + "Until this is fixed, every pick posts and settles at the model's ESTIMATED "
+          "odds: no market price, no value flag, and no closing odds, so no CLV. "
+          "Nothing else fails, so nothing else will say so.\n"
+        + action + " Repeat alerts are suppressed for the rest of today."
+    )
+    if not send_to_discord("usage", message=text):
+        log.error("usage_tracker: could not deliver the Odds API %s alert to Discord ('usage')", code)
+        return False
+    return True
+
+
 # ── The Odds API: live quota ─────────────────────────────────────────────────
 
 _odds_quota_cache: tuple[datetime, dict] | None = None
 _ODDS_QUOTA_TTL = timedelta(minutes=10)
+# Why the most recent quota check failed — {"code", "status", "desc"} — or None
+# after a successful one. Read by build_daily_summary to tell a rejected key
+# apart from a network blip; both used to print the same "quota unavailable".
+_odds_quota_failure: dict | None = None
 
 
 def fetch_odds_quota(*, force: bool = False) -> dict | None:
@@ -526,8 +664,11 @@ def fetch_odds_quota(*, force: bool = False) -> dict | None:
     move x-requests-used. So the hard stop can check the budget without
     spending any of it. Cached briefly so a 15-minute poller doesn't re-check
     on every cycle.
+
+    A failure goes through note_odds_api_failure: logged without the URL, and
+    alerted to 'usage' (once a day) when the key or the credits are the cause.
     """
-    global _odds_quota_cache
+    global _odds_quota_cache, _odds_quota_failure
     now = datetime.now(timezone.utc)
     if not force and _odds_quota_cache and now - _odds_quota_cache[0] < _ODDS_QUOTA_TTL:
         return _odds_quota_cache[1]
@@ -538,12 +679,27 @@ def fetch_odds_quota(*, force: bool = False) -> dict | None:
     try:
         resp = requests.get("https://api.the-odds-api.com/v4/sports/",
                             params={"apiKey": api_key}, timeout=10)
-        resp.raise_for_status()
+    except Exception as exc:
+        # Never log str(exc): a requests ConnectionError/Timeout message embeds
+        # the full URL, apiKey included. note_odds_api_failure logs the type.
+        _odds_quota_failure = {"code": None, "status": None,
+                               "desc": describe_odds_api_failure(exc=exc)}
+        note_odds_api_failure("odds-quota-check", exc=exc)
+        return None
+    if not resp.ok:
+        _odds_quota_failure = {"code": odds_api_error_code(resp), "status": resp.status_code,
+                               "desc": describe_odds_api_failure(resp=resp)}
+        note_odds_api_failure("odds-quota-check", resp=resp)
+        return None
+    try:
         used = int(resp.headers.get("x-requests-used", 0))
         remaining = int(resp.headers.get("x-requests-remaining", 0))
-    except Exception as exc:
-        log.warning("usage_tracker: Odds API quota check failed: %s", exc)
+    except (TypeError, ValueError) as exc:
+        _odds_quota_failure = {"code": None, "status": resp.status_code,
+                               "desc": describe_odds_api_failure(exc=exc)}
+        log.warning("usage_tracker: Odds API quota headers unreadable: %s", type(exc).__name__)
         return None
+    _odds_quota_failure = None
 
     quota = {
         "used": used,
@@ -717,7 +873,18 @@ def build_daily_summary() -> str:
                          f"configured for {ODDS_API_MONTHLY_LIMIT:,}. The paid plan has not "
                          f"reached this key yet — daily caps are sized for the larger tier.")
     else:
-        lines.append("  _quota unavailable_")
+        # A rejected key must not read like a network blip. Both printed the
+        # same neutral line through the whole 10-16 Nov 2026 outage.
+        fail = _odds_quota_failure or {}
+        code = fail.get("code")
+        if code in ODDS_API_ALERT_CODES or (code is None and fail.get("status") == 401):
+            label = code or "HTTP 401"
+            what = ("OUT OF USAGE CREDITS" if code in ODDS_API_CREDIT_ERROR_CODES
+                    else "KEY REJECTED")
+            lines.append(f"  🛑 **{what} — `{label}`**. Picks post and settle at ESTIMATED odds; "
+                         f"no closing odds are collected. Fix `ODDS_API_KEY` / the plan.")
+        else:
+            lines.append("  _quota unavailable_" + (f" ({fail['desc']})" if fail.get("desc") else ""))
     lines.append("")
 
     # RapidAPI, one block per subscription

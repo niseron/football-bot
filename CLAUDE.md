@@ -641,7 +641,14 @@ wrong team".
   between candidates must go through `_best_team_match`, which ranks by
   `_team_similarity` and requires the winner to beat the runner-up by
   `TEAM_MATCH_MARGIN`. That covers the h2h branch, the Asian Handicap branch and
-  `_find_odds_event`; a new market branch must use it too.
+  `_find_odds_event`; a new market branch must use it too. **Every event lookup
+  goes through `_find_odds_event`**, including `closing_odds.py`. Until 16 Nov
+  2026 it ran `next()` over `_team_match`, so for a Club Brugge vs Cercle Brugge
+  pick the return fixture passed on both sides and won whenever it was listed
+  first. That would have written the wrong closing price into CLV. An audit of
+  451 rows with both prices found no sign it ever fired. Pinned by
+  `tests/test_closing_odds.py`, whose negative control fails on the first-match
+  code.
 - **Ambiguity returns None, and None is correct.** The pick then falls back to the
   estimated price. No market price costs a little accuracy; the WRONG market price
   pays a favourite at the underdog's odds and books it into P&L, CLV and the edge

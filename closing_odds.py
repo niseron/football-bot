@@ -24,7 +24,13 @@ import logging
 from datetime import date, datetime, timezone
 
 from excel_tracker import get_unsettled_picks_with_kickoff, update_closing_odds
-from main import ODDS_API_SPORT_KEYS, _fetch_odds_events, _match_market_odds, _parse_odds_event, _team_match
+from main import (
+    ODDS_API_SPORT_KEYS,
+    _fetch_odds_events,
+    _find_odds_event,
+    _match_market_odds,
+    _parse_odds_event,
+)
 
 log = logging.getLogger(__name__)
 
@@ -173,14 +179,16 @@ def run_closing_odds_check(
                 if " vs " not in match:
                     continue
                 home, away = [s.strip() for s in match.split(" vs ", 1)]
-                event = next(
-                    (
-                        e for e in events
-                        if _team_match(e.get("home_team", ""), home)
-                        and _team_match(e.get("away_team", ""), away)
-                    ),
-                    None,
-                )
+                # Ranked, never first-match (16 Nov 2026). `_team_match` is a
+                # permissive RECALL filter: "Club Brugge" normalises to bare
+                # "brugge", so for a Club Brugge vs Cercle Brugge pick the RETURN
+                # fixture (Cercle home) passes on both sides too. A `next()` over
+                # the list then priced the closing line off whichever fixture the
+                # API listed first. That is the same first-wins pattern that paid
+                # 23 Aug 2026 at the underdog's 8.98. `_find_odds_event` scores
+                # every viable event and refuses a tie, and no closing price is
+                # correct when the fixture is ambiguous.
+                event = _find_odds_event(events, home, away)
                 if event is None:
                     continue
 

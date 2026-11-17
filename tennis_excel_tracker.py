@@ -709,15 +709,26 @@ def _col_letter(col: int) -> str:
 
 TENNIS_SUMMARY_SHEET_NAME = "Tennis Summary"
 
+# A "best bet type" / "best confidence level" is named only from groups with at
+# least this many settled WIN/LOSS picks (17 Nov 2026). Before, the summary
+# crowned Total Games (12 picks) and Low confidence (12 picks) as "best" because
+# they were the least negative — a label a reader takes as a finding.
+TENNIS_BEST_GROUP_MIN = 20
 
-def _refresh_tennis_summary() -> None:
-    """Rebuild the 'Tennis Summary' tab from the Tennis Picks rows: overall
-    record, win rate, units P&L, simulated bankroll/ROI, best bet type and
-    confidence level, a per-bet-type breakdown (win-rate-desc, same as
-    football's), plus a tennis-only Rank Tier breakdown."""
-    ss   = _get_spreadsheet()
-    rows = [r for r in ss.worksheet(TENNIS_SHEET_NAME).get_all_values()[1:] if r and r[0]]
 
+def _best_group(pnl: dict[str, float], counts: dict[str, int]) -> tuple[str, float | str]:
+    """(label, P&L) of the highest-P&L group with >= TENNIS_BEST_GROUP_MIN settled
+    W/L picks, or an explicit n/a when no group is that large."""
+    eligible = {k: v for k, v in pnl.items() if counts.get(k, 0) >= TENNIS_BEST_GROUP_MIN}
+    if not eligible:
+        return f"n/a (no group with {TENNIS_BEST_GROUP_MIN}+ settled picks)", ""
+    best = max(eligible, key=eligible.get)
+    return f"{best} ({counts[best]} settled)", round(eligible[best], 2)
+
+
+def _tennis_summary_data(rows: list[list[str]]) -> list[list]:
+    """The Tennis Summary tab's cells for these Tennis Picks body rows. Pure —
+    no Sheets I/O — so the layout is testable."""
     res_col  = TENNIS_HEADERS.index("Result")
     pnl_col  = TENNIS_HEADERS.index("P&L")
     bt_col   = TENNIS_HEADERS.index("Bet Type")
@@ -753,21 +764,28 @@ def _refresh_tennis_summary() -> None:
                 break
             except ValueError:
                 pass
-    roi = round((current_bankroll - TENNIS_STARTING_BANKROLL) / TENNIS_STARTING_BANKROLL * 100, 1)
+    # The bankroll's change against its start. This was labelled "ROI" until
+    # 17 Nov 2026, which read -55% for a book whose per-bet ROI was -5.6%.
+    bank_change = round((current_bankroll - TENNIS_STARTING_BANKROLL) / TENNIS_STARTING_BANKROLL * 100, 1)
+    # ROI per unit staked: units won / settled WIN+LOSS picks (flat 1u each)
+    roi = round(total_pnl_units / len(full_wr_settled) * 100, 1) if full_wr_settled else 0.0
 
     total_pnl_euros = round(total_pnl_units * TENNIS_UNIT_STAKE, 2)
     pnl_str = f"+EUR {total_pnl_euros:.2f}" if total_pnl_euros >= 0 else f"-EUR {abs(total_pnl_euros):.2f}"
+    bank_change_str = f"+{bank_change:.1f}%" if bank_change >= 0 else f"{bank_change:.1f}%"
     roi_str = f"+{roi:.1f}%" if roi >= 0 else f"{roi:.1f}%"
 
     bt_pnl: dict[str, float] = defaultdict(float)
     conf_pnl: dict[str, float] = defaultdict(float)
-    for r in settled:
+    bt_n: dict[str, int] = defaultdict(int)
+    conf_n: dict[str, int] = defaultdict(int)
+    for r in full_wr_settled:
         bt_pnl[_cell(r, bt_col)] += _pnl(r)
         conf_pnl[_cell(r, conf_col)] += _pnl(r)
-    best_bt       = max(bt_pnl, key=bt_pnl.get) if bt_pnl else "N/A"
-    best_bt_pnl   = round(bt_pnl.get(best_bt, 0), 2)
-    best_conf     = max(conf_pnl, key=conf_pnl.get) if conf_pnl else "N/A"
-    best_conf_pnl = round(conf_pnl.get(best_conf, 0), 2)
+        bt_n[_cell(r, bt_col)] += 1
+        conf_n[_cell(r, conf_col)] += 1
+    best_bt, best_bt_pnl = _best_group(bt_pnl, bt_n)
+    best_conf, best_conf_pnl = _best_group(conf_pnl, conf_n)
 
     def _breakdown(col: int, empty_label: str) -> list[list]:
         """[label, wins, losses, win rate %, P&L, total] rows, win-rate-desc."""
@@ -801,17 +819,18 @@ def _refresh_tennis_summary() -> None:
         ["", ""],
         ["Win rate",              f"{win_rate:.1f}%"],
         ["Total P&L (units)",     total_pnl_units],
+        ["ROI per unit staked",   roi_str],
         ["", ""],
         ["BANKROLL (SIM)", ""],
         ["  Starting bankroll",   f"EUR {TENNIS_STARTING_BANKROLL:.2f}"],
         ["  Current bankroll",    f"EUR {current_bankroll:.2f}"],
         ["  Total profit/loss",   pnl_str],
-        ["  ROI",                 roi_str],
+        ["  Bankroll change",     bank_change_str],
         ["", ""],
-        ["Best bet type",         best_bt],
+        [f"Best bet type ({TENNIS_BEST_GROUP_MIN}+ settled)", best_bt],
         ["  P&L from this type",  best_bt_pnl],
         ["", ""],
-        ["Best confidence level", best_conf],
+        [f"Best confidence level ({TENNIS_BEST_GROUP_MIN}+ settled)", best_conf],
         ["  P&L from this level", best_conf_pnl],
         ["", ""],
         ["BET TYPE BREAKDOWN", "", "", "", "", ""],
@@ -821,7 +840,18 @@ def _refresh_tennis_summary() -> None:
         ["RANK TIER BREAKDOWN", "", "", "", "", ""],
         ["Rank Tier", "Wins", "Losses", "Win Rate %", "Total P&L", "Total Picks"],
     ] + tier_rows
+    return data
 
+
+def _refresh_tennis_summary() -> None:
+    """Rebuild the 'Tennis Summary' tab from the Tennis Picks rows: overall
+    record, win rate, units P&L and ROI per unit staked, simulated bankroll and
+    its change, best bet type and confidence level (20+ settled only), a
+    per-bet-type breakdown (win-rate-desc, same as football's), plus a
+    tennis-only Rank Tier breakdown."""
+    ss   = _get_spreadsheet()
+    rows = [r for r in ss.worksheet(TENNIS_SHEET_NAME).get_all_values()[1:] if r and r[0]]
+    data = _tennis_summary_data(rows)
     try:
         ws_sum = ss.worksheet(TENNIS_SUMMARY_SHEET_NAME)
     except gspread.WorksheetNotFound:

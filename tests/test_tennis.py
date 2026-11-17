@@ -133,5 +133,43 @@ class PickFixtureRouting(unittest.TestCase):
         self.assertEqual(_find_fixture(slate, "Brandon Nakashima", "Arthur Rinderknech")["id"], 2)
 
 
+def _row(bet, conf, result, pnl, bank=""):
+    from tennis_excel_tracker import TENNIS_HEADERS
+    r = [""] * len(TENNIS_HEADERS)
+    r[0], r[1], r[2], r[3], r[4] = "10-Oct-2026", "A vs B", bet, "A Win", "1.80"
+    r[5], r[6], r[7] = conf, result, str(pnl)
+    r[TENNIS_HEADERS.index("Bankroll € (SIM)")] = bank
+    return r
+
+
+class TennisSummaryLabels(unittest.TestCase):
+    """17 Nov 2026: 'ROI' showed the SIM bankroll drawdown (-55.3%) while the
+    per-bet ROI was -5.6%, and 'best bet type' / 'best confidence' crowned
+    12-pick groups because they lost least."""
+
+    def _cells(self, rows):
+        from tennis_excel_tracker import _tennis_summary_data
+        return {str(r[0]).strip(): r[1] for r in _tennis_summary_data(rows) if r and len(r) > 1}
+
+    def test_bankroll_change_is_not_called_roi(self):
+        rows = [_row("Match Winner", "High", "LOSS", -1, bank="90")] * 10
+        cells = self._cells(rows)
+        self.assertNotIn("ROI", cells)
+        self.assertEqual(cells["Bankroll change"], "-10.0%")
+        self.assertEqual(cells["ROI per unit staked"], "-100.0%")
+
+    def test_best_group_needs_twenty_settled_picks(self):
+        rows = ([_row("Match Winner", "Medium", "LOSS", -1)] * 25
+                + [_row("Total Games", "Low", "WIN", 0.9)] * 12)
+        cells = self._cells(rows)
+        self.assertEqual(cells["Best bet type (20+ settled)"], "Match Winner (25 settled)")
+        self.assertEqual(cells["Best confidence level (20+ settled)"], "Medium (25 settled)")
+
+    def test_no_group_large_enough_says_so(self):
+        cells = self._cells([_row("Total Games", "Low", "WIN", 0.9)] * 12)
+        self.assertTrue(cells["Best bet type (20+ settled)"].startswith("n/a"))
+        self.assertTrue(cells["Best confidence level (20+ settled)"].startswith("n/a"))
+
+
 if __name__ == "__main__":
     unittest.main()

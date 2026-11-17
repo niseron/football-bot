@@ -1170,6 +1170,11 @@ Row 578 was tagged `Pick Tier = Duplicate` (duplicate of row 559) on 17 Nov 2026
 `_rows_578_579_nov17.py --tag-578`. It stays on the sheet as the audit trail and,
 like every Duplicate row, drops out of the Extended metrics.
 
+Row 579 was settled on 17 Nov 2026 by `_rows_578_579_nov17.py --settle-579`: the feed
+(fixture 6112353, Full-Time, not cancelled or awarded, no extra time) confirms
+Hoffenheim 2-3 Beşiktaş, so `Besiktas Win` is a WIN, paid at the row's 3.43 market price:
++2.43 units. It is an Extended row, so those units are unstaked and outside the running total.
+
 ### Fixture name matching: other squads of the same club (fixed 8 Sep 2026)
 
 Row 357 (8 Sep 2026, FC Porto vs Manchester City, Match Winner / Manchester City

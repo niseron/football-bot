@@ -2401,6 +2401,19 @@ A second, fully independent picks pipeline for ATP/WTA tennis, added 9 Jul 2026.
 ### Data collection start date: **9 Jul 2026**
 ### Independent verdict timeline: ~300 settled tennis picks with probability data — at ~3-5 picks/day, expect a first meaningful calibration read around **Oct-Nov 2026**. This clock is completely separate from the football calibration timeline; do not merge the two samples or compare their early reports.
 
+### New tennis regime — start date **17 Nov 2026** (first picks run on the new code)
+
+The first calibration read came in on 17 Nov 2026 (497 settled picks, 10 Jul – 16 Nov): stated probability averaged 64.4% against a 56.9% win rate (overconfident, beyond doubt at that n), and the stated probability scored a WORSE Brier (0.2332) than the model's own odds did (0.2243). ROI was −5.6% ±7.5 at the model's own estimated odds — every row had been paid at the estimate, so that figure was never a book's ROI. From the start date:
+
+- **Bet types: Match Winner and Set Betting only.** Handicap (games) (39 settled, won 38.5% vs 58% stated) and Total Games (12 settled, 41.7% vs 56%) are no longer offered by the prompt and are dropped in code (`tennis_main.apply_tennis_pick_rules`).
+- **No Match Winner pick at 2.00 or higher** (29-51, −18.25 units, won 36% vs 53% stated). Checked on the price that will be PAID — the market price when one matched, else the estimate — so a pick the model priced at 1.85 that the market prices at 2.15 is dropped.
+- **Honest probability.** The prompt sentence "a value bet is precisely one where your probability is higher than the odds imply" is removed; the model is asked for what it actually believes, not derived from the odds.
+- **Pick-time market prices are back** (Odds API, once per picks run; closing-odds polling stays off) and a pick **settles at the market price** whenever one matched.
+- Picks are resolved to their fixture with the ranked matcher (`best_fixture_match`), so a reversed or re-spelt match name still gets ranks, tier, player ids and start time.
+- Fewer than 5 picks — or none — is a correct day under these rules. Nothing pads.
+
+Rows before the start date are the old regime and stay as they are; compare the two only from this date on.
+
 ### Architecture
 
 | Piece | Tennis | Football equivalent (NOT shared) |

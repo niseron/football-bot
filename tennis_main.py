@@ -807,6 +807,55 @@ def enrich_tennis_picks_with_real_odds(picks: list[dict]) -> None:
     log.info("Tennis odds: market price matched for %d/%d pick(s)", matched, len(picks))
 
 
+# ── Pick rules (new regime from 17 Nov 2026) ──────────────────────────────────
+# Measured on 497 settled picks (10 Jul - 16 Nov 2026): Handicap (games) won
+# 38.5% against 58% stated, Total Games 41.7% against 56%, and Match Winner
+# picks priced 2.00+ won 36% against 53% stated (29-51, -18.25 units). The
+# prompt no longer offers those markets and asks for favourites only; this
+# filter enforces it in code as well, because a prompt is a request, not a
+# guarantee. The Match Winner price checked is the one that will be PAID —
+# the market price when one matched, else the estimate.
+TENNIS_ALLOWED_BET_TYPES = ("Match Winner", "Set Betting")
+TENNIS_MATCH_WINNER_MAX_ODDS = 2.00
+
+
+def _canonical_bet_type(bet_type: str) -> str | None:
+    bt = (bet_type or "").strip().lower()
+    if "winner" in bt or "moneyline" in bt:
+        return "Match Winner"
+    if bt.startswith("set betting") or bt in ("set score", "correct set score"):
+        return "Set Betting"
+    return None
+
+
+def apply_tennis_pick_rules(picks: list[dict]) -> tuple[list[dict], list[tuple[dict, str]]]:
+    """(kept, [(dropped pick, reason)]). Never pads: a day can end with fewer
+    picks, or none, and that is a correct answer."""
+    kept: list[dict] = []
+    dropped: list[tuple[dict, str]] = []
+    for p in picks:
+        bt = _canonical_bet_type(p.get("bet_type", ""))
+        if bt not in TENNIS_ALLOWED_BET_TYPES:
+            dropped.append((p, f"bet type '{p.get('bet_type')}' is not offered"))
+            continue
+        if bt == "Match Winner":
+            try:
+                price = float(p.get("market_odds") or p.get("odds"))
+            except (TypeError, ValueError):
+                dropped.append((p, "Match Winner pick without a readable price"))
+                continue
+            if price >= TENNIS_MATCH_WINNER_MAX_ODDS:
+                basis = "market" if p.get("market_odds") else "estimated"
+                dropped.append((p, f"Match Winner at {price:.2f} ({basis}) — "
+                                   f"{TENNIS_MATCH_WINNER_MAX_ODDS:.2f}+ is not taken"))
+                continue
+        p["bet_type"] = bt
+        kept.append(p)
+    for p, why in dropped:
+        log.info("Tennis rule: dropped '%s — %s' — %s", p.get("match"), p.get("pick"), why)
+    return kept, dropped
+
+
 # ── Claude analysis ───────────────────────────────────────────────────────────
 
 TENNIS_SYSTEM_PROMPT = """You are a professional tennis betting analyst with deep expertise in ATP and WTA
@@ -834,18 +883,20 @@ form strings, H2H record, surface, and tournament level — plus durable traits 
 
 Supported bet types (use ONLY these):
 - Match Winner — which player wins the match
-- Total Games — over/under on total games in the match, e.g. 'Over 22.5 Games'
 - Set Betting — exact set score, e.g. '2-0', '2-1' (best of 3) or '3-1' (Grand Slam men)
-- Handicap (games) — game handicap, e.g. 'Alcaraz -4.5'
+
+Do NOT recommend a Match Winner pick at decimal odds of 2.00 or higher: back a player to win the
+match only when he or she is the favourite at odds below 2.00. Underdogs and coin-flips are not
+picks here.
 
 Since live odds are not provided, use your knowledge of typical tennis market pricing to estimate
 realistic decimal odds (e.g. a heavy favourite ~1.20, moderate favourite ~1.55, toss-up ~1.90 each
 side, set-betting favourites 2-0 ~2.10).
 
-The "probability" field is your honest estimate of how likely the pick is to win (0-100). It should
-reflect your true belief, not simply 100/odds — a value bet is precisely one where your probability
-is higher than the odds imply. Your stated probabilities are tracked and scored for calibration over
-time, so be realistic: a pick you'd expect to win 6 times out of 10 is 60, not 75.
+The "probability" field is your honest estimate of how likely the pick is to win (0-100): what you
+actually believe, judged on the evidence alone. Do not derive it from the odds and do not adjust it
+to make a pick look better. Your stated probabilities are tracked and scored for calibration over
+time: a pick you expect to win 6 times out of 10 is 60, not 75.
 
 For each recommendation output valid JSON with this exact structure:
 {
@@ -855,8 +906,8 @@ For each recommendation output valid JSON with this exact structure:
       "tour": "<ATP or WTA>",
       "tournament": "<tournament name>",
       "surface": "<Hard / Clay / Grass>",
-      "bet_type": "<Match Winner / Total Games / Set Betting / Handicap (games)>",
-      "pick": "<selection using actual player names — e.g. 'Sinner Win', 'Over 21.5 Games', 'Swiatek 2-0', 'Alcaraz -4.5'>",
+      "bet_type": "<Match Winner / Set Betting>",
+      "pick": "<selection using actual player names — e.g. 'Sinner Win', 'Swiatek 2-0'>",
       "odds": <estimated decimal odds as a number>,
       "probability": <your estimated true probability of this pick winning, as a number from 0 to 100>,
       "confidence": "<High / Medium / Low>",
@@ -868,9 +919,7 @@ For each recommendation output valid JSON with this exact structure:
 IMPORTANT — pick field naming rules:
 - The "match" field must use the exact player names as given in the fixture data.
 - NEVER use 'Player 1 Win' or 'Favourite Win' — always the actual player name, e.g. 'Rybakina Win'
-- Total Games format: 'Over 22.5 Games' / 'Under 20.5 Games'
 - Set Betting format: '<Player> 2-0', '<Player> 2-1', '<Player> 3-0' etc.
-- Handicap format: '<Player> -3.5' or '<Player> +4.5'
 
 Return ONLY the JSON block, no other text."""
 
@@ -1117,6 +1166,11 @@ async def daily_tennis_picks_job():
         enrich_tennis_picks_with_real_odds(picks)
     except Exception as exc:
         log.warning("Tennis real odds enrichment failed — Claude odds only: %s", exc)
+
+    picks, _dropped = apply_tennis_pick_rules(picks)
+    if not picks:
+        log.info("No tennis picks left after the pick rules — nothing logged or posted")
+        return
 
     # SIMULATED Kelly staking — same half-Kelly/5%-cap logic as football, but
     # sized against the independent €100 TENNIS_REAL_BANKROLL and tagged SIM

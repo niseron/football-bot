@@ -232,5 +232,49 @@ class PickTimeOdds(unittest.TestCase):
         self.assertEqual(match_tennis_market_odds(pick, real), 1.60)
 
 
+class PickRules(unittest.TestCase):
+    """New regime from 17 Nov 2026: no Handicap (games), no Total Games, no
+    Match Winner at 2.00+ (on the price that will be paid); honest probability."""
+
+    def _p(self, bet, odds, market=None, pick="A Win"):
+        d = {"match": "A vs B", "bet_type": bet, "pick": pick, "odds": odds}
+        if market:
+            d["market_odds"] = market
+        return d
+
+    def test_cut_bet_types_are_dropped(self):
+        from tennis_main import apply_tennis_pick_rules
+        kept, dropped = apply_tennis_pick_rules([
+            self._p("Handicap (games)", 1.85, pick="A -4.5"),
+            self._p("Total Games", 1.90, pick="Over 21.5 Games"),
+            self._p("Set Betting", 2.10, pick="A 2-0"),
+        ])
+        self.assertEqual([k["bet_type"] for k in kept], ["Set Betting"])
+        self.assertEqual(len(dropped), 2)
+
+    def test_match_winner_two_or_more_is_dropped(self):
+        from tennis_main import apply_tennis_pick_rules
+        kept, _ = apply_tennis_pick_rules([self._p("Match Winner", 2.00),
+                                           self._p("Match Winner", 1.99)])
+        self.assertEqual([k["odds"] for k in kept], [1.99])
+
+    def test_market_price_decides_not_the_estimate(self):
+        from tennis_main import apply_tennis_pick_rules
+        kept, dropped = apply_tennis_pick_rules([
+            self._p("Match Winner", 1.85, market=2.15),   # market says underdog
+            self._p("Match Winner", 2.05, market=1.90),   # market says favourite
+        ])
+        self.assertEqual([k["market_odds"] for k in kept], [1.90])
+        self.assertIn("market", dropped[0][1])
+
+    def test_prompt_offers_only_the_two_markets_and_honest_probability(self):
+        from tennis_main import TENNIS_SYSTEM_PROMPT as P
+        self.assertNotIn("Handicap", P)
+        self.assertNotIn("Total Games", P)
+        self.assertNotIn("a value bet is precisely one where your probability", P)
+        self.assertIn("2.00 or higher", P)
+        self.assertIn("Do not derive it from the odds", P)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -63,8 +63,11 @@ ANTHROPIC_PRICING: dict[str, tuple[float, float]] = {
     # bug.
     "claude-opus-5": (5.00, 25.00),
     # Added 17 Nov 2026 when the tennis picks moved to Claude Opus 5.5: $4 /
-    # input MTok and $20 / output MTok (the claude-api reference, cached 3 Nov
-    # 2026). Thinking cannot be switched off on Opus 5.5 and bills as output.
+    # input MTok and $20 / output MTok, verified the same day against Anthropic's
+    # official pricing page (platform.claude.com/docs/en/about-claude/pricing).
+    # Thinking cannot be switched off on Opus 5.5 and bills as output. Its cache
+    # hits bill at 0.05x input, not the 0.10x _CACHE_READ_MULTIPLIER below — moot
+    # while the tennis call sends no cache_control (cache reads are 0).
     "claude-opus-5-5": (4.00, 20.00),
 }
 # Cache reads bill at ~0.1x input, 5-minute cache writes at ~1.25x input.

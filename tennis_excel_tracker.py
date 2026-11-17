@@ -36,6 +36,8 @@ TENNIS_HEADERS = [
                          # one past-matches call instead of scanning the day's slate
     "Market Odds",       # exact matched market price (17 Nov 2026) — the price a
                          # pick SETTLES at whenever one exists; see settlement_odds()
+    "Settlement Note",   # why a row was settled/voided by hand or re-priced (17 Nov
+                         # 2026); blank for ordinary automatic settlements
 ]
 
 
@@ -383,6 +385,7 @@ def log_tennis_pick(
         "",  # Bankroll € (SIM) — recalculated when results settle
         player_ids or "",  # 'tour:p1Id|p2Id' for direct past-matches settling
         round(float(market_odds), 2) if market_odds else "",  # settles at this when present
+        "",  # Settlement Note — only for hand-settled / voided / re-priced rows
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")

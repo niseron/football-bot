@@ -1166,6 +1166,10 @@ duplicate guards compare fixtures with `feed_names.same_fixture`. Pinned by
 guard tests fail on the previous code. The fix is forward-only: it does not by
 itself settle row 579 (outside every lookback) or re-tag row 578.
 
+Row 578 was tagged `Pick Tier = Duplicate` (duplicate of row 559) on 17 Nov 2026 by
+`_rows_578_579_nov17.py --tag-578`. It stays on the sheet as the audit trail and,
+like every Duplicate row, drops out of the Extended metrics.
+
 ### Fixture name matching: other squads of the same club (fixed 8 Sep 2026)
 
 Row 357 (8 Sep 2026, FC Porto vs Manchester City, Match Winner / Manchester City

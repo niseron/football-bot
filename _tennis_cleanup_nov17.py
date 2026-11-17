@@ -108,6 +108,27 @@ def main(argv: list[str]) -> None:
                     ev = tar.evaluate_tennis_pick(bet, pick, n1, n2, res_str)
                     if ev in ("WIN", "LOSS", "VOID"):
                         result, why = ev, f"{n1} vs {n2} {res_str} — from feed"
+            if result is None and ids is not None and past is None:
+                # The feed holds each player's last ~100 matches. When BOTH feeds
+                # reach back past the match day and neither lists the meeting,
+                # the match was not played (withdrawal) — a real VOID.
+                cand = min(tar._candidate_dates(p))
+                oldest = []
+                for pid in (ids[1], ids[2]):
+                    ds = [str(m.get("date", ""))[:10] for m in tar._fetch_past_matches(ids[0], pid)]
+                    oldest.append(min(ds) if ds else "9999")
+                if max(oldest) < cand.isoformat():
+                    pnl = 0.0
+                    note = ("VOID 17 Nov 2026 — match not played: neither player's "
+                            "past-matches feed (reaching back to "
+                            f"{max(oldest)}) lists this meeting ({source}).")
+                    report.append(f"row {i:3d} {r[0]} {match} | {pick} -> VOID (not played; {source})")
+                    updates += [
+                        {"range": f"G{i}", "values": [["VOID"]]},
+                        {"range": f"H{i}", "values": [[0.0]]},
+                        {"range": f"{note_a1}{i}", "values": [[note]]},
+                    ]
+                    continue
             if result is None:
                 reason = ("no player ids for both names" if ids is None else
                           "match no longer in either player's last-10 past-matches feed"

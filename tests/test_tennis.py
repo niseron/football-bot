@@ -43,5 +43,95 @@ class SettlementPrice(unittest.TestCase):
                            TENNIS_HEADERS.index("Player IDs"))
 
 
+def _summary(p1, p2, r1, r2, i1, i2, start="2026-08-05T21:05:00.000Z"):
+    """A fixture summary in build_tennis_fixture_summary's shape."""
+    return {"player1": p1, "player2": p2, "player1_rank": r1, "player2_rank": r2,
+            "player1_id": i1, "player2_id": i2, "start_utc": start}
+
+
+class PickFixtureRouting(unittest.TestCase):
+    """17 Nov 2026: 88 of 562 picks named their match differently from the feed
+    — almost always the pair reversed — so the exact-string lookup missed and
+    they got no ranks, no player ids and no start time, and went to
+    'tennis-picks-lower' whatever the ranks. Real misrouted rows below."""
+
+    def setUp(self):
+        from tennis_main import TENNIS_LOWER_TIER_LABEL, TENNIS_TOP_TIER_LABEL
+        self.TOP, self.LOW = TENNIS_TOP_TIER_LABEL, TENNIS_LOWER_TIER_LABEL
+        # Pool order as the feed lists it; the model wrote each pair reversed
+        self.pool = {
+            "ATP": [
+                _summary("Thiago Agustin Tirante", "Taylor Fritz", 98, 4, 70001, 24008),
+                _summary("Casper Ruud", "Joao Fonseca", 12, 30, 30001, 30002),
+                _summary("Bryce Nakashima", "Quinn Vandecasteele", 260, 410, 40001, 40002),
+                _summary("Arthur Rinderknech", "Brandon Nakashima", 25, 33, 40003, 40004),
+            ],
+            "WTA": [_summary("Ann Li", "Elena Rybakina", 60, 5, 50001, 50002,
+                             start="2026-08-07T23:00:00.000Z")],
+        }
+
+    def _attach(self, match):
+        from tennis_main import attach_fixture_context
+        pick = {"match": match, "bet_type": "Match Winner", "pick": "x Win"}
+        ok = attach_fixture_context(pick, self.pool)
+        return ok, pick
+
+    def test_fritz_reversed_gets_ranks_ids_start_and_top_tier(self):
+        ok, p = self._attach("Taylor Fritz vs Thiago Agustin Tirante")
+        self.assertTrue(ok)
+        self.assertEqual(p["match"], "Thiago Agustin Tirante vs Taylor Fritz")
+        self.assertEqual(p["ranks"], "#98 vs #4")
+        self.assertEqual(p["rank_tier"], self.TOP)
+        self.assertEqual(p["player_ids"], "atp:70001|24008")
+        self.assertEqual(p["start_utc"], "2026-08-05T21:05:00.000Z")
+
+    def test_fonseca_vs_ruud_reversed(self):
+        ok, p = self._attach("Joao Fonseca vs Casper Ruud")
+        self.assertTrue(ok)
+        self.assertEqual(p["player_ids"], "atp:30001|30002")
+        self.assertEqual(p["rank_tier"], self.TOP)
+
+    def test_rybakina_reversed_resolves_on_the_wta_list(self):
+        ok, p = self._attach("Elena Rybakina vs Ann Li")
+        self.assertTrue(ok)
+        self.assertEqual(p["player_ids"], "wta:50001|50002")
+        self.assertEqual(p["rank_tier"], self.TOP)
+
+    def test_accents_and_case_still_resolve(self):
+        ok, p = self._attach("joão fonseca vs CASPER RUUD")
+        self.assertTrue(ok)
+        self.assertEqual(p["match"], "Casper Ruud vs Joao Fonseca")
+
+    def test_exact_name_beats_a_namesake(self):
+        # Brandon and Bryce Nakashima are both fuzzy matches for each other;
+        # the opponent and the exact name must decide, never list order
+        ok, p = self._attach("Brandon Nakashima vs Arthur Rinderknech")
+        self.assertTrue(ok)
+        self.assertEqual(p["player_ids"], "atp:40003|40004")
+
+    def test_unknown_match_stays_lower_tier_without_ids(self):
+        ok, p = self._attach("Novak Djokovic vs Rafael Nadal")
+        self.assertFalse(ok)
+        self.assertEqual(p["rank_tier"], self.LOW)
+        self.assertEqual(p["player_ids"], "")
+
+    def test_negative_control_the_old_exact_lookup_misses_the_reversal(self):
+        exact = {f"{f['player1']} vs {f['player2']}" for fs in self.pool.values() for f in fs}
+        self.assertNotIn("Taylor Fritz vs Thiago Agustin Tirante", exact)
+
+    def test_ambiguity_is_refused(self):
+        from tennis_main import best_fixture_match
+        cands = [("A. Smith", "Jan Novak", 1), ("B. Smith", "Jan Novak", 2)]
+        self.assertIsNone(best_fixture_match("Smith", "Jan Novak", cands))
+
+    def test_settlement_fallback_uses_the_same_matcher(self):
+        from tennis_auto_results import _find_fixture
+        slate = [
+            {"player1": {"name": "Bryce Nakashima"}, "player2": {"name": "Arthur Rinderknech"}, "id": 1},
+            {"player1": {"name": "Arthur Rinderknech"}, "player2": {"name": "Brandon Nakashima"}, "id": 2},
+        ]
+        self.assertEqual(_find_fixture(slate, "Brandon Nakashima", "Arthur Rinderknech")["id"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

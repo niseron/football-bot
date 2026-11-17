@@ -38,7 +38,14 @@ from tennis_excel_tracker import (
     get_pending_tennis_picks,
     update_tennis_row_result,
 )
-from tennis_main import TOURS, _data_list, _tennis_get, _tennis_get_paged, player_match
+from tennis_main import (
+    TOURS,
+    _data_list,
+    _tennis_get,
+    _tennis_get_paged,
+    best_fixture_match,
+    player_match,
+)
 
 log = logging.getLogger(__name__)
 
@@ -161,16 +168,15 @@ def _candidate_dates(p: dict) -> list[date]:
 
 
 def _find_fixture(fixtures: list[dict], p1_q: str, p2_q: str) -> dict | None:
-    """Find a fixture whose two players match the pick's, in either order."""
-    for f in fixtures:
-        n1 = (f.get("player1") or {}).get("name", "")
-        n2 = (f.get("player2") or {}).get("name", "")
-        if not n1 or not n2:
-            continue
-        if (player_match(n1, p1_q) and player_match(n2, p2_q)) or \
-           (player_match(n1, p2_q) and player_match(n2, p1_q)):
-            return f
-    return None
+    """The fixture whose two players best match the pick's, in either order —
+    the SAME ranked matcher the picks run uses (tennis_main.best_fixture_match):
+    exact beats fuzzy, ambiguity refuses. It used to take the first fuzzy hit
+    in a slate of hundreds."""
+    return best_fixture_match(
+        p1_q, p2_q,
+        (((f.get("player1") or {}).get("name", ""),
+          (f.get("player2") or {}).get("name", ""), f) for f in fixtures),
+    )
 
 
 # ── Score parsing & bet evaluation ───────────────────────────────────────────

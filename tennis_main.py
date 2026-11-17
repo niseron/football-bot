@@ -573,6 +573,78 @@ def player_match(a: str, b: str) -> bool:
     return all(_tok_in(t, long_) for t in short)
 
 
+# ── Ranked fixture matching (17 Nov 2026) ─────────────────────────────────────
+# ONE matcher for "which fixture is this pick's match?", used by the picks run
+# (ranks / rank tier / player ids / start time) and by settlement's fallback.
+# Before this the picks run looked fixtures up by EXACT string, and the model
+# routinely writes the pair in the other order ('Taylor Fritz vs Thiago Agustin
+# Tirante' for the feed's 'Thiago Agustin Tirante vs Taylor Fritz', 5 Aug 2026):
+# 88 of 562 picks got no ranks, no player ids and no start time, were routed to
+# 'tennis-picks-lower' whatever the ranks (49 were tour-level matches), and 22 of
+# them stranded unsettled. Settlement's fallback already accepted either order
+# but took the FIRST fuzzy hit in a slate of hundreds; this ranks instead.
+
+FIXTURE_MATCH_MARGIN = 0.05
+
+
+def _name_score(feed_name: str, query: str) -> float:
+    """1.0 exact (after normalisation), 0.5-0.99 fuzzy via player_match, else 0."""
+    a, b = _normalize_player(feed_name), _normalize_player(query)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if not player_match(feed_name, query):
+        return 0.0
+    return 0.5 + 0.49 * difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def best_fixture_match(p1_q: str, p2_q: str, candidates) -> object | None:
+    """
+    The candidate whose two players best match (p1_q, p2_q) IN EITHER ORDER.
+    `candidates` yields (name1, name2, obj). BOTH players must match; an exact
+    pair beats a fuzzy one; two different fixtures scoring within
+    FIXTURE_MATCH_MARGIN of each other are refused (None) rather than guessed —
+    a wrong fixture hands a pick another match's ranks, ids and result.
+    """
+    scored: list[tuple[float, tuple[str, str], object]] = []
+    for n1, n2, obj in candidates:
+        if not n1 or not n2:
+            continue
+        best = 0.0
+        for s1, s2 in ((_name_score(n1, p1_q), _name_score(n2, p2_q)),
+                       (_name_score(n1, p2_q), _name_score(n2, p1_q))):
+            if s1 > 0 and s2 > 0:
+                best = max(best, s1 + s2)
+        if best > 0:
+            key = tuple(sorted((_normalize_player(n1), _normalize_player(n2))))
+            scored.append((best, key, obj))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: -t[0])
+    top = scored[0]
+    for other in scored[1:]:
+        if top[0] - other[0] >= FIXTURE_MATCH_MARGIN:
+            break
+        if other[1] != top[1]:  # same pair listed twice is not ambiguity
+            log.warning("Ambiguous fixture for '%s vs %s': %s / %s — refusing to guess",
+                        p1_q, p2_q, " vs ".join(top[1]), " vs ".join(other[1]))
+            return None
+    return top[2]
+
+
+def resolve_pick_fixture(match: str, fixtures_by_tour: dict[str, list[dict]]) -> tuple[str, dict] | None:
+    """(tour label, fixture summary) for a pick's 'P1 vs P2' string, or None."""
+    if " vs " not in (match or ""):
+        return None
+    p1_q, p2_q = [s.strip() for s in match.split(" vs ", 1)]
+    return best_fixture_match(
+        p1_q, p2_q,
+        ((f.get("player1", ""), f.get("player2", ""), (tour, f))
+         for tour, fixtures in fixtures_by_tour.items() for f in fixtures),
+    )
+
+
 _TENNIS_OU_RE = re.compile(r"(over|under)\s*([\d.]+)", re.IGNORECASE)
 _TENNIS_AH_RE = re.compile(r"^(.*?)\s*([+-]\d+(?:\.\d+)?)$")
 
@@ -890,53 +962,51 @@ def post_tennis_picks_to_discord(picks: list[dict]) -> int:
 
 # ── Main job ──────────────────────────────────────────────────────────────────
 
-def _start_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
-    """Map '<Player 1> vs <Player 2>' -> start_utc for the tennis closing-odds job."""
-    lookup: dict[str, str] = {}
-    for fixtures in fixtures_by_tour.values():
-        for f in fixtures:
-            lookup[f"{f['player1']} vs {f['player2']}"] = f.get("start_utc", "")
-    return lookup
+def _fixture_ranks(f: dict) -> str:
+    """'#54 vs #88' for the pick embed ('NR' = unranked); '' when neither has a rank."""
+    r1, r2 = f.get("player1_rank"), f.get("player2_rank")
+    if r1 is None and r2 is None:
+        return ""
+    fmt = lambda r: f"#{r}" if r is not None else "NR"
+    return f"{fmt(r1)} vs {fmt(r2)}"
 
 
-def _rank_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
-    """Map '<Player 1> vs <Player 2>' -> '#54 vs #88' for the pick embeds.
-    'NR' marks an unranked/unknown player; matches with no rank at all are omitted."""
-    lookup: dict[str, str] = {}
-    for fixtures in fixtures_by_tour.values():
-        for f in fixtures:
-            r1, r2 = f.get("player1_rank"), f.get("player2_rank")
-            if r1 is None and r2 is None:
-                continue
-            fmt = lambda r: f"#{r}" if r is not None else "NR"
-            lookup[f"{f['player1']} vs {f['player2']}"] = f"{fmt(r1)} vs {fmt(r2)}"
-    return lookup
+def _fixture_ids(tour_label: str, f: dict) -> str:
+    """'tour:p1Id|p2Id' for the Sheet's 'Player IDs' column — auto-results
+    settles each pick with one past-matches call instead of a slate scan."""
+    p1_id, p2_id = f.get("player1_id"), f.get("player2_id")
+    return f"{tour_label.lower()}:{p1_id}|{p2_id}" if p1_id and p2_id else ""
 
 
-def _tier_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
-    """Map '<Player 1> vs <Player 2>' -> rank tier label for channel routing
-    and the Sheet's 'Rank Tier' column."""
-    lookup: dict[str, str] = {}
-    for fixtures in fixtures_by_tour.values():
-        for f in fixtures:
-            lookup[f"{f['player1']} vs {f['player2']}"] = _fixture_tier(
-                f.get("player1_rank"), f.get("player2_rank")
-            )
-    return lookup
+def attach_fixture_context(pick: dict, fixtures_by_tour: dict[str, list[dict]]) -> bool:
+    """
+    Resolve the pick's fixture with the ranked matcher and copy its context onto
+    the pick: canonical feed-order 'match', ranks, rank tier, player ids, start
+    time. Returns False (pick left on the lower tier, no ids — never dropped)
+    when no fixture resolves.
 
-
-def _ids_lookup(fixtures_by_tour: dict[str, list[dict]]) -> dict[str, str]:
-    """Map '<Player 1> vs <Player 2>' -> 'tour:p1Id|p2Id' for the Sheet's
-    'Player IDs' column. Auto-results uses it to settle each pick with a
-    single past-matches call instead of re-scanning the day's full slate."""
-    lookup: dict[str, str] = {}
-    for tour_label, fixtures in fixtures_by_tour.items():
-        tour = tour_label.lower()
-        for f in fixtures:
-            p1_id, p2_id = f.get("player1_id"), f.get("player2_id")
-            if p1_id and p2_id:
-                lookup[f"{f['player1']} vs {f['player2']}"] = f"{tour}:{p1_id}|{p2_id}"
-    return lookup
+    The match string is rewritten to the FEED's order and spelling, so the
+    Sheet, the duplicate guard and settlement all key on one form of the name.
+    """
+    hit = resolve_pick_fixture(pick.get("match", ""), fixtures_by_tour)
+    if hit is None:
+        log.warning("No fixture resolves for tennis pick '%s' — lower tier, no ids",
+                    pick.get("match"))
+        pick["ranks"] = ""
+        pick["rank_tier"] = TENNIS_LOWER_TIER_LABEL
+        pick["player_ids"] = ""
+        pick["start_utc"] = ""
+        return False
+    tour_label, f = hit
+    canonical = f"{f['player1']} vs {f['player2']}"
+    if canonical != pick.get("match"):
+        log.info("Tennis pick '%s' resolved to feed fixture '%s'", pick.get("match"), canonical)
+    pick["match"] = canonical
+    pick["ranks"] = _fixture_ranks(f)
+    pick["rank_tier"] = _fixture_tier(f.get("player1_rank"), f.get("player2_rank"))
+    pick["player_ids"] = _fixture_ids(tour_label, f)
+    pick["start_utc"] = f.get("start_utc", "") or ""
+    return True
 
 
 async def daily_tennis_picks_job():
@@ -988,24 +1058,15 @@ async def daily_tennis_picks_job():
         log.info("Claude returned no tennis picks today")
         return
 
-    try:
-        start_lookup = _start_lookup(fixtures_by_tour)
-    except Exception as exc:
-        log.warning("Tennis start-time lookup build failed (non-fatal): %s", exc)
-        start_lookup = {}
-
-    try:
-        rank_lookup = _rank_lookup(fixtures_by_tour)
-        tier_lookup = _tier_lookup(fixtures_by_tour)
-        ids_lookup  = _ids_lookup(fixtures_by_tour)
-        for pick in picks:
-            match = pick.get("match", "")
-            pick["ranks"] = rank_lookup.get(match, "")
-            # Unmatched picks default to the lower tier — never dropped
-            pick["rank_tier"]  = tier_lookup.get(match, TENNIS_LOWER_TIER_LABEL)
-            pick["player_ids"] = ids_lookup.get(match, "")
-    except Exception as exc:
-        log.warning("Tennis rank/tier lookup build failed (non-fatal): %s", exc)
+    # Ranked fixture resolution — feed-order match name, ranks, tier, ids, start.
+    # Unresolved picks default to the lower tier — never dropped.
+    for pick in picks:
+        try:
+            attach_fixture_context(pick, fixtures_by_tour)
+        except Exception as exc:
+            log.warning("Tennis fixture resolution failed for '%s' (non-fatal): %s",
+                        pick.get("match"), exc)
+            pick.setdefault("rank_tier", TENNIS_LOWER_TIER_LABEL)
 
     try:
         enrich_tennis_picks_with_real_odds(picks)
@@ -1049,7 +1110,7 @@ async def daily_tennis_picks_job():
                 confidence=pick.get("confidence", "N/A"),
                 claude_prob=float(claude_prob) if claude_prob is not None else None,
                 market_prob=pick.get("market_prob"),
-                start_time_utc=start_lookup.get(pick["match"], ""),
+                start_time_utc=pick.get("start_utc", ""),
                 rank_tier=pick.get("rank_tier", TENNIS_LOWER_TIER_LABEL),
                 stake_eur=kelly.get("stake"),
                 player_ids=pick.get("player_ids") or None,

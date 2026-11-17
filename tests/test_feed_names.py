@@ -261,6 +261,48 @@ class FailuresAreAlerted(unittest.TestCase):
         self.assertEqual(send.call_args_list[0].args[0], "usage")
         self.assertIn("KeyError: 'longName'", send.call_args_list[0].kwargs["message"])
 
+    # 5 Nov 2026: the three jobs that still failed silently. On 3 Nov the Opus
+    # results check was the FIRST job to hit the missing longName (13:45 UTC)
+    # and said so only in a WARNING line.
+
+    def test_a_failed_opus_results_poll_alerts_ops_and_stays_non_fatal(self):
+        import opus_shadow
+        with mock.patch.object(opus_shadow, "run_opus_auto_results",
+                               side_effect=KeyError("longName")), \
+             mock.patch.object(ut, "alert_job_failure") as ops, \
+             self.assertLogs(run_all.log, level="WARNING"):
+            asyncio.run(run_all.opus_shadow_results_check())   # must not raise
+        self.assertEqual(ops.call_args.args[0], "opus-shadow-results")
+        self.assertIsInstance(ops.call_args.args[1], KeyError)
+
+    def test_a_failed_tennis_results_poll_alerts_ops(self):
+        with mock.patch.object(run_all, "run_tennis_auto_results",
+                               side_effect=RuntimeError("feed down")), \
+             mock.patch.object(ut, "alert_job_failure") as ops, \
+             self.assertLogs(run_all.log, level="ERROR"):
+            asyncio.run(run_all.tennis_live_results_check())
+        self.assertEqual(ops.call_args.args[0], "tennis-results")
+
+    def test_a_crashed_opus_picks_run_alerts_ops_only_and_never_raises(self):
+        import opus_shadow
+        boom = RuntimeError("opus down")
+        with mock.patch.object(opus_shadow, "run_opus_shadow", side_effect=boom), \
+             mock.patch.object(ut, "alert_job_failure") as ops, \
+             mock.patch.object(ut, "alert_anthropic_failure") as credit, \
+             mock.patch.object(M, "_notify_picks_failed") as subs, \
+             self.assertLogs(M.log, level="WARNING"):
+            asyncio.run(M._run_opus_shadow({"Champions League": []}, {}))
+        ops.assert_called_once_with("opus-shadow-picks", boom)
+        credit.assert_called_once()          # the credit-balance check is unchanged
+        subs.assert_not_called()             # production picks were already delivered
+
+    def test_a_healthy_opus_picks_run_alerts_nothing(self):
+        import opus_shadow
+        with mock.patch.object(opus_shadow, "run_opus_shadow", return_value=[]), \
+             mock.patch.object(ut, "alert_job_failure") as ops:
+            asyncio.run(M._run_opus_shadow({}, {}))
+        ops.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

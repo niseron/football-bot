@@ -1242,7 +1242,11 @@ and a feed where *every* match is nameless logs at ERROR rather than reading as
 an empty fixture day. `usage_tracker.alert_job_failure(job, exc)` (deduped per
 day per job) now fires when the picks job crashes or cannot fetch fixtures, and
 when `live_results_check` fails; a picks-job crash before delivery also sends the
-scrubbed picks-failed alert to `picks-cards`. Pinned by `tests/test_feed_names.py`
+scrubbed picks-failed alert to `picks-cards`. Since 5 Nov 2026 the same alert
+also covers the Opus shadow picks step (`opus-shadow-picks`), the Opus results
+check (`opus-shadow-results` — the job that hit the missing field FIRST, at 13:45
+UTC on 3 Nov, and said so only in a WARNING) and the tennis results check
+(`tennis-results`); all three stay non-fatal. Pinned by `tests/test_feed_names.py`
 (18 cases on the verbatim new shape; five of them fail on the pre-fix code, three
 with the production `KeyError`).
 
@@ -2364,6 +2368,9 @@ does not fall back to another model's rate), so Opus spend would have read as fr
 **What was removed (19 Jul 2026):** `fable_shadow.py`, `fable_tracker.py`, `fable_calibration.py`; the generation call in `main.py`'s `daily_picks_job`; the settlement and closing-odds jobs in `run_all.py`; the `fable-picks` key from the local `DISCORD_CHANNELS_JSON` (remove it from Railway's copy too — harmless but dead). The generic source/writer/budget hooks on `run_auto_results` and `run_closing_odds_check` remain (unused). **Kept for reference:** the 'Fable Picks' sheet tab with its 12-18 Jul data, and the `#fable-picks` Discord channel history. Nothing generates, settles, or posts Fable picks anymore; do not rebuild this without an explicit user request.
 
 ## Known Limitations & Future Issues (not yet addressed)
+
+- **A side-naming pick with a transliterated team name never auto-settles** (found 5 Nov 2026, row 579). Fixture matching folds diacritics (`_normalise_team`), but the verdict does not: `_match_winner_sides` compares the pick against the API names lower-cased only, so `'besiktas win'` never contains `'beşiktaş'`. Match Winner, Double Chance, Asian Handicap and Draw No Bet all return PENDING (Over/Under and BTTS name no side and are unaffected). The PENDING alert does fire — row 579 (`Hoffenheim vs Besiktas`, 15 Oct, Hoffenheim 2-3 Beşiktaş) was alerted at 21:23 UTC that night and again after 24h — but nobody settled it and it aged out of the 2-day live lookback. It is still unsettled. Fix when wanted: fold both sides through `_normalise_team` inside `_match_winner_sides`.
+- **The duplicate guard is diacritic-blind** — rows 559 (`Lech Poznań vs Bayer Leverkusen`, Core, 14 Oct) and 578 (`Lech Poznan vs Bayer Leverkusen`, Extended, 15 Oct) are the same fixture (feed id 6112318) and the same bet, published twice because the match strings differ by one `ń`. Both settled WIN; no data is wrong, but the book carried the bet twice.
 
 - **Odds timing bias** — *In progress, CLV tracking live from 4 Jul 2026.* Market probabilities in column L are still captured at 9AM pick time, and `edge_report` is still flattering by an unknown amount for picks logged before the fix. `closing_odds_job` now polls The Odds API 5-65 minutes before each kickoff and logs the true closing price to a separate 'Closing Odds' column; `calibration.py`'s `clv_report()` measures closing line value on top of it. This resolves the bias for every pick logged from 4 Jul 2026 onward — historical picks before that date have no closing odds and are excluded from `clv_report()`. Sample size is still tiny; see the calibration sample size limitation below.
 - **Calibration sample size** — `calibration_report` and `edge_report` are statistically meaningless below ~300 settled picks with probability data. Data collection started 30 Jun 2026. Do not draw conclusions from early monthly reports.

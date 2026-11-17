@@ -567,8 +567,13 @@ settlement poll for ~21 h and the whole 4 Nov slate, and nothing alerted.
   every exact-name table and every match string already in the Sheet was built
   from the full name.
 - **A crashed job alerts `usage`** via `usage_tracker.alert_job_failure` (deduped
-  per day per job): the picks job (any escaping exception, or a fixtures-fetch
-  failure) and `live_results_check`. A picks-job crash BEFORE delivery starts also
+  per day per job): the picks job (`football-picks`: any escaping exception, or a
+  fixtures-fetch failure), `live_results_check` (`football-results`), and since
+  5 Nov 2026 the Opus shadow step of the picks run (`opus-shadow-picks`, in
+  `main._run_opus_shadow`), `opus_shadow_results_check` (`opus-shadow-results`)
+  and `tennis_live_results_check` (`tennis-results`). The Opus and tennis jobs
+  stay non-fatal — the alert is added, nothing else changes. A new scheduled job
+  gets the same alert in its `except`. A picks-job crash BEFORE delivery starts also
   sends the scrubbed picks-failed alert to `picks-cards`; after
   `progress["delivering"]` it must not, because some picks may already be out.
 - Pinned by `tests/test_feed_names.py`, built on the verbatim new feed shape.

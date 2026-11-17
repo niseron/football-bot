@@ -111,7 +111,14 @@ async def tennis_live_results_check() -> None:
     try:
         stats, resolved = await asyncio.to_thread(run_tennis_auto_results)
     except Exception as exc:
+        # Alerted since 5 Nov 2026, same as live_results_check: a feed change
+        # that fails every poll must not be a log line only. Deduped per day.
         log.error("Tennis live results check failed: %s", exc)
+        try:
+            from usage_tracker import alert_job_failure
+            await asyncio.to_thread(alert_job_failure, "tennis-results", exc)
+        except Exception as inner:
+            log.error("Could not raise the tennis results job-failure alert: %s", inner)
         return
     for r in resolved:
         key = (r["match"], r["bet_type"], r["pick"])
@@ -155,7 +162,15 @@ async def opus_shadow_results_check() -> None:
                     a.get("pick"), a.get("bet_type"), a.get("score"), a.get("reason"),
                 )
     except Exception as exc:
+        # Still non-fatal, but alerted since 5 Nov 2026: on 3 Nov this WARNING
+        # was the very first trace of the feed dropping `longName` (13:45 UTC),
+        # 20 minutes before production settlement failed. Deduped per day.
         log.warning("Opus shadow results check failed (non-fatal): %s", exc)
+        try:
+            from usage_tracker import alert_job_failure
+            await asyncio.to_thread(alert_job_failure, "opus-shadow-results", exc)
+        except Exception as inner:
+            log.error("Could not raise the Opus results job-failure alert: %s", inner)
 
 
 async def referee_backfill_job() -> None:

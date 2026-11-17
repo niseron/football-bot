@@ -2381,6 +2381,34 @@ def _alert_picks_job_failure(exc: Exception, *, delivered: bool) -> None:
             log.error("Could not deliver the picks-failed alert: %s", inner)
 
 
+async def _run_opus_shadow(fixtures_by_league: dict, kickoff_lookup: dict) -> None:
+    """
+    The Opus 5 shadow step of the daily run. Never raises: a shadow failure may
+    only ever cost the shadow, never the production run it follows.
+
+    A crash posts the ops job-failure alert to 'usage' (once per day, 5 Nov
+    2026). Until then it reached only a WARNING line — and 'usage' itself only
+    when it was an exhausted Anthropic balance — so a shadow that died every
+    day would have looked like a quiet experiment.
+    """
+    try:
+        from opus_shadow import run_opus_shadow
+        await asyncio.to_thread(run_opus_shadow, fixtures_by_league, kickoff_lookup)
+    except Exception as exc:
+        log.warning("Opus 5 shadow failed (non-fatal): %s", exc)
+        try:
+            from usage_tracker import alert_anthropic_failure
+            from opus_shadow import OPUS_MODEL
+            alert_anthropic_failure("opus-shadow", exc, OPUS_MODEL)
+        except Exception as inner:
+            log.debug("failure alert skipped: %s", inner)
+        try:
+            from usage_tracker import alert_job_failure
+            await asyncio.to_thread(alert_job_failure, "opus-shadow-picks", exc)
+        except Exception as inner:
+            log.error("Could not raise the Opus picks job-failure alert: %s", inner)
+
+
 async def daily_picks_job():
     """
     Scheduler entry point. Anything escaping the run is logged with its
@@ -2573,17 +2601,8 @@ async def _run_daily_picks(progress: dict):
     # failure can then only ever cost the shadow. Inert unless the
     # 'opus-shadow' Discord key is configured. Lazy import avoids a circular
     # import — opus_shadow imports SYSTEM_PROMPT/claude back from this module.
-    try:
-        from opus_shadow import run_opus_shadow
-        await asyncio.to_thread(run_opus_shadow, fixtures_by_league, kickoff_lookup)
-    except Exception as exc:
-        log.warning("Opus 5 shadow failed (non-fatal): %s", exc)
-        try:
-            from usage_tracker import alert_anthropic_failure
-            from opus_shadow import OPUS_MODEL
-            alert_anthropic_failure("opus-shadow", exc, OPUS_MODEL)
-        except Exception as inner:
-            log.debug("failure alert skipped: %s", inner)
+    # _run_opus_shadow never raises; a crash is logged and alerted to 'usage'.
+    await _run_opus_shadow(fixtures_by_league, kickoff_lookup)
 
     if not core_picks:
         # Same reason the regular card is skipped above — an empty Core book

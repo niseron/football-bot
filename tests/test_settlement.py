@@ -422,5 +422,67 @@ class PendingRowsCarryTheTier(unittest.TestCase):
         self.assertEqual(pending[0]["pick_tier"], "Core")
 
 
+class AccentFoldingSidesAndDuplicates(unittest.TestCase):
+    """17 Nov 2026. The fixture search folded diacritics but the Match Winner
+    verdict and the duplicate guards compared raw strings. Row 579 'Hoffenheim
+    vs Besiktas' / 'Besiktas Win' (15 Oct 2026) never settled against the feed's
+    'Beşiktaş'; rows 559 'Lech Poznań vs Bayer Leverkusen' (Core, 14 Oct) and
+    578 'Lech Poznan vs Bayer Leverkusen' (Extended, 15 Oct) were both booked."""
+
+    def test_besiktas_pick_settles_against_the_accented_feed_name(self):
+        self.assertEqual(ar.evaluate_pick("Match Winner", "Besiktas Win",
+                                          "Hoffenheim", "Beşiktaş", 2, 3), "WIN")
+        self.assertEqual(ar.evaluate_pick("Match Winner", "Besiktas Win",
+                                          "Hoffenheim", "Beşiktaş", 3, 2), "LOSS")
+        self.assertEqual(ar.evaluate_pick("Match Winner", "Hoffenheim Win",
+                                          "Hoffenheim", "Beşiktaş", 2, 3), "LOSS")
+
+    def test_pending_reason_no_longer_says_neither_side(self):
+        reason = ar._pending_reason(
+            "Match Winner", "Besiktas Win", extra_time=False, penalties=False,
+            two_legged=False, scope_ft=False, home_name="Hoffenheim", away_name="Beşiktaş")
+        self.assertNotIn("names neither side", reason)
+
+    def test_sides_fold_both_directions(self):
+        self.assertEqual(ar._match_winner_sides("beşiktaş win", "hoffenheim", "besiktas"),
+                         (False, True, False))
+        self.assertEqual(ar._match_winner_sides("lillestrom", "lillestrøm", "molde"),
+                         (True, False, False))
+
+    def test_a_draw_is_still_only_a_draw(self):
+        self.assertEqual(ar._match_winner_sides("x", "ajax", "beşiktaş"), (False, False, True))
+
+    def _rows(self, result=""):
+        return [["14-Oct-2026", "Lech Poznań vs Bayer Leverkusen", "Match Winner",
+                 "Bayer Leverkusen Win", "1.7", "High", result]]
+
+    def test_duplicate_guard_folds_accents(self):
+        from excel_tracker import _duplicate_skip_reason
+        reason = _duplicate_skip_reason(
+            self._rows(), [], "Lech Poznan vs Bayer Leverkusen", "Match Winner",
+            "Bayer Leverkusen Win", date(2026, 10, 15))
+        self.assertIsNotNone(reason)
+        self.assertIn("UNSETTLED", reason)
+
+    def test_duplicate_guard_negative_controls(self):
+        from excel_tracker import _duplicate_skip_reason
+        # a settled row no longer blocks, and a different fixture never did
+        self.assertIsNone(_duplicate_skip_reason(
+            self._rows(result="WIN"), [], "Lech Poznan vs Bayer Leverkusen",
+            "Match Winner", "Bayer Leverkusen Win", date(2026, 10, 15)))
+        self.assertIsNone(_duplicate_skip_reason(
+            self._rows(), [], "Lech Poznan vs Rakow Czestochowa",
+            "Match Winner", "Lech Poznan Win", date(2026, 10, 15)))
+
+    def test_one_normaliser_everywhere(self):
+        import excel_tracker
+        import feed_names
+        import opus_tracker
+        self.assertIs(ar._normalise_team, feed_names.normalise_team)
+        self.assertIs(excel_tracker.same_fixture, feed_names.same_fixture)
+        self.assertIs(opus_tracker.same_fixture, feed_names.same_fixture)
+        self.assertFalse(feed_names.same_fixture("", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

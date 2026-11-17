@@ -34,7 +34,7 @@ from excel_tracker import (
     settlement_pnl_mismatch,
     update_row_result,
 )
-from feed_names import match_names, report_nameless
+from feed_names import match_names, normalise_team, report_nameless
 
 load_env()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -346,37 +346,10 @@ def _fetch_matches_cached(dt: date) -> list[dict]:
     return matches
 
 
-# Latin letters that do NOT decompose under NFKD. Unicode classifies these as
-# distinct letters rather than accented forms, so stripping combining marks
-# leaves them untouched and 'Lillestrom' never matches 'Lillestrøm'.
-_TEAM_TRANSLIT = {
-    "ø": "o", "æ": "ae", "å": "a", "ð": "d", "þ": "th",
-    "đ": "d", "ł": "l", "ß": "ss", "œ": "oe", "ı": "i",
-}
-
-
-def _normalise_team(name: str) -> str:
-    """
-    Fold a team name to a comparable form: lowercase, transliterated, stripped
-    of diacritics, whitespace collapsed.
-
-    The pick's match string comes back through Claude, which silently
-    transliterates — the sheet carries 'Lillestrom' and 'Nordsjaelland' where
-    the API says 'Lillestrøm' and 'Nordsjælland'. Substring matching cannot
-    bridge that, so those rows never matched a fixture, never settled, and
-    stranded permanently once they aged out of the lookback window (rows 246
-    and 251, found 1 Sep 2026).
-
-    Deliberately limited to case, diacritics and whitespace. Punctuation is left
-    alone: loosening further would start matching genuinely different clubs, and
-    a wrong fixture settles a real bet off someone else's result.
-    """
-    s = (name or "").strip().lower()
-    for src, dst in _TEAM_TRANSLIT.items():
-        s = s.replace(src, dst)
-    s = unicodedata.normalize("NFKD", s)
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return " ".join(s.split())
+# The team-name normaliser lives in feed_names.normalise_team since 17 Nov 2026,
+# so the Sheets layer's duplicate guards can share it without importing this
+# module (which imports excel_tracker). Same function, same rules.
+_normalise_team = normalise_team
 
 
 # Words that mark a DIFFERENT squad of the same club — youth, reserve, B and
@@ -642,6 +615,11 @@ def _match_winner_sides(pk: str, hn: str, an: str) -> tuple[bool, bool, bool]:
     'Ajax'. Shared by evaluate_pick() and _pending_reason() so the alert can
     never disagree with the verdict about which side the pick names.
     """
+    # All three are folded through the fixture search's normaliser (17 Nov 2026):
+    # the model writes 'Besiktas Win' where the feed says 'Beşiktaş', and a
+    # lower-case-only comparison read that as naming neither side — row 579
+    # (Hoffenheim vs Besiktas, 15 Oct 2026) stayed PENDING until it aged out.
+    pk, hn, an = normalise_team(pk), normalise_team(hn), normalise_team(an)
     if pk in ("draw", "x", "tie"):
         return False, False, True
     home_pick = pk in ("home", "home win", "1") or hn in pk or pk in hn

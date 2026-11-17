@@ -16,6 +16,8 @@ from typing import NamedTuple
 
 import gspread
 
+from feed_names import same_fixture
+
 log = logging.getLogger(__name__)
 
 # ── Sheets quota / transient-failure retry ───────────────────────────────────
@@ -718,13 +720,14 @@ def _duplicate_skip_reason(
         if (
             existing == target_date
             and len(row) > 3
-            and row[1] == match
+            and same_fixture(row[1], match)
             and row[2] == bet_type
             and row[3] == pick
         ):
             return "already logged today (exact duplicate)"
         settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
-        if not settled and len(row) > 1 and row[1] == match:
+        # Accent-folded (17 Nov 2026): 'Lech Poznan' and 'Lech Poznań' are one fixture
+        if not settled and len(row) > 1 and same_fixture(row[1], match):
             return (
                 f"this fixture already has an UNSETTLED pick logged ({row[0]}: "
                 f"'{row[3] if len(row) > 3 else '?'}' [{row[2] if len(row) > 2 else '?'}]). "

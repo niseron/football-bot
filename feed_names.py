@@ -28,6 +28,7 @@ match and logs it — one nameless match must never stop a whole run.
 from __future__ import annotations
 
 import logging
+import unicodedata
 
 log = logging.getLogger(__name__)
 
@@ -103,3 +104,47 @@ def named_matches(matches: list[dict], context: str) -> list[dict]:
         log.warning("%s: skipped %d of %d match(es) with no team name",
                     context, dropped, len(matches))
     return kept
+
+
+# ── Team-name folding (moved from auto_results, 17 Nov 2026) ─────────────────
+# Latin letters that do NOT decompose under NFKD. Unicode classifies these as
+# distinct letters rather than accented forms, so stripping combining marks
+# leaves them untouched and 'Lillestrom' never matches 'Lillestrøm'.
+_TEAM_TRANSLIT = {
+    "ø": "o", "æ": "ae", "å": "a", "ð": "d", "þ": "th",
+    "đ": "d", "ł": "l", "ß": "ss", "œ": "oe", "ı": "i",
+}
+
+
+def normalise_team(name: str) -> str:
+    """
+    Fold a team name to a comparable form: lowercase, transliterated, stripped
+    of diacritics, whitespace collapsed.
+
+    The pick's match string comes back through Claude, which silently
+    transliterates — the sheet carries 'Lillestrom' and 'Nordsjaelland' where
+    the API says 'Lillestrøm' and 'Nordsjælland'. Substring matching cannot
+    bridge that, so those rows never matched a fixture, never settled, and
+    stranded permanently once they aged out of the lookback window (rows 246
+    and 251, found 1 Sep 2026).
+
+    Deliberately limited to case, diacritics and whitespace. Punctuation is left
+    alone: loosening further would start matching genuinely different clubs, and
+    a wrong fixture settles a real bet off someone else's result.
+    """
+    s = (name or "").strip().lower()
+    for src, dst in _TEAM_TRANSLIT.items():
+        s = s.replace(src, dst)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(c for c in s if not unicodedata.combining(c))
+    return " ".join(s.split())
+
+
+def same_fixture(a: str, b: str) -> bool:
+    """True when two 'Home vs Away' match strings name the same fixture once
+    case, diacritics and whitespace are folded — the duplicate guards' key.
+    Until 17 Nov 2026 they compared the raw strings, so 'Lech Poznań vs Bayer
+    Leverkusen' (row 559, Core, 14 Oct 2026) and 'Lech Poznan vs Bayer
+    Leverkusen' (row 578, Extended, 15 Oct) were both published and both
+    booked as open bets on one fixture."""
+    return bool(a) and bool(b) and normalise_team(a) == normalise_team(b)

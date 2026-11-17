@@ -423,6 +423,12 @@ upcoming and finished matches; there is no referee-history endpoint (4 Oct 2026)
   decompose them. Do not extend it to punctuation: looser matching starts
   hitting genuinely different clubs, and a wrong fixture settles a real bet off
   someone else's result.
+- **One normaliser, everywhere a team name is compared** (17 Nov 2026): it lives
+  in `feed_names.normalise_team` (`auto_results._normalise_team` is an alias).
+  The fixture search, `_match_winner_sides` and both duplicate guards
+  (`feed_names.same_fixture`) all go through it. A new comparison of team or
+  match names must too — raw-string comparison left row 579 unsettled and let
+  rows 559/578 (Lech Poznań / Lech Poznan) book one bet twice.
 
 Details, the validation set and the audit history in PROJECT_SUMMARY.md,
 "Extra-time settlement" and "Fixture name matching".

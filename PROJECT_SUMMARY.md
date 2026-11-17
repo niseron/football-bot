@@ -1143,6 +1143,29 @@ so a reversed match still settles correctly.
 
 All three rows settled on 1 Sep 2026: r243 WIN (+0.70), r246 LOSS, r251 LOSS.
 
+**The verdict and the duplicate guards fold names the same way (fixed 17 Nov 2026).**
+The fixture search folded diacritics, but two later steps compared raw strings:
+
+- `_match_winner_sides` lower-cased the pick and the API names only, so
+  `'besiktas win'` never contained `'beşiktaş'`. Match Winner, Double Chance,
+  Asian Handicap and Draw No Bet returned PENDING for any pick naming a side the
+  model had transliterated. Row 579 (`Hoffenheim vs Besiktas`, 15 Oct 2026) was
+  alerted that night and again after 24h, nobody settled it, and it aged out of
+  the 2-day live lookback.
+- The duplicate guards (`excel_tracker._duplicate_skip_reason`, the Opus tab's
+  guard in `opus_tracker`) keyed on the raw match string, so rows 559 (`Lech
+  Poznań vs Bayer Leverkusen`, Core, 14 Oct) and 578 (`Lech Poznan vs Bayer
+  Leverkusen`, Extended, 15 Oct) — one fixture, one bet — were both published
+  and both booked.
+
+The normaliser moved to `feed_names.normalise_team` (`auto_results._normalise_team`
+is the same function), so the Sheets layer can share it without a circular
+import. `_match_winner_sides` folds the pick and both names through it, and both
+duplicate guards compare fixtures with `feed_names.same_fixture`. Pinned by
+`tests/test_settlement.py` (`AccentFoldingSidesAndDuplicates`), whose verdict and
+guard tests fail on the previous code. The fix is forward-only: it does not by
+itself settle row 579 (outside every lookback) or re-tag row 578.
+
 ### Fixture name matching: other squads of the same club (fixed 8 Sep 2026)
 
 Row 357 (8 Sep 2026, FC Porto vs Manchester City, Match Winner / Manchester City
@@ -2369,8 +2392,6 @@ does not fall back to another model's rate), so Opus spend would have read as fr
 
 ## Known Limitations & Future Issues (not yet addressed)
 
-- **A side-naming pick with a transliterated team name never auto-settles** (found 5 Nov 2026, row 579). Fixture matching folds diacritics (`_normalise_team`), but the verdict does not: `_match_winner_sides` compares the pick against the API names lower-cased only, so `'besiktas win'` never contains `'beşiktaş'`. Match Winner, Double Chance, Asian Handicap and Draw No Bet all return PENDING (Over/Under and BTTS name no side and are unaffected). The PENDING alert does fire — row 579 (`Hoffenheim vs Besiktas`, 15 Oct, Hoffenheim 2-3 Beşiktaş) was alerted at 21:23 UTC that night and again after 24h — but nobody settled it and it aged out of the 2-day live lookback. It is still unsettled. Fix when wanted: fold both sides through `_normalise_team` inside `_match_winner_sides`.
-- **The duplicate guard is diacritic-blind** — rows 559 (`Lech Poznań vs Bayer Leverkusen`, Core, 14 Oct) and 578 (`Lech Poznan vs Bayer Leverkusen`, Extended, 15 Oct) are the same fixture (feed id 6112318) and the same bet, published twice because the match strings differ by one `ń`. Both settled WIN; no data is wrong, but the book carried the bet twice.
 
 - **Odds timing bias** — *In progress, CLV tracking live from 4 Jul 2026.* Market probabilities in column L are still captured at 9AM pick time, and `edge_report` is still flattering by an unknown amount for picks logged before the fix. `closing_odds_job` now polls The Odds API 5-65 minutes before each kickoff and logs the true closing price to a separate 'Closing Odds' column; `calibration.py`'s `clv_report()` measures closing line value on top of it. This resolves the bias for every pick logged from 4 Jul 2026 onward — historical picks before that date have no closing odds and are excluded from `clv_report()`. Sample size is still tiny; see the calibration sample size limitation below.
 - **Calibration sample size** — `calibration_report` and `edge_report` are statistically meaningless below ~300 settled picks with probability data. Data collection started 30 Jun 2026. Do not draw conclusions from early monthly reports.

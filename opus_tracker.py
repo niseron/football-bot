@@ -31,6 +31,8 @@ from datetime import date, datetime, timedelta
 import gspread
 from gspread.utils import rowcol_to_a1
 
+from feed_names import same_fixture
+
 from excel_tracker import (
     PICK_TIER_CORE,
     PICK_TIER_EXTENDED,
@@ -180,11 +182,11 @@ def log_opus_pick(
         except ValueError:
             continue
         if (existing == target_date and len(row) > 3
-                and row[1] == match and row[2] == bet_type and row[3] == pick):
+                and same_fixture(row[1], match) and row[2] == bet_type and row[3] == pick):
             log.info("opus_tracker: skipping duplicate '%s — %s'", match, pick)
             return
         settled = len(row) > result_idx and bool((row[result_idx] or "").strip())
-        if not settled and len(row) > 1 and row[1] == match:
+        if not settled and len(row) > 1 and same_fixture(row[1], match):
             log.info(
                 "opus_tracker: skipping '%s — %s [%s]' — this fixture already has "
                 "an UNSETTLED pick logged (%s: '%s')",

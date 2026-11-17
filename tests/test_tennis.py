@@ -171,5 +171,66 @@ class TennisSummaryLabels(unittest.TestCase):
         self.assertTrue(cells["Best confidence level (20+ settled)"].startswith("n/a"))
 
 
+class PickTimeOdds(unittest.TestCase):
+    """17 Nov 2026: pick-time market prices back on for tennis, closing-odds
+    polling still off, the monthly reserve respected, ranked matching only."""
+
+    EVENT = {"home_team": "Taylor Fritz", "away_team": "Thiago Agustin Tirante",
+             "bookmakers": [{"markets": [{"key": "h2h", "outcomes": [
+                 {"name": "Taylor Fritz", "price": 1.25},
+                 {"name": "Thiago Agustin Tirante", "price": 4.10}]}]}]}
+
+    def _pick(self, odds=1.30):
+        return {"match": "Thiago Agustin Tirante vs Taylor Fritz", "bet_type": "Match Winner",
+                "pick": "Taylor Fritz Win", "odds": odds}
+
+    def _run(self, picks, exhausted=False, events=None):
+        from unittest import mock
+        import tennis_main as tm
+        with mock.patch("usage_tracker.odds_budget_exhausted", return_value=exhausted), \
+             mock.patch.object(tm, "fetch_active_tennis_sport_keys", return_value=["tennis_atp_x"]), \
+             mock.patch.object(tm, "fetch_tennis_odds_events",
+                               return_value=[self.EVENT] if events is None else events) as fetch:
+            tm.enrich_tennis_picks_with_real_odds(picks)
+        return fetch
+
+    def test_switches(self):
+        import tennis_main as tm
+        self.assertTrue(tm.TENNIS_ODDS_API_ENABLED)
+        self.assertFalse(tm.TENNIS_CLOSING_ODDS_ENABLED)
+
+    def test_closing_odds_poller_makes_no_call(self):
+        from unittest import mock
+        import tennis_closing_odds as tco
+        with mock.patch.object(tco, "get_unsettled_tennis_picks_with_start") as read, \
+             mock.patch.object(tco, "fetch_tennis_odds_events") as fetch:
+            tco.run_tennis_closing_odds_check()
+        read.assert_not_called()
+        fetch.assert_not_called()
+
+    def test_market_price_attached_with_reversed_event_order(self):
+        p = self._pick()
+        self._run([p])
+        self.assertEqual(p["market_odds"], 1.25)
+        self.assertEqual(p["market_prob"], 80.0)
+
+    def test_reserve_reached_means_no_billed_call(self):
+        p = self._pick()
+        fetch = self._run([p], exhausted=True)
+        fetch.assert_not_called()
+        self.assertNotIn("market_odds", p)
+
+    def test_suspicious_price_is_dropped(self):
+        p = self._pick(odds=4.50)  # 1.25 vs 4.50 is a 3.6x gap: a mismatch
+        self._run([p])
+        self.assertNotIn("market_odds", p)
+
+    def test_h2h_side_is_ranked_not_first_match(self):
+        from tennis_main import match_tennis_market_odds
+        real = {"h2h": {"Juan Manuel Cerundolo": 2.40, "Francisco Cerundolo": 1.60}}
+        pick = {"bet_type": "Match Winner", "pick": "Francisco Cerundolo Win"}
+        self.assertEqual(match_tennis_market_odds(pick, real), 1.60)
+
+
 if __name__ == "__main__":
     unittest.main()

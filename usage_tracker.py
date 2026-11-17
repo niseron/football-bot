@@ -851,9 +851,10 @@ def build_daily_summary() -> str:
     lines.append("")
 
     # The Odds API
-    # Football-only since 6 Aug 2026 — tennis makes no Odds API calls
-    # (tennis_main.TENNIS_ODDS_API_ENABLED = False).
-    lines.append("**The Odds API** (football only — tennis disabled 6 Aug 2026)")
+    # Tennis made no Odds API calls 6 Aug - 17 Nov 2026; since 17 Nov it fetches
+    # pick-time prices once per run (tennis_main.TENNIS_ODDS_API_ENABLED), with
+    # closing-odds polling still off (TENNIS_CLOSING_ODDS_ENABLED).
+    lines.append("**The Odds API** (football + tennis pick-time prices; tennis closing odds off)")
     q = fetch_odds_quota(force=True)
     if q:
         pct_left = q["remaining"] / q["limit"] if q["limit"] else 0

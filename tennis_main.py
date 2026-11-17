@@ -422,28 +422,32 @@ def enrich_tennis_context(fixtures_by_tour: dict[str, list[dict]]) -> None:
 
 # ── Real odds (The Odds API — dynamic tennis sport keys) ─────────────────────
 
-# ── MASTER SWITCH: The Odds API is OFF for tennis (6 Aug 2026) ───────────────
-# User decision — the tennis pipeline makes NO Odds API calls of any kind:
-# no picks-run market enrichment, no closing-odds polling. Every Odds API unit
-# is reserved for football, which keeps full usage. This single flag gates all
-# three tennis entry points below, so no tennis code path can reach the API
-# even if a new caller is added.
+# ── The Odds API for tennis: PICK-TIME PRICES ON, CLOSING ODDS OFF (17 Nov 2026)
+# Tennis made no Odds API calls from 6 Aug to 17 Nov 2026, so every pick settled
+# at the model's own estimate and the tab's ROI measured nothing a book would
+# pay. Since 17 Nov 2026 the picks run fetches market prices again, once per run
+# (one request per active tennis sport key, MAX_TENNIS_ODDS_KEYS_PER_RUN cap,
+# 3 units each — ~90-360 units/month), and a pick settles at that price when
+# one matched (tennis_excel_tracker.settlement_odds).
 #
-# Consequences (documented in PROJECT_SUMMARY.md section 7):
-#   - Tennis picks carry Claude odds only — no 'market_odds', no 'Market Prob %',
-#     no 🔥 VALUE flag.
-#   - The 'Closing Odds' column stops accruing, so tennis CLV is frozen at its
-#     historical sample. Tennis calibration is unaffected.
-# Flip to True (and re-add the scheduler job in run_all.py) to restore it.
-TENNIS_ODDS_API_ENABLED = False
+# Closing-odds polling stays OFF under its own switch: it would cost ~2,000-
+# 4,000 units/month, and 7 of the 15 closing prices it took in Jul-Aug 2026 were
+# in-play prices (Muchova 1.77 -> 19.03), because the 5-65 min window keys off
+# scheduled start times that tennis does not keep. Turning it back on also needs
+# the scheduler job re-added in run_all.py.
+#
+# The picks-run enrichment yields to the monthly reserve
+# (usage_tracker.odds_budget_exhausted) — tennis prices are the first thing to
+# go when the quota runs low, never football's.
+TENNIS_ODDS_API_ENABLED = True         # pick-time market prices
+TENNIS_CLOSING_ODDS_ENABLED = False    # tennis_closing_odds.py poller
 
 # The Odds API lists each tennis tournament as its own sport key
 # (e.g. tennis_atp_wimbledon, tennis_wta_us_open) that only exists while the
 # tournament is in season, so keys are discovered at runtime instead of being
 # hardcoded like the football league map.
-# INERT while TENNIS_ODDS_API_ENABLED is False. Kept at the value it reached on
-# 6 Aug 2026 (6 -> 12 with the paid tier) so re-enabling restores the same
-# coverage without re-deriving the sizing.
+# At most this many billed /odds requests per picks run (one per active tennis
+# sport key; The Odds API lists only tour-level events, ~1-4 active at a time).
 MAX_TENNIS_ODDS_KEYS_PER_RUN = 12
 
 
@@ -469,13 +473,18 @@ def fetch_active_tennis_sport_keys() -> list[str]:
         return []
 
 
-def fetch_tennis_odds_events(sport_key: str) -> list[dict] | None:
-    """Raw events + bookmaker odds for one tennis sport key. None on failure."""
+def fetch_tennis_odds_events(sport_key: str, job: str = "tennis-picks") -> list[dict] | None:
+    """Raw events + bookmaker odds for one tennis sport key. None on failure.
+
+    A failed call goes through usage_tracker.note_odds_api_failure, the same
+    handler football uses: status + error_code only (the URL carries the key),
+    and a rejected key or exhausted credits alerts 'usage' once a day."""
     if not TENNIS_ODDS_API_ENABLED:
         return None
     api_key = os.environ.get("ODDS_API_KEY")
     if not sport_key or not api_key:
         return None
+    from usage_tracker import note_odds_api_failure
     try:
         resp = requests.get(
             f"{ODDS_API_HOST}/sports/{sport_key}/odds",
@@ -489,13 +498,17 @@ def fetch_tennis_odds_events(sport_key: str) -> list[dict] | None:
             },
             timeout=10,
         )
-        resp.raise_for_status()
-        return resp.json()
     except Exception as exc:
         # Never str(exc): requests embeds the URL, apiKey included (16 Nov 2026).
-        from usage_tracker import describe_odds_api_failure
-        log.debug("fetch_tennis_odds_events(%s) failed: %s", sport_key,
-                  describe_odds_api_failure(getattr(exc, "response", None), exc))
+        note_odds_api_failure(job, exc=exc)
+        return None
+    if not resp.ok:
+        note_odds_api_failure(job, resp=resp)
+        return None
+    try:
+        return resp.json()
+    except ValueError as exc:
+        note_odds_api_failure(job, exc=exc)
         return None
 
 
@@ -660,10 +673,18 @@ def match_tennis_market_odds(pick: dict, real_odds: dict) -> float | None:
     try:
         if "winner" in bet_type or "moneyline" in bet_type:
             player_part = re.sub(r"\s+(to\s+win|win)$", "", selection, flags=re.IGNORECASE).strip()
-            for name, odds in real_odds.get("h2h", {}).items():
-                if player_match(name, player_part):
-                    return odds
-            return None
+            # Ranked, never first-match: both outcome names are scored and a tie
+            # is refused — a wrong side pays a favourite at the underdog's price
+            scored = sorted(
+                ((_name_score(name, player_part), odds)
+                 for name, odds in real_odds.get("h2h", {}).items()),
+                key=lambda t: -t[0],
+            )
+            if not scored or scored[0][0] <= 0:
+                return None
+            if len(scored) > 1 and scored[0][0] - scored[1][0] < FIXTURE_MATCH_MARGIN:
+                return None
+            return scored[0][1]
 
         # Handicap must be checked before totals — 'Handicap (games)' also
         # contains the word 'games'.
@@ -699,29 +720,46 @@ def _implied_prob(odds: float) -> float:
     return 1.0 / odds if odds else 0.0
 
 
+# A matched market price more than this many times the model's estimate (or
+# less than 1/this) is treated as a mismatch and dropped — the same 3.0 football
+# calibrated (main.SUSPICIOUS_ODDS_RATIO). Settling at a wrong market price is
+# worse than settling at the estimate.
+TENNIS_SUSPICIOUS_ODDS_RATIO = 3.0
+
+
 def enrich_tennis_picks_with_real_odds(picks: list[dict]) -> None:
     """
     Mutates each pick in-place with 'market_odds', 'market_prob', and 'value'
-    by comparing Claude's implied probability against real market odds. A pick
-    is flagged as value only when Claude's implied probability exceeds the
-    market's by at least 5 percentage points. Any failure leaves that pick
-    unchanged.
+    by comparing the model's implied probability against real market odds. A
+    pick is flagged as value only when the model's implied probability exceeds
+    the market's by at least 5 percentage points. Any failure leaves that pick
+    unchanged (it then settles at its estimate).
 
-    DISABLED 6 Aug 2026 (TENNIS_ODDS_API_ENABLED): returns immediately without
-    calling The Odds API, so every tennis pick keeps its Claude odds and no
-    pick is dropped — only the market fields are absent.
+    Re-enabled 17 Nov 2026 for PICK TIME only (TENNIS_ODDS_API_ENABLED):
+    one billed request per active tennis sport key, capped at
+    MAX_TENNIS_ODDS_KEYS_PER_RUN, skipped entirely when the monthly reserve is
+    reached (usage_tracker.odds_budget_exhausted) so tennis yields to football.
+    Events are matched with the ranked matcher, never first-match.
     """
     if not TENNIS_ODDS_API_ENABLED:
         log.info(
             "Tennis Odds API enrichment is disabled (TENNIS_ODDS_API_ENABLED=False) "
-            "— %d pick(s) keep Claude odds only", len(picks),
+            "— %d pick(s) keep estimated odds only", len(picks),
         )
         return
     if not picks:
         return
+    try:
+        from usage_tracker import odds_budget_exhausted
+        if odds_budget_exhausted():
+            log.warning("Tennis odds enrichment skipped — Odds API monthly reserve reached; "
+                        "%d pick(s) keep estimated odds", len(picks))
+            return
+    except Exception as exc:
+        log.debug("odds reserve check failed (fails open): %s", type(exc).__name__)
     sport_keys = fetch_active_tennis_sport_keys()[:MAX_TENNIS_ODDS_KEYS_PER_RUN]
     if not sport_keys:
-        log.info("No active tennis sport keys on The Odds API — Claude odds only")
+        log.info("No active tennis sport keys on The Odds API — estimated odds only")
         return
 
     events: list[dict] = []
@@ -729,21 +767,19 @@ def enrich_tennis_picks_with_real_odds(picks: list[dict]) -> None:
         batch = fetch_tennis_odds_events(key)
         if batch:
             events.extend(batch)
+    log.info("Tennis odds: %d request(s) over %d active key(s), %d event(s)",
+             len(sport_keys), len(sport_keys), len(events))
 
+    matched = 0
     for pick in picks:
         try:
             match = pick.get("match", "")
             if " vs " not in match:
                 continue
             p1, p2 = [s.strip() for s in match.split(" vs ", 1)]
-
-            event = next(
-                (
-                    e for e in events
-                    if (player_match(e.get("home_team", ""), p1) and player_match(e.get("away_team", ""), p2))
-                    or (player_match(e.get("home_team", ""), p2) and player_match(e.get("away_team", ""), p1))
-                ),
-                None,
+            event = best_fixture_match(
+                p1, p2,
+                ((e.get("home_team", ""), e.get("away_team", ""), e) for e in events),
             )
             if event is None:
                 continue
@@ -751,15 +787,24 @@ def enrich_tennis_picks_with_real_odds(picks: list[dict]) -> None:
             market_odds = match_tennis_market_odds(pick, parse_tennis_odds_event(event))
             if market_odds is None:
                 continue
+            est = float(pick["odds"])
+            ratio = market_odds / est if est else 0
+            if not (1 / TENNIS_SUSPICIOUS_ODDS_RATIO <= ratio <= TENNIS_SUSPICIOUS_ODDS_RATIO):
+                log.warning("Tennis market price %.2f vs estimate %.2f for '%s' (%s) — "
+                            "ratio %.2f, treated as a mismatch and dropped",
+                            market_odds, est, match, pick.get("pick"), ratio)
+                continue
 
             pick["market_odds"] = market_odds
-            claude_prob = _implied_prob(float(pick["odds"]))
+            claude_prob = _implied_prob(est)
             market_prob = _implied_prob(market_odds)
             pick["market_prob"] = round(market_prob * 100, 1)
             pick["value"] = (claude_prob - market_prob) >= 0.05
+            matched += 1
         except Exception as exc:
             log.debug("enrich_tennis_picks_with_real_odds skipped a pick: %s", exc)
             continue
+    log.info("Tennis odds: market price matched for %d/%d pick(s)", matched, len(picks))
 
 
 # ── Claude analysis ───────────────────────────────────────────────────────────
@@ -1078,8 +1123,10 @@ async def daily_tennis_picks_job():
     # everywhere (no real money on tennis until the pipeline is trusted)
     try:
         for pick in picks:
+            # Size on the price that will be PAID — market when matched
             kelly = calculate_tennis_kelly_stake(
-                pick["bet_type"], float(pick["odds"]), pick.get("confidence", "")
+                pick["bet_type"], float(pick.get("market_odds") or pick["odds"]),
+                pick.get("confidence", ""),
             )
             pick["kelly"] = kelly
             stake = float(kelly.get("stake") or 0)

@@ -1,9 +1,10 @@
 """
 tennis_closing_odds.py — closing line value (CLV) tracker for the TENNIS system.
 
-*** DISABLED 6 Aug 2026 — user decision: the tennis pipeline makes no Odds API
-calls at all, so every Odds API unit goes to football. This module is a no-op
-while `tennis_main.TENNIS_ODDS_API_ENABLED` is False: the run function returns
+*** DISABLED since 6 Aug 2026, and still off after pick-time prices came back
+on 17 Nov 2026. This module is a no-op while
+`tennis_main.TENNIS_CLOSING_ODDS_ENABLED` is False (its own switch, separate from
+the pick-time TENNIS_ODDS_API_ENABLED): the run function returns
 before reading the Sheet or touching the network, and run_all.py no longer
 schedules it. The tennis 'Closing Odds' column therefore stops accruing and
 tennis CLV is frozen at its historical sample. Nothing else changes — picks,
@@ -31,6 +32,7 @@ from datetime import date, datetime, timezone
 
 from tennis_excel_tracker import get_unsettled_tennis_picks_with_start, update_tennis_closing_odds
 from tennis_main import (
+    TENNIS_CLOSING_ODDS_ENABLED,
     TENNIS_ODDS_API_ENABLED,
     fetch_active_tennis_sport_keys,
     fetch_tennis_odds_events,
@@ -94,9 +96,9 @@ def run_tennis_closing_odds_check() -> None:
     """
     global _request_count
 
-    if not TENNIS_ODDS_API_ENABLED:
+    if not (TENNIS_CLOSING_ODDS_ENABLED and TENNIS_ODDS_API_ENABLED):
         log.info(
-            "tennis_closing_odds: disabled (TENNIS_ODDS_API_ENABLED=False) — "
+            "tennis_closing_odds: disabled (TENNIS_CLOSING_ODDS_ENABLED=False) — "
             "tennis makes no Odds API calls; nothing to do"
         )
         return
@@ -159,7 +161,7 @@ def run_tennis_closing_odds_check() -> None:
             break
 
         try:
-            events = fetch_tennis_odds_events(key)
+            events = fetch_tennis_odds_events(key, job="tennis-closing-odds")
         except Exception as exc:
             log.warning("tennis_closing_odds: odds fetch failed for '%s' (non-fatal): %s", key, exc)
             continue

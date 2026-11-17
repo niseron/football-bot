@@ -34,7 +34,53 @@ TENNIS_HEADERS = [
     "Bankroll € (SIM)",  # simulated running bankroll, mirrors football col J
     "Player IDs",        # internal: 'tour:p1Id|p2Id' — lets auto-results settle via
                          # one past-matches call instead of scanning the day's slate
+    "Market Odds",       # exact matched market price (17 Nov 2026) — the price a
+                         # pick SETTLES at whenever one exists; see settlement_odds()
 ]
+
+
+def _safe_price(val) -> float | None:
+    try:
+        v = float(str(val).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if v > 1.0 else None
+
+
+def settlement_odds(estimate, market_odds=None, market_prob=None) -> tuple[float, str]:
+    """
+    The price a tennis pick settles at, and which price that is.
+
+    Market price whenever one was captured, never the estimate (17 Nov 2026 —
+    the same rule football has had since 9 Aug 2026). Until then tennis paid
+    every row at the model's own estimate, including the 24 rows that carried a
+    market price, so the tab's P&L measured the model's odds, not a book's.
+
+      1. 'Market Odds' — the exact matched price (rows from 17 Nov 2026).
+      2. 'Market Prob %' — older rows stored only the implied probability of the
+         matched price, so the price is rebuilt as 100 / prob.
+      3. 'Odds' — the model's estimate, only when no market price exists.
+    """
+    mo = _safe_price(market_odds)
+    if mo is not None:
+        return mo, "market"
+    try:
+        mp = float(str(market_prob).strip()) if market_prob not in (None, "") else None
+    except (TypeError, ValueError):
+        mp = None
+    if mp is not None and 0 < mp < 100:
+        return 100.0 / mp, "market (from Market Prob %)"
+    est = _safe_price(estimate)
+    return (est if est is not None else 1.0), "estimate"
+
+
+def settlement_pnl(result: str, price: float) -> float:
+    """Units P&L for a settled tennis row at `price` (WIN = price-1, LOSS = -1, VOID = 0)."""
+    if result == "WIN":
+        return round(price - 1, 2)
+    if result == "LOSS":
+        return -1.0
+    return 0.0
 
 # ── Simulated bankroll & staking (STAGED: no real money on tennis yet) ────────
 # Tennis stakes are sized and tracked exactly like football's real-money Kelly
@@ -287,6 +333,7 @@ def log_tennis_pick(
     rank_tier: str | None = None,
     stake_eur: float | None = None,
     player_ids: str | None = None,
+    market_odds: float | None = None,
 ) -> bool:
     """
     Log one tennis pick.
@@ -335,6 +382,7 @@ def log_tennis_pick(
         "",  # Running P&L (u) — recalculated when results settle
         "",  # Bankroll € (SIM) — recalculated when results settle
         player_ids or "",  # 'tour:p1Id|p2Id' for direct past-matches settling
+        round(float(market_odds), 2) if market_odds else "",  # settles at this when present
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
@@ -383,6 +431,8 @@ def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
     result_col = TENNIS_HEADERS.index("Result")
     start_col  = TENNIS_HEADERS.index("Kickoff/Start Time")
     ids_col    = TENNIS_HEADERS.index("Player IDs")
+    mp_col     = TENNIS_HEADERS.index("Market Prob %")
+    mo_col     = TENNIS_HEADERS.index("Market Odds")
     pending = []
     for i, row in enumerate(rows[1:], start=2):
         if not row or not row[0]:
@@ -395,13 +445,20 @@ def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
             continue
         if pick_date < cutoff:
             continue
+        # 'odds' is the price the row SETTLES at — market whenever captured
+        price, basis = settlement_odds(
+            row[4] if len(row) > 4 else "",
+            row[mo_col] if len(row) > mo_col else "",
+            row[mp_col] if len(row) > mp_col else "",
+        )
         pending.append({
             "sheet_row":  i,
             "date":       pick_date,
             "match":      row[1] if len(row) > 1 else "",
             "bet_type":   row[2] if len(row) > 2 else "",
             "pick":       row[3] if len(row) > 3 else "",
-            "odds":       float(row[4]) if len(row) > 4 and row[4] else 1.0,
+            "odds":       price,
+            "odds_basis": basis,
             "start_utc":  row[start_col] if len(row) > start_col else "",
             "player_ids": row[ids_col] if len(row) > ids_col else "",
         })
@@ -823,17 +880,16 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
         print(f"No pending tennis pick found matching '{match_query}' / '{pick_query}'")
         return False
 
-    try:
-        odds = float(rows[target_row - 1][4]) if len(rows[target_row - 1]) > 4 and rows[target_row - 1][4] else 1.0
-    except ValueError:
-        odds = 1.0
+    row_vals = rows[target_row - 1]
+    mp_col = TENNIS_HEADERS.index("Market Prob %")
+    mo_col = TENNIS_HEADERS.index("Market Odds")
+    odds, _basis = settlement_odds(
+        row_vals[4] if len(row_vals) > 4 else "",
+        row_vals[mo_col] if len(row_vals) > mo_col else "",
+        row_vals[mp_col] if len(row_vals) > mp_col else "",
+    )
     if pnl is None:
-        if result == "WIN":
-            pnl = round(odds - 1, 2)
-        elif result == "LOSS":
-            pnl = -1.0
-        else:
-            pnl = 0.0
+        pnl = settlement_pnl(result, odds)
 
     match_name = rows[target_row - 1][1] if len(rows[target_row - 1]) > 1 else "?"
 
@@ -850,7 +906,7 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
     sign = "+" if pnl >= 0 else ""
     print(f"Updated  : {match_name}")
     print(f"Result   : {result}")
-    print(f"P&L      : {sign}{pnl:.2f} units  (odds {odds})")
+    print(f"P&L      : {sign}{pnl:.2f} units  (odds {odds:.2f}, {_basis})")
     return True
 
 

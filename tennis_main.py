@@ -1053,6 +1053,7 @@ async def daily_tennis_picks_job():
                 rank_tier=pick.get("rank_tier", TENNIS_LOWER_TIER_LABEL),
                 stake_eur=kelly.get("stake"),
                 player_ids=pick.get("player_ids") or None,
+                market_odds=pick.get("market_odds"),
             )
         except Exception as exc:
             # Unknown outcome — treat as publishable, same fail-open rule.

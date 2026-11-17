@@ -276,5 +276,103 @@ class PickRules(unittest.TestCase):
         self.assertIn("Do not derive it from the odds", P)
 
 
+class TennisModelSwitch(unittest.TestCase):
+    """17 Nov 2026: Opus 5.5 makes the tennis picks into its own 'Tennis Opus'
+    tab; TENNIS_MODEL=claude-sonnet-4-6 switches back to Sonnet and the
+    'Tennis Picks' tab with no code change."""
+
+    FIXTURES = {"ATP": [_summary("Casper Ruud", "Joao Fonseca", 12, 30, 30001, 30002)]}
+    TEXT = ('{"picks": [{"match": "Casper Ruud vs Joao Fonseca", "tour": "ATP", '
+            '"bet_type": "Match Winner", "pick": "Casper Ruud Win", "odds": 1.6, '
+            '"probability": 62, "confidence": "Medium", "reasoning": "x"}]}')
+
+    def _env(self, value):
+        import os
+        from unittest import mock
+        env = dict(os.environ)
+        env.pop("TENNIS_MODEL", None)
+        if value is not None:
+            env["TENNIS_MODEL"] = value
+        return mock.patch.dict(os.environ, env, clear=True)
+
+    def _message(self, stop="end_turn"):
+        from types import SimpleNamespace as NS
+        return NS(
+            model="claude-opus-5-5", stop_reason=stop,
+            usage=NS(input_tokens=1, output_tokens=1),
+            content=[NS(type="thinking", thinking=""), NS(type="text", text=self.TEXT)],
+        )
+
+    def _call(self, model_env, stop="end_turn"):
+        from unittest import mock
+        import tennis_main as tm
+        with self._env(model_env), \
+             mock.patch.object(tm.claude.messages, "create", return_value=self._message(stop)) as create, \
+             mock.patch("usage_tracker.record_anthropic_usage"):
+            picks = tm.analyse_tennis_with_claude(self.FIXTURES)
+        return picks, create.call_args.kwargs
+
+    def test_default_is_opus_into_its_own_tab(self):
+        from tennis_excel_tracker import active_tennis_tab, tennis_model
+        with self._env(None):
+            self.assertEqual(tennis_model(), "claude-opus-5-5")
+            self.assertEqual(active_tennis_tab(), "Tennis Opus")
+
+    def test_one_setting_switches_back_to_sonnet(self):
+        from tennis_excel_tracker import active_tennis_tab, tennis_model
+        with self._env("claude-sonnet-4-6"):
+            self.assertEqual(tennis_model(), "claude-sonnet-4-6")
+            self.assertEqual(active_tennis_tab(), "Tennis Picks")
+
+    def test_unknown_model_falls_back_to_the_default(self):
+        from tennis_excel_tracker import tennis_model
+        with self._env("claude-something-else"):
+            self.assertEqual(tennis_model(), "claude-opus-5-5")
+
+    def test_opus_call_shape(self):
+        picks, kw = self._call(None)
+        self.assertEqual(kw["model"], "claude-opus-5-5")
+        self.assertEqual(kw["max_tokens"], 16000)
+        self.assertEqual(kw["output_config"], {"effort": "high"})
+        self.assertNotIn("temperature", kw)
+        self.assertNotIn("extra_body", kw)       # no temperature 0 smuggled in
+        self.assertNotIn("thinking", kw)         # always on; cannot be disabled
+        # parsed from the first TEXT block, behind a thinking block
+        self.assertEqual(picks[0]["pick"], "Casper Ruud Win")
+
+    def test_sonnet_call_keeps_its_old_shape(self):
+        _, kw = self._call("claude-sonnet-4-6")
+        self.assertEqual(kw["model"], "claude-sonnet-4-6")
+        self.assertEqual(kw["max_tokens"], 2048)
+        self.assertEqual(kw["extra_body"], {"temperature": 0})
+
+    def test_refusal_fails_the_run(self):
+        with self.assertRaises(RuntimeError):
+            self._call(None, stop="refusal")
+
+    def test_opus_5_5_is_priced(self):
+        from usage_tracker import ANTHROPIC_PRICING
+        self.assertEqual(ANTHROPIC_PRICING["claude-opus-5-5"], (4.00, 20.00))
+
+    def test_settlement_covers_both_tabs(self):
+        from unittest import mock
+        import tennis_auto_results as tar
+        with mock.patch.object(tar, "get_pending_tennis_picks", return_value=[]) as pending:
+            tar.run_tennis_auto_results()
+        tabs = [c.kwargs.get("sheet_name") for c in pending.call_args_list]
+        self.assertEqual(sorted(tabs), ["Tennis Opus", "Tennis Picks"])
+
+    def test_alert_text_never_names_the_model(self):
+        from unittest import mock
+        import tennis_main as tm
+        with mock.patch.object(tm, "send_to_discord", return_value=True) as send:
+            tm._notify_tennis_picks_failed(
+                "the analysis could not be completed",
+                detail="Error code: 400 - claude-opus-5-5 (Anthropic) rejected the request")
+        text = send.call_args.kwargs["message"].lower()
+        for word in ("claude", "opus", "anthropic", "sonnet"):
+            self.assertNotIn(word, text)
+
+
 if __name__ == "__main__":
     unittest.main()

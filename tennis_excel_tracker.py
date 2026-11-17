@@ -19,7 +19,40 @@ import gspread
 
 log = logging.getLogger(__name__)
 
-TENNIS_SHEET_NAME = "Tennis Picks"
+TENNIS_SHEET_NAME = "Tennis Picks"          # Sonnet history (10 Jul - 17 Nov 2026)
+TENNIS_OPUS_SHEET_NAME = "Tennis Opus"      # Opus 5.5 picks, from 17 Nov 2026
+
+# ── Which model makes the tennis picks, and which tab they go to ──────────────
+# TENNIS_MODEL (env var) picks the model; each model writes to ITS OWN tab with
+# its own SIM bankroll, summary and calibration, so the two books never mix.
+# Switching back to Sonnet is a Railway variable change (TENNIS_MODEL=
+# claude-sonnet-4-6), no code change: Sonnet then resumes in 'Tennis Picks'.
+# Settlement always covers BOTH tabs, whichever model is active, so a switch
+# never strands the other tab's pending rows.
+TENNIS_MODEL_OPUS = "claude-opus-5-5"
+TENNIS_MODEL_SONNET = "claude-sonnet-4-6"
+DEFAULT_TENNIS_MODEL = TENNIS_MODEL_OPUS
+TENNIS_MODEL_TABS = {
+    TENNIS_MODEL_SONNET: TENNIS_SHEET_NAME,
+    TENNIS_MODEL_OPUS: TENNIS_OPUS_SHEET_NAME,
+}
+
+
+def tennis_model() -> str:
+    """The model making tennis picks: TENNIS_MODEL, else Opus 5.5. An unknown
+    value logs an ERROR and falls back to the default rather than writing a new
+    model's picks into another model's book."""
+    m = (os.environ.get("TENNIS_MODEL") or DEFAULT_TENNIS_MODEL).strip()
+    if m not in TENNIS_MODEL_TABS:
+        log.error("TENNIS_MODEL=%r is not supported (use one of: %s) — using %s",
+                  m, ", ".join(TENNIS_MODEL_TABS), DEFAULT_TENNIS_MODEL)
+        return DEFAULT_TENNIS_MODEL
+    return m
+
+
+def active_tennis_tab() -> str:
+    """The tab NEW tennis picks are written to (the active model's)."""
+    return TENNIS_MODEL_TABS[tennis_model()]
 
 # New columns must be appended at the END — result/P&L logic addresses
 # columns G/H by letter throughout this module.
@@ -119,22 +152,22 @@ def _get_spreadsheet() -> gspread.Spreadsheet:
     return _get_client().open_by_key(os.environ.get("GOOGLE_SHEETS_ID", ""))
 
 
-def _tennis_ws() -> gspread.Worksheet:
-    """Return the Tennis Picks worksheet, creating it (with headers) if missing."""
+def _tennis_ws(sheet_name: str = TENNIS_SHEET_NAME) -> gspread.Worksheet:
+    """Return a tennis picks worksheet, creating it (with headers) if missing."""
     ss = _get_spreadsheet()
     try:
-        return ss.worksheet(TENNIS_SHEET_NAME)
+        return ss.worksheet(sheet_name)
     except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(TENNIS_SHEET_NAME, rows=1000, cols=len(TENNIS_HEADERS))
+        ws = ss.add_worksheet(sheet_name, rows=1000, cols=len(TENNIS_HEADERS))
         ws.append_row(TENNIS_HEADERS, value_input_option="RAW")
-        log.info("Created '%s' sheet with headers", TENNIS_SHEET_NAME)
+        log.info("Created '%s' sheet with headers", sheet_name)
         return ws
 
 
-def init_tennis_sheet() -> None:
-    """Ensure the Tennis Picks tab exists with the full current header row."""
+def init_tennis_sheet(sheet_name: str = TENNIS_SHEET_NAME) -> None:
+    """Ensure a tennis picks tab exists with the full current header row."""
     try:
-        ws = _tennis_ws()
+        ws = _tennis_ws(sheet_name)
     except Exception as exc:
         log.error("Cannot connect to Google Sheets (tennis): %s", exc)
         return
@@ -146,7 +179,7 @@ def init_tennis_sheet() -> None:
             for idx in range(len(header), len(TENNIS_HEADERS)):
                 ws.update_cell(1, idx + 1, TENNIS_HEADERS[idx])
             log.info("Added missing column header(s) to '%s': %s",
-                     TENNIS_SHEET_NAME, TENNIS_HEADERS[len(header):])
+                     sheet_name, TENNIS_HEADERS[len(header):])
     except Exception as exc:
         log.warning("Tennis header migration failed (non-fatal): %s", exc)
 
@@ -167,10 +200,10 @@ _WHITE_TEXT  = {"red": 1.0, "green": 1.0, "blue": 1.0}
 _BLACK_TEXT  = {"red": 0.0, "green": 0.0, "blue": 0.0}
 
 
-def _apply_tennis_formatting() -> None:
+def _apply_tennis_formatting(sheet_name: str = TENNIS_SHEET_NAME) -> None:
     try:
         ss = _get_spreadsheet()
-        ws = ss.worksheet(TENNIS_SHEET_NAME)
+        ws = ss.worksheet(sheet_name)
         sid = ws.id
         all_rows = ws.get_all_values()
         nrows = len(all_rows)
@@ -236,7 +269,7 @@ def _apply_tennis_formatting() -> None:
         })
 
         ss.batch_update({"requests": reqs})
-        log.info("Formatting applied to '%s' sheet (%d rows)", TENNIS_SHEET_NAME, nrows)
+        log.info("Formatting applied to '%s' sheet (%d rows)", sheet_name, nrows)
     except Exception as exc:
         log.warning("Tennis sheet formatting failed (non-fatal): %s", exc)
 
@@ -336,6 +369,7 @@ def log_tennis_pick(
     stake_eur: float | None = None,
     player_ids: str | None = None,
     market_odds: float | None = None,
+    sheet_name: str = TENNIS_SHEET_NAME,
 ) -> bool:
     """
     Log one tennis pick.
@@ -353,9 +387,9 @@ def log_tennis_pick(
     date_str = dt.strftime("%d-%b-%Y")
     target_date = dt.date()
 
-    init_tennis_sheet()
+    init_tennis_sheet(sheet_name)
     try:
-        ws = _tennis_ws()
+        ws = _tennis_ws(sheet_name)
         rows = ws.get_all_values()
     except Exception as exc:
         # The guard never ran, so nothing here is a deliberate skip — publish.
@@ -389,27 +423,30 @@ def log_tennis_pick(
     ]
     try:
         ws.append_row(new_row, value_input_option="USER_ENTERED")
-        log.info("Tennis Sheets: logged '%s — %s'", match, pick)
-        _apply_tennis_formatting()
+        log.info("Tennis Sheets: logged '%s — %s' to '%s'", match, pick, sheet_name)
+        _apply_tennis_formatting(sheet_name)
     except Exception as exc:
         # Eligible but lost — see the docstring: this still publishes.
         log.error("Tennis Sheets write failed: %s", exc)
     return True
 
 
-def tennis_picks_exist_for_today() -> bool:
-    """True if any pick dated today is already in the Tennis Picks tab.
+def tennis_picks_exist_for_today(sheet_names=None) -> bool:
+    """True if any pick dated today is already in ANY tennis picks tab.
 
     Sheet-based duplicate-run guard — the tennis system deliberately does not
-    touch the football picks.db SQLite file.
+    touch the football picks.db SQLite file. Every tab is checked (17 Nov
+    2026), so switching TENNIS_MODEL mid-day cannot post a second slate.
     """
-    try:
-        rows = _tennis_ws().get_all_values()
-    except Exception as exc:
-        log.warning("tennis_picks_exist_for_today: read failed, assuming no picks: %s", exc)
-        return False
+    rows: list[list[str]] = []
+    for name in (sheet_names or TENNIS_MODEL_TABS.values()):
+        try:
+            rows += _tennis_ws(name).get_all_values()[1:]
+        except Exception as exc:
+            log.warning("tennis_picks_exist_for_today: read of '%s' failed, assuming no picks: %s",
+                        name, exc)
     today = date.today()
-    for row in rows[1:]:
+    for row in rows:
         if not row or not row[0]:
             continue
         try:
@@ -422,10 +459,11 @@ def tennis_picks_exist_for_today() -> bool:
 
 # ── Pending rows ──────────────────────────────────────────────────────────────
 
-def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
+def get_pending_tennis_picks(lookback_days: int = 7,
+                             sheet_name: str = TENNIS_SHEET_NAME) -> list[dict]:
     """Rows with no Result within the lookback window, each with its 1-based sheet row."""
     try:
-        rows = _tennis_ws().get_all_values()
+        rows = _tennis_ws(sheet_name).get_all_values()
     except Exception as exc:
         log.error("Tennis Sheets read failed: %s", exc)
         return []
@@ -468,14 +506,14 @@ def get_pending_tennis_picks(lookback_days: int = 7) -> list[dict]:
     return pending
 
 
-def get_unsettled_tennis_picks_with_start() -> list[dict]:
+def get_unsettled_tennis_picks_with_start(sheet_name: str = TENNIS_SHEET_NAME) -> list[dict]:
     """
     Unsettled (no Result) tennis picks that have a logged Kickoff/Start Time,
     each with its 1-based sheet row. Empty list (never raises) on any failure —
     callers treat that as "nothing to do".
     """
     try:
-        rows = _tennis_ws().get_all_values()
+        rows = _tennis_ws(sheet_name).get_all_values()
     except Exception as exc:
         log.error("Tennis Sheets read failed: %s", exc)
         return []
@@ -510,7 +548,8 @@ def get_unsettled_tennis_picks_with_start() -> list[dict]:
 
 # ── Write result / closing odds for one row ───────────────────────────────────
 
-def update_tennis_row_result(sheet_row: int, result: str, pnl: float) -> bool:
+def update_tennis_row_result(sheet_row: int, result: str, pnl: float,
+                             sheet_name: str = TENNIS_SHEET_NAME) -> bool:
     """
     Write Result (G) and P&L (H) to a specific Tennis Picks row.
     Returns True on success, False if the write failed.
@@ -526,19 +565,20 @@ def update_tennis_row_result(sheet_row: int, result: str, pnl: float) -> bool:
     """
     try:
         ss = _get_spreadsheet()
-        ws = ss.worksheet(TENNIS_SHEET_NAME)
+        ws = ss.worksheet(sheet_name)
         ws.batch_update([
             {"range": f"G{sheet_row}", "values": [[result]]},
             {"range": f"H{sheet_row}", "values": [[round(pnl, 2)]]},
         ])
-        _apply_tennis_formatting()
+        _apply_tennis_formatting(sheet_name)
         return True
     except Exception as exc:
         log.error("Tennis Sheets update_tennis_row_result failed (row %s): %s", sheet_row, exc)
         return False
 
 
-def update_tennis_closing_odds(sheet_row: int, closing_odds: float) -> bool:
+def update_tennis_closing_odds(sheet_row: int, closing_odds: float,
+                               sheet_name: str = TENNIS_SHEET_NAME) -> bool:
     """
     Write (overwriting any prior value) the Closing Odds cell for one tennis row.
     Called repeatedly as the match start approaches — the last write before the
@@ -551,7 +591,7 @@ def update_tennis_closing_odds(sheet_row: int, closing_odds: float) -> bool:
     alongside it so the tennis writers behave consistently.
     """
     try:
-        ws = _tennis_ws()
+        ws = _tennis_ws(sheet_name)
         header = ws.row_values(1)
         col = header.index("Closing Odds") + 1  # gspread columns are 1-based
         ws.update_cell(sheet_row, col, round(float(closing_odds), 2))
@@ -563,11 +603,11 @@ def update_tennis_closing_odds(sheet_row: int, closing_odds: float) -> bool:
 
 # ── Simulated Kelly staking (mirrors football's calculate_kelly_stake) ────────
 
-def get_tennis_bet_type_breakdown() -> list[dict]:
-    """Per-bet-type record from settled Tennis Picks rows:
+def get_tennis_bet_type_breakdown(sheet_name: str = TENNIS_SHEET_NAME) -> list[dict]:
+    """Per-bet-type record from one tab's settled rows:
     [{"bet_type", "wins", "losses", "win_rate", "total"}, ...]."""
     try:
-        rows = _tennis_ws().get_all_values()
+        rows = _tennis_ws(sheet_name).get_all_values()
     except Exception as exc:
         log.error("Tennis Sheets read failed: %s", exc)
         return []
@@ -595,7 +635,8 @@ def get_tennis_bet_type_breakdown() -> list[dict]:
     return breakdown
 
 
-def calculate_tennis_kelly_stake(bet_type: str, odds: float, confidence: str) -> dict:
+def calculate_tennis_kelly_stake(bet_type: str, odds: float, confidence: str,
+                                 sheet_name: str = TENNIS_SHEET_NAME) -> dict:
     """
     Return {"stake": euros, "note": str} — same half-Kelly / 5%-cap logic as
     football's calculate_kelly_stake, sized against TENNIS_REAL_BANKROLL
@@ -605,7 +646,7 @@ def calculate_tennis_kelly_stake(bet_type: str, odds: float, confidence: str) ->
     Flat TENNIS_UNIT_STAKE with note="insufficient data" below 10 settled
     picks for the bet type.
     """
-    breakdown = get_tennis_bet_type_breakdown()
+    breakdown = get_tennis_bet_type_breakdown(sheet_name)
     record = next(
         (b for b in breakdown if b["bet_type"].strip().lower() == bet_type.strip().lower()),
         None,
@@ -632,13 +673,13 @@ _LIGHT_GREEN = _rgb("#e8f5e9")
 _LIGHT_RED   = _rgb("#ffebee")
 
 
-def recalculate_tennis_running_totals() -> None:
+def recalculate_tennis_running_totals(sheet_name: str = TENNIS_SHEET_NAME) -> None:
     """Rebuild the 'Running P&L (u)' and 'Bankroll € (SIM)' columns from the
     settled rows, top to bottom — the same way football's
     _recalculate_running_total maintains its cols I/J. Bankroll is the
     simulated €100 start plus settled units × TENNIS_UNIT_STAKE."""
     try:
-        ws = _tennis_ws()
+        ws = _tennis_ws(sheet_name)
         rows = ws.get_all_values()
     except Exception as exc:
         log.error("Tennis running totals: Sheets read failed: %s", exc)
@@ -708,6 +749,11 @@ def _col_letter(col: int) -> str:
 # ── Tennis Summary tab (mirrors football's _refresh_summary) ─────────────────
 
 TENNIS_SUMMARY_SHEET_NAME = "Tennis Summary"
+TENNIS_OPUS_SUMMARY_SHEET_NAME = "Tennis Opus Summary"
+TENNIS_SUMMARY_TABS = {
+    TENNIS_SHEET_NAME: TENNIS_SUMMARY_SHEET_NAME,
+    TENNIS_OPUS_SHEET_NAME: TENNIS_OPUS_SUMMARY_SHEET_NAME,
+}
 
 # A "best bet type" / "best confidence level" is named only from groups with at
 # least this many settled WIN/LOSS picks (17 Nov 2026). Before, the summary
@@ -726,7 +772,8 @@ def _best_group(pnl: dict[str, float], counts: dict[str, int]) -> tuple[str, flo
     return f"{best} ({counts[best]} settled)", round(eligible[best], 2)
 
 
-def _tennis_summary_data(rows: list[list[str]]) -> list[list]:
+def _tennis_summary_data(rows: list[list[str]],
+                         title: str = "TENNIS PERFORMANCE SUMMARY") -> list[list]:
     """The Tennis Summary tab's cells for these Tennis Picks body rows. Pure —
     no Sheets I/O — so the layout is testable."""
     res_col  = TENNIS_HEADERS.index("Result")
@@ -808,7 +855,7 @@ def _tennis_summary_data(rows: list[list[str]]) -> list[list]:
     tier_rows = _breakdown(tier_col, "(untracked)")  # pre-10-Jul rows have no tier
 
     data = [
-        ["TENNIS PERFORMANCE SUMMARY", ""],
+        [title, ""],
         ["  (staking SIMULATED — no real money)", ""],
         ["", ""],
         ["Total picks",           len(rows)],
@@ -843,34 +890,35 @@ def _tennis_summary_data(rows: list[list[str]]) -> list[list]:
     return data
 
 
-def _refresh_tennis_summary() -> None:
+def _refresh_tennis_summary(sheet_name: str = TENNIS_SHEET_NAME) -> None:
     """Rebuild the 'Tennis Summary' tab from the Tennis Picks rows: overall
     record, win rate, units P&L and ROI per unit staked, simulated bankroll and
     its change, best bet type and confidence level (20+ settled only), a
     per-bet-type breakdown (win-rate-desc, same as football's), plus a
     tennis-only Rank Tier breakdown."""
     ss   = _get_spreadsheet()
-    rows = [r for r in ss.worksheet(TENNIS_SHEET_NAME).get_all_values()[1:] if r and r[0]]
-    data = _tennis_summary_data(rows)
+    summary_name = TENNIS_SUMMARY_TABS[sheet_name]
+    rows = [r for r in ss.worksheet(sheet_name).get_all_values()[1:] if r and r[0]]
+    data = _tennis_summary_data(rows, title=f"TENNIS PERFORMANCE SUMMARY — '{sheet_name}' tab")
     try:
-        ws_sum = ss.worksheet(TENNIS_SUMMARY_SHEET_NAME)
+        ws_sum = ss.worksheet(summary_name)
     except gspread.WorksheetNotFound:
-        ws_sum = ss.add_worksheet(TENNIS_SUMMARY_SHEET_NAME, rows=60, cols=6)
-        log.info("Created '%s' sheet", TENNIS_SUMMARY_SHEET_NAME)
+        ws_sum = ss.add_worksheet(summary_name, rows=60, cols=6)
+        log.info("Created '%s' sheet", summary_name)
     ws_sum.clear()
     ws_sum.update("A1", data, value_input_option="RAW")
 
 
-def finalize_tennis_workbook() -> None:
+def finalize_tennis_workbook(sheet_name: str = TENNIS_SHEET_NAME) -> None:
     """Recalculate running totals and refresh the Tennis Summary tab —
     the tennis mirror of football's finalize_workbook(). Call after any
     result settles (auto or manual); each step is independently guarded."""
     try:
-        recalculate_tennis_running_totals()
+        recalculate_tennis_running_totals(sheet_name)
     except Exception as exc:
         log.warning("Tennis running totals recalc failed (non-fatal): %s", exc)
     try:
-        _refresh_tennis_summary()
+        _refresh_tennis_summary(sheet_name)
     except Exception as exc:
         log.warning("Tennis Summary refresh failed (non-fatal): %s", exc)
 
@@ -878,13 +926,25 @@ def finalize_tennis_workbook() -> None:
 # ── Manual result update ──────────────────────────────────────────────────────
 
 def update_tennis_result(match_query: str, pick_query: str, result: str,
-                         pnl: float | None = None) -> bool:
+                         pnl: float | None = None, sheet_name: str | None = None) -> bool:
+    """Manually settle the most recent PENDING row matching the queries. With no
+    sheet_name, the active model's tab is searched first, then the other."""
     result = result.upper()
     if result not in TENNIS_SETTLED_RESULTS:
         raise ValueError(f"Result must be WIN, LOSS or VOID — got '{result}'")
+    if sheet_name is None:
+        active = active_tennis_tab()
+        for name in [active] + [t for t in TENNIS_MODEL_TABS.values() if t != active]:
+            if _update_tennis_result_in(name, match_query, pick_query, result, pnl):
+                return True
+        return False
+    return _update_tennis_result_in(sheet_name, match_query, pick_query, result, pnl)
 
+
+def _update_tennis_result_in(sheet_name: str, match_query: str, pick_query: str,
+                             result: str, pnl: float | None) -> bool:
     try:
-        rows = _tennis_ws().get_all_values()
+        rows = _tennis_ws(sheet_name).get_all_values()
     except Exception as exc:
         log.error("Tennis Sheets read failed: %s", exc)
         return False
@@ -910,7 +970,7 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
             break
 
     if target_row is None:
-        print(f"No pending tennis pick found matching '{match_query}' / '{pick_query}'")
+        print(f"No pending tennis pick in '{sheet_name}' matching '{match_query}' / '{pick_query}'")
         return False
 
     row_vals = rows[target_row - 1]
@@ -929,15 +989,15 @@ def update_tennis_result(match_query: str, pick_query: str, result: str,
     # Same gate as the automatic settler: this used to print "Updated" and
     # return True even when nothing reached the sheet, so an operator settling a
     # stranded pick by hand could be told it worked when it had not.
-    if not update_tennis_row_result(target_row, result, pnl):
+    if not update_tennis_row_result(target_row, result, pnl, sheet_name=sheet_name):
         print(f"FAILED to write the result for '{match_name}' — the row is still "
               f"PENDING on the sheet. See the log for the Sheets error.")
         return False
 
-    finalize_tennis_workbook()
+    finalize_tennis_workbook(sheet_name)
 
     sign = "+" if pnl >= 0 else ""
-    print(f"Updated  : {match_name}")
+    print(f"Updated  : {match_name}  ('{sheet_name}' tab)")
     print(f"Result   : {result}")
     print(f"P&L      : {sign}{pnl:.2f} units  (odds {odds:.2f}, {_basis})")
     return True
@@ -948,5 +1008,6 @@ if __name__ == "__main__":
 
     load_env()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    init_tennis_sheet()
-    print(f"'{TENNIS_SHEET_NAME}' tab ready.")
+    for _name in TENNIS_MODEL_TABS.values():
+        init_tennis_sheet(_name)
+        print(f"'{_name}' tab ready.")

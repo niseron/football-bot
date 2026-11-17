@@ -34,6 +34,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 from tennis_excel_tracker import (
+    TENNIS_MODEL_TABS,
     finalize_tennis_workbook,
     get_pending_tennis_picks,
     update_tennis_row_result,
@@ -303,20 +304,30 @@ def _score_description(p1_name: str, p2_name: str, result_str: str) -> str:
 
 def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, list[dict]]:
     """
-    Scan pending Tennis Picks rows, fetch completed matches from the Tennis
-    API, update the sheet. Returns (stats_dict, list_of_newly_resolved_picks)
-    — the same contract as football's run_auto_results.
+    Scan pending rows in EVERY tennis tab (the Sonnet history 'Tennis Picks'
+    and the Opus 'Tennis Opus', whichever model is active — a switch must never
+    strand the other tab's pending rows), fetch completed matches from the
+    Tennis API, update each row in its own tab. Returns (stats_dict,
+    list_of_newly_resolved_picks) — the same contract as football's
+    run_auto_results; each resolved pick carries its 'tab'.
     """
     stats = {"checked": 0, "updated": 0, "not_finished": 0, "no_match": 0, "errors": 0}
     resolved: list[dict] = []
-
-    pending = get_pending_tennis_picks(lookback_days)
-    if not pending:
-        log.info("No pending tennis picks in the lookback window.")
-        return stats, resolved
-
-    log.info("Found %d pending tennis pick(s) to check.", len(pending))
     _past_matches_cache.clear()   # players add matches daily — never serve a stale feed
+    for tab in TENNIS_MODEL_TABS.values():
+        _settle_tennis_tab(tab, lookback_days, stats, resolved)
+    return stats, resolved
+
+
+def _settle_tennis_tab(tab: str, lookback_days: int, stats: dict, resolved: list[dict]) -> None:
+    """Settle one tab's pending rows into `stats` / `resolved`."""
+    pending = get_pending_tennis_picks(lookback_days, sheet_name=tab)
+    if not pending:
+        log.info("No pending tennis picks in '%s' within the lookback window.", tab)
+        return
+
+    log.info("Found %d pending tennis pick(s) to check in '%s'.", len(pending), tab)
+    updated_before = stats["updated"]
     now = datetime.now(timezone.utc)
 
     for p in pending:
@@ -424,7 +435,7 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
         # PENDING while Discord said it had settled, and it then aged out of the
         # lookback window unnoticed. A failed write now leaves the row PENDING
         # (so the next 30-minute cycle retries it) and announces nothing.
-        if not update_tennis_row_result(p["sheet_row"], result, pnl):
+        if not update_tennis_row_result(p["sheet_row"], result, pnl, sheet_name=tab):
             log.error(
                 "%s [%s→%s] — Sheets write FAILED, leaving PENDING for the next "
                 "cycle and NOT reporting it settled", match, p["pick"], result,
@@ -441,6 +452,7 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
         log.info("%s [%s→%s]  %s  P&L %+.2f", match, p["pick"], result, result_str, pnl)
 
         resolved.append({
+            "tab":        tab,
             "match":      match,
             "bet_type":   p["bet_type"],
             "pick":       p["pick"],
@@ -450,15 +462,14 @@ def run_tennis_auto_results(lookback_days: int = LOOKBACK_DAYS) -> tuple[dict, l
             "score_desc": score_desc,
         })
 
-    if stats["updated"]:
-        log.info("Tennis Picks sheet updated — %d row(s) written.", stats["updated"])
-        # Rebuild running P&L / simulated bankroll columns and the Tennis
-        # Summary tab once per run — mirrors football's finalize_workbook()
-        finalize_tennis_workbook()
+    written = stats["updated"] - updated_before
+    if written:
+        log.info("'%s' updated — %d row(s) written.", tab, written)
+        # Rebuild this tab's running P&L / simulated bankroll columns and its
+        # summary tab once per run — mirrors football's finalize_workbook()
+        finalize_tennis_workbook(tab)
     else:
-        log.info("No tennis changes.")
-
-    return stats, resolved
+        log.info("No tennis changes in '%s'.", tab)
 
 
 if __name__ == "__main__":

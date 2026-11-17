@@ -1,7 +1,7 @@
 """
-CLI to manually settle a TENNIS pick in the 'Tennis Picks' Google Sheet tab.
-
-Tennis results are currently settled manually (no tennis auto-results job yet).
+CLI to manually settle or override a TENNIS pick. Searches the active model's
+tab first ('Tennis Opus' while TENNIS_MODEL is Opus), then the Sonnet history
+('Tennis Picks'). The pick is paid at its market price when one was captured.
 
 Usage:
     python tennis_update_result.py "Sinner vs Alcaraz" "Match Winner" WIN

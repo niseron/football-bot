@@ -1,8 +1,10 @@
 """
 tennis_calibration.py — probability calibration engine for the TENNIS system.
 
-Same logic as the football calibration.py, but reads EXCLUSIVELY from the
-'Tennis Picks' tab via tennis_excel_tracker. Its Brier score, edge report,
+Same logic as the football calibration.py, but reads EXCLUSIVELY from a
+tennis picks tab via tennis_excel_tracker — by default the ACTIVE model's tab
+(TENNIS_MODEL; 'Tennis Opus' from 17 Nov 2026). Pass --tab "Tennis Picks" for
+the Sonnet history (10 Jul - 17 Nov 2026). The two tabs are never merged. Its Brier score, edge report,
 CLV report, and 300-settled-pick meaningfulness threshold are all computed
 independently of the football system — the two datasets are never merged.
 
@@ -10,13 +12,14 @@ Tennis data collection start: 9 Jul 2026. Do not draw conclusions from these
 reports before ~300 settled tennis picks with probability data exist.
 
 Run manually:
-    python tennis_calibration.py
+    python tennis_calibration.py                       # active model's tab
+    python tennis_calibration.py --tab "Tennis Picks"  # Sonnet history
 """
 from __future__ import annotations
 
 import logging
 
-from tennis_excel_tracker import _tennis_ws, TENNIS_SETTLED_RESULTS
+from tennis_excel_tracker import TENNIS_SETTLED_RESULTS, _tennis_ws, active_tennis_tab
 
 log = logging.getLogger(__name__)
 
@@ -41,14 +44,14 @@ def _safe_float(val: str) -> float | None:
         return None
 
 
-def _settled_tennis_prob_rows() -> list[dict] | None:
+def _settled_tennis_prob_rows(sheet_name: str | None = None) -> list[dict] | None:
     """
     Settled tennis picks that carry a Claude Prob value, as dicts with:
     claude_prob, market_prob (may be None), result, pnl (may be None),
     outcome (1.0 WIN / 0.0 LOSS / None VOID). None on any read failure.
     """
     try:
-        rows = _tennis_ws().get_all_values()
+        rows = _tennis_ws(sheet_name or active_tennis_tab()).get_all_values()
     except Exception as exc:
         log.warning("tennis_calibration: Sheets read failed: %s", exc)
         return None
@@ -82,7 +85,7 @@ def _settled_tennis_prob_rows() -> list[dict] | None:
     return out
 
 
-def tennis_calibration_report() -> dict | None:
+def tennis_calibration_report(sheet_name: str | None = None) -> dict | None:
     """
     Bucket settled tennis picks by Claude's stated probability and compare the
     average stated probability against the actual win rate per bucket, plus a
@@ -91,7 +94,7 @@ def tennis_calibration_report() -> dict | None:
     Returns {"buckets": [...], "brier_score": float | None,
              "sample_size": int, "meaningful": bool} or None on failure.
     """
-    rows = _settled_tennis_prob_rows()
+    rows = _settled_tennis_prob_rows(sheet_name)
     if rows is None:
         return None
 
@@ -122,7 +125,7 @@ def tennis_calibration_report() -> dict | None:
     }
 
 
-def tennis_edge_report() -> dict | None:
+def tennis_edge_report(sheet_name: str | None = None) -> dict | None:
     """
     For settled tennis picks with both Claude Prob and Market Prob:
       - average edge (Claude Prob − Market Prob) for winners vs losers
@@ -130,7 +133,7 @@ def tennis_edge_report() -> dict | None:
 
     Returns None on failure.
     """
-    rows = _settled_tennis_prob_rows()
+    rows = _settled_tennis_prob_rows(sheet_name)
     if rows is None:
         return None
 
@@ -169,7 +172,7 @@ _EMPTY_CLV_REPORT: dict = {
 }
 
 
-def tennis_clv_report() -> dict | None:
+def tennis_clv_report(sheet_name: str | None = None) -> dict | None:
     """
     Closing Line Value for settled tennis picks with both an original 'Odds'
     and a logged 'Closing Odds' value:
@@ -188,7 +191,7 @@ def tennis_clv_report() -> dict | None:
     this one, exactly as before.
     """
     try:
-        rows = _tennis_ws().get_all_values()
+        rows = _tennis_ws(sheet_name or active_tennis_tab()).get_all_values()
     except Exception as exc:
         log.warning("tennis_clv_report: Sheets read failed: %s", exc)
         return None
@@ -251,9 +254,13 @@ if __name__ == "__main__":
     load_env()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
+    import sys as _sys
+    _tab = (_sys.argv[_sys.argv.index("--tab") + 1]
+            if "--tab" in _sys.argv[:-1] else active_tennis_tab())
+    print(f"Tennis reports for the '{_tab}' tab")
     print("Tennis calibration report:")
-    print(_json.dumps(tennis_calibration_report(), indent=2))
+    print(_json.dumps(tennis_calibration_report(_tab), indent=2))
     print("\nTennis edge report:")
-    print(_json.dumps(tennis_edge_report(), indent=2))
+    print(_json.dumps(tennis_edge_report(_tab), indent=2))
     print("\nTennis CLV report:")
-    print(_json.dumps(tennis_clv_report(), indent=2))
+    print(_json.dumps(tennis_clv_report(_tab), indent=2))

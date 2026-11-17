@@ -66,6 +66,21 @@ football `results-cards` channel.
 `TELEGRAM_TENNIS_CHANNEL_ID` was removed on 10 Jul 2026 and every remaining
 `TELEGRAM_*` variable on 18 Aug 2026; do not reintroduce any of them.
 
+**Tennis model and tabs (17 Nov 2026).** `TENNIS_MODEL` (env var) picks the
+model — `claude-opus-5-5` by default, `claude-sonnet-4-6` to switch back with no
+code change — and each model writes to its OWN tab ('Tennis Opus' / 'Tennis
+Picks') with its own SIM bankroll, summary and calibration. Never write one
+model's picks into the other's tab. Settlement (`run_tennis_auto_results`) always
+covers BOTH tabs. Subscriber-facing text never names a model or vendor (embeds,
+card, scrubbed picks-failed alert). Opus 5.5 rejects any temperature, needs the
+first TEXT block parsed, and gets `max_tokens=16000`. Tennis rows settle at the
+market price whenever one was captured ('Market Odds', else 'Market Prob %').
+Pick-time Odds API prices are ON (`TENNIS_ODDS_API_ENABLED`); closing-odds
+polling stays OFF (`TENNIS_CLOSING_ODDS_ENABLED`). Pick rules since 17 Nov 2026:
+Match Winner (below 2.00 on the paid price) and Set Betting only — enforced in
+code by `apply_tennis_pick_rules`, not just the prompt. Pinned by
+`tests/test_tennis.py`.
+
 Sheet writers in this pipeline return `bool` and their callers gate on it
 (fixed 13 Aug 2026): `update_tennis_row_result` and `update_tennis_closing_odds`
 used to swallow exceptions and return `None`, so a failed write still counted as

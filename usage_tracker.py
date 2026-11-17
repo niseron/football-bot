@@ -62,6 +62,10 @@ ANTHROPIC_PRICING: dict[str, tuple[float, float]] = {
     # whose output dwarfs the Sonnet row on the same fixtures is that, not a
     # bug.
     "claude-opus-5": (5.00, 25.00),
+    # Added 17 Nov 2026 when the tennis picks moved to Claude Opus 5.5: $4 /
+    # input MTok and $20 / output MTok (the claude-api reference, cached 3 Nov
+    # 2026). Thinking cannot be switched off on Opus 5.5 and bills as output.
+    "claude-opus-5-5": (4.00, 20.00),
 }
 # Cache reads bill at ~0.1x input, 5-minute cache writes at ~1.25x input.
 # The bot sends no cache_control today, so these are 0 — included so the

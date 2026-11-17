@@ -41,8 +41,11 @@ from card_generator import generate_tennis_picks_card
 from discord_bot import build_pick_embed, send_to_discord
 from env_loader import load_env
 from tennis_excel_tracker import (
+    TENNIS_MODEL_OPUS,
+    active_tennis_tab,
     calculate_tennis_kelly_stake,
     log_tennis_pick,
+    tennis_model,
     tennis_picks_exist_for_today,
 )
 
@@ -87,6 +90,24 @@ TENNIS_TOP_TIER_LABEL = f"Top {TENNIS_RANK_THRESHOLD}"
 TENNIS_LOWER_TIER_LABEL = "Lower Ranked"
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# ── The tennis model (17 Nov 2026) ────────────────────────────────────────────
+# TENNIS_MODEL (env var, read on every run) chooses the model; default Opus 5.5.
+# Each model writes to its own Sheet tab — see tennis_excel_tracker.TENNIS_MODEL_TABS.
+# Set TENNIS_MODEL=claude-sonnet-4-6 on Railway to switch back without a code
+# change. Opus 5.5 differs from Sonnet 4.6 in four ways that matter here:
+#   * no temperature — any sampling parameter is a 400 on Opus 5.5;
+#   * thinking is always on and bills as output; effort is the only control,
+#     and its default is 'medium', so it is set explicitly;
+#   * thinking blocks come BEFORE the text block — read the first text block,
+#     never content[0];
+#   * max_tokens covers thinking + answer together, so 2048 would truncate.
+# No server-side refusal fallback: a fallback would hand the slate to another
+# model and log its picks in the Opus book. A refusal fails the run instead
+# (picks-failed alert), which the book can tell apart.
+TENNIS_OPUS_MAX_TOKENS = 16000
+TENNIS_OPUS_EFFORT = "high"
+TENNIS_SONNET_MAX_TOKENS = 2048
 
 
 # ── RapidAPI helpers ──────────────────────────────────────────────────────────
@@ -973,15 +994,26 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
         for tour, fixtures in fixtures_by_tour.items()
     }
     payload = json.dumps(clean, indent=2, default=str)
-    message = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        # temperature=0 via extra_body — anthropic 1.x removed the kwarg;
-        # Sonnet 4.6 still honours it and 0 keeps picks reproducible.
-        extra_body={"temperature": 0},
-        system=TENNIS_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": f"Upcoming tennis fixtures (next 48 hours):\n\n{payload}"}],
-    )
+    model = tennis_model()
+    messages = [{"role": "user", "content": f"Upcoming tennis fixtures (next 48 hours):\n\n{payload}"}]
+    if model == TENNIS_MODEL_OPUS:
+        message = claude.messages.create(
+            model=model,
+            max_tokens=TENNIS_OPUS_MAX_TOKENS,
+            output_config={"effort": TENNIS_OPUS_EFFORT},
+            system=TENNIS_SYSTEM_PROMPT,
+            messages=messages,
+        )
+    else:
+        message = claude.messages.create(
+            model=model,
+            max_tokens=TENNIS_SONNET_MAX_TOKENS,
+            # temperature=0 via extra_body — anthropic 1.x removed the kwarg;
+            # Sonnet 4.6 still honours it and 0 keeps picks reproducible.
+            extra_body={"temperature": 0},
+            system=TENNIS_SYSTEM_PROMPT,
+            messages=messages,
+        )
     # Record token usage before the parse below can raise — the call is
     # billed whether or not we manage to read the JSON.
     try:
@@ -990,8 +1022,14 @@ def analyse_tennis_with_claude(fixtures_by_tour: dict[str, list[dict]]) -> list[
     except Exception as exc:
         log.debug("usage recording skipped: %s", exc)
 
-    raw = message.content[0].text.strip()
-    log.info("Claude raw tennis response (%d chars):\n%s", len(raw), raw)
+    stop = getattr(message, "stop_reason", None)
+    if stop == "refusal":
+        raise RuntimeError("the model declined the request (stop_reason=refusal)")
+    if stop == "max_tokens":
+        log.warning("Tennis response hit max_tokens (%s) — the JSON may be cut short", model)
+    # First TEXT block, never content[0]: Opus returns thinking blocks first
+    raw = next((b.text for b in message.content if getattr(b, "type", "") == "text"), "").strip()
+    log.info("Tennis model response (%s, %d chars):\n%s", model, len(raw), raw)
 
     try:
         data = json.loads(raw)
@@ -1109,6 +1147,8 @@ async def daily_tennis_picks_job():
     if tennis_picks_exist_for_today():
         log.info("Tennis picks already logged for today — skipping")
         return
+    tab = active_tennis_tab()
+    log.info("Tennis model %s → writing to the '%s' tab", tennis_model(), tab)
 
     try:
         raw_by_tour = fetch_upcoming_tennis_matches()
@@ -1143,7 +1183,7 @@ async def daily_tennis_picks_job():
         _notify_tennis_picks_failed("the analysis could not be completed", detail=str(exc))
         try:
             from usage_tracker import alert_anthropic_failure
-            alert_anthropic_failure("tennis-picks", exc, "claude-sonnet-4-6")
+            alert_anthropic_failure("tennis-picks", exc, tennis_model())
         except Exception as inner:
             log.debug("failure alert skipped: %s", inner)
         return
@@ -1180,7 +1220,7 @@ async def daily_tennis_picks_job():
             # Size on the price that will be PAID — market when matched
             kelly = calculate_tennis_kelly_stake(
                 pick["bet_type"], float(pick.get("market_odds") or pick["odds"]),
-                pick.get("confidence", ""),
+                pick.get("confidence", ""), sheet_name=tab,
             )
             pick["kelly"] = kelly
             stake = float(kelly.get("stake") or 0)
@@ -1216,6 +1256,7 @@ async def daily_tennis_picks_job():
                 stake_eur=kelly.get("stake"),
                 player_ids=pick.get("player_ids") or None,
                 market_odds=pick.get("market_odds"),
+                sheet_name=tab,
             )
         except Exception as exc:
             # Unknown outcome — treat as publishable, same fail-open rule.
